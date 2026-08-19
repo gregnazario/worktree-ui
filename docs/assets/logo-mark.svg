@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 176 176" width="176" height="176">
+  <!-- worktree-tool mark, no background: the same commit-graph fork as
+       logo.svg, transparent behind. -->
+  <g fill="none" stroke="#F05032" stroke-width="20" stroke-linecap="round">
+    <path d="M50 162 L50 34"/>
+    <path d="M50 98 C 106 98 138 82 138 34"/>
+  </g>
+  <circle cx="50" cy="162" r="19" fill="#F05032"/>
+  <circle cx="50" cy="34" r="19" fill="#F05032"/>
+  <circle cx="138" cy="34" r="27" fill="none" stroke="#89b4fa" stroke-opacity="0.25" stroke-width="6"/>
+  <circle cx="138" cy="34" r="19" fill="#89b4fa"/>
+</svg>

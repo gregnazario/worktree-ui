@@ -10,10 +10,14 @@
 A native GUI for managing [git worktrees](https://git-scm.com/docs/git-worktree),
 built in Rust with [GPUI](https://gpui.rs) (Zed's GPU-accelerated UI framework).
 
+**[Website, tutorials, and examples →](https://gregnazario.github.io/worktree-ui/)**
+
 Lists every worktree of a repository with its branch, status (dirty files,
 ahead/behind vs upstream), and offers create / remove / prune operations plus
 quick actions (open in terminal, show in file manager, copy path).
 Keyboard-first.
+
+<img src="docs/assets/screenshot.png" width="860" alt="worktree-tool showing three worktrees with clean, dirty, and ahead statuses">
 
 ## Install (macOS)
 
@@ -63,6 +67,10 @@ current working directory:
 cd ~/git/myrepo
 cargo run --release
 ```
+
+For step-by-step tutorials (first worktree, terminal setup, cleanup) and
+example workflows (hotfix mid-feature, PR review checkouts, parallel test
+runs), see the [website](https://gregnazario.github.io/worktree-ui/#tutorials).
 
 ### Shortcuts
 

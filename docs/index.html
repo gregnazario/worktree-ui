@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>worktree-tool — a native GUI for git worktrees</title>
+  <meta name="description" content="A fast, keyboard-first, GPU-rendered GUI for managing git worktrees. Rust + GPUI. macOS, Linux, Windows, FreeBSD.">
+  <link rel="icon" type="image/png" href="assets/logo-128.png">
+  <style>
+    :root {
+      --bg: #1e1e2e; --panel: #181825; --surface: #313244; --border: #45475a;
+      --text: #cdd6f4; --dim: #6c7086; --accent: #89b4fa; --orange: #f05032;
+      --green: #a6e3a1; --yellow: #f9e2af; --red: #f38ba8;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 5rem; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font-family: var(--sans); line-height: 1.65; font-size: 16.5px;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: var(--mono); font-size: 0.88em; background: var(--surface);
+           padding: .15em .4em; border-radius: 5px; }
+    pre { background: var(--panel); border: 1px solid var(--border);
+          border-radius: 10px; padding: 1rem 1.2rem; overflow-x: auto; }
+    pre code { background: none; padding: 0; font-size: 0.86em; line-height: 1.6; }
+    h1, h2, h3 { line-height: 1.25; }
+    h2 { border-bottom: 1px solid var(--border); padding-bottom: .4rem; margin-top: 3rem; }
+
+    nav {
+      position: sticky; top: 0; z-index: 10; display: flex; align-items: center;
+      gap: 1.25rem; padding: .7rem 1.5rem; background: rgba(24,24,37,.92);
+      backdrop-filter: blur(8px); border-bottom: 1px solid var(--border);
+    }
+    nav .brand { display: flex; align-items: center; gap: .6rem; font-weight: 700; }
+    nav .brand img { width: 26px; height: 26px; }
+    nav a { color: var(--dim); font-size: .92rem; }
+    nav a:hover { color: var(--text); }
+    nav .spacer { flex: 1; }
+
+    main { max-width: 52rem; margin: 0 auto; padding: 0 1.5rem 5rem; }
+    .hero { text-align: center; padding: 4.5rem 0 3rem; }
+    .hero img.logo { width: 128px; height: 128px; }
+    .hero h1 { font-size: 2.6rem; margin: 1rem 0 .4rem; }
+    .hero h1 .orange { color: var(--orange); }
+    .hero p.tagline { font-size: 1.2rem; color: var(--dim); margin: 0 auto 1.6rem; max-width: 36rem; }
+    .cta { display: inline-block; background: var(--orange); color: #11111b;
+           font-weight: 700; padding: .7rem 1.5rem; border-radius: 10px; margin: 0 .4rem; }
+    .cta:hover { text-decoration: none; filter: brightness(1.1); }
+    .cta.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+    .badges { margin-top: 1.4rem; }
+    .badges img { height: 20px; margin: 0 .2rem; }
+
+    .shot { width: 100%; border: 1px solid var(--border); border-radius: 12px;
+            margin: 1.5rem 0; display: block; box-shadow: 0 12px 40px rgba(0,0,0,.45); }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; }
+    .card { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 12px; padding: 1rem 1.2rem; }
+    .card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+    .card p { margin: 0; color: var(--dim); font-size: .93rem; }
+
+    table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+    th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--border); }
+    th { color: var(--dim); font-weight: 600; }
+    td code, th code { white-space: nowrap; }
+
+    kbd { font-family: var(--mono); background: var(--surface); border: 1px solid var(--border);
+          border-bottom-width: 2px; border-radius: 5px; padding: .05em .45em; font-size: .85em; }
+
+    .step { display: flex; gap: 1rem; margin: 1.4rem 0; }
+    .step .n { flex: none; width: 2rem; height: 2rem; border-radius: 50%;
+               background: var(--surface); color: var(--accent); font-weight: 700;
+               display: flex; align-items: center; justify-content: center; }
+    .note { border-left: 3px solid var(--accent); background: var(--panel);
+            padding: .7rem 1rem; border-radius: 0 8px 8px 0; color: var(--dim); font-size: .93rem; }
+    .warn { border-left-color: var(--yellow); }
+
+    footer { border-top: 1px solid var(--border); color: var(--dim);
+             text-align: center; padding: 2rem 1rem; font-size: .9rem; }
+  </style>
+</head>
+<body>
+<nav>
+  <a class="brand" href="#"><img src="assets/logo.svg" alt=""> worktree-tool</a>
+  <span class="spacer"></span>
+  <a href="#what">What</a>
+  <a href="#features">Features</a>
+  <a href="#tutorials">Tutorials</a>
+  <a href="#examples">Examples</a>
+  <a href="#shortcuts">Keys</a>
+  <a href="#terminals">Terminals</a>
+  <a href="#development">Develop</a>
+  <a href="https://github.com/gregnazario/worktree-ui">GitHub</a>
+</nav>
+
+<main>
+  <section class="hero">
+    <img class="logo" src="assets/logo.svg" alt="worktree-tool logo">
+    <h1>worktree<span class="orange">-tool</span></h1>
+    <p class="tagline">A fast, keyboard-first, GPU-rendered GUI for managing
+      <strong>git worktrees</strong>. Built in Rust with
+      <a href="https://gpui.rs">GPUI</a>. Native on macOS, Linux, Windows, and FreeBSD.</p>
+    <a class="cta" href="https://github.com/gregnazario/worktree-ui/releases">Download for macOS</a>
+    <a class="cta secondary" href="https://github.com/gregnazario/worktree-ui">View source</a>
+    <div class="badges">
+      <img src="https://img.shields.io/github/actions/workflow/status/gregnazario/worktree-ui/ci.yml?label=CI" alt="CI">
+      <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
+      <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20FreeBSD-89b4fa" alt="platforms">
+    </div>
+    <img class="shot" src="assets/screenshot.png" alt="worktree-tool showing a repository with three worktrees, one clean, one dirty, one ahead">
+  </section>
+
+  <section id="what">
+    <h2>What is it for?</h2>
+    <p>Git worktrees let you check out <em>multiple branches of the same
+      repository at the same time</em>, each in its own directory — no
+      stashing, no re-cloning, no <code>git checkout</code> roulette while
+      you're mid-change. They're one of git's best features and one of its
+      most awkward: everything happens through <code>git worktree add/list/
+      remove</code>, there's no overview of what exists, and a dirty worktree
+      refuses to be removed with a wall of stderr.</p>
+    <p><strong>worktree-tool turns that into a single window:</strong> every
+      worktree of your repository with its branch, uncommitted changes, and
+      ahead/behind position; create, remove, and prune without memorizing
+      flags; and one keypress to open any of them in your terminal.</p>
+
+    <h3>How it works</h3>
+    <p>The app is a thin, fast layer over git itself — it never rewrites your
+      repository through a library:</p>
+    <ul>
+      <li><strong>Listing &amp; status</strong> come from
+        <code>git worktree list --porcelain</code> and
+        <code>git status --porcelain=v2</code>, run concurrently across your
+        worktrees on background threads (a 50-worktree refresh takes ~140&nbsp;ms).</li>
+      <li><strong>Everything runs off the UI thread</strong> — git calls are
+        blocking <code>std::process</code> invocations on GPUI's background
+        executor, so the window never stutters.</li>
+      <li><strong>Mutations</strong> (<code>add</code>, <code>remove</code>,
+        <code>prune</code>) are the same commands you'd type, with
+        <code>--</code> separators so nothing you type can be mistaken for a
+        git flag.</li>
+      <li><strong>Rendering</strong> is GPU-accelerated via GPUI (Zed's
+        framework): Metal on macOS, Vulkan on Linux, Direct3D on Windows.</li>
+    </ul>
+  </section>
+
+  <section id="features">
+    <h2>Features</h2>
+    <div class="grid">
+      <div class="card"><h3>Live status badges</h3><p>Per worktree: staged / modified / untracked counts and ↑ahead / ↓behind vs upstream. Dirty worktrees are flagged in amber.</p></div>
+      <div class="card"><h3>Safe removal</h3><p>Removal warns about uncommitted changes and lets git refuse — force is an explicit, separate opt-in.</p></div>
+      <div class="card"><h3>Search as you type</h3><p>Case-insensitive filter over branch names and paths, driven straight from the keyboard.</p></div>
+      <div class="card"><h3>Your terminal, your choice</h3><p>Opens worktrees in your terminal — auto-detected, or pinned in settings. 26 terminals across 4 platforms.</p></div>
+      <div class="card"><h3>Keyboard-first</h3><p>n, /, r, arrows, enter, backspace — the whole workflow works without touching the mouse.</p></div>
+      <div class="card"><h3>Native &amp; tiny</h3><p>~6&nbsp;MB universal macOS binary, ~110&nbsp;ms cold start, ~63&nbsp;MB RSS. No Electron, no webview.</p></div>
+    </div>
+  </section>
+
+  <section id="tutorials">
+    <h2>Tutorials</h2>
+
+    <h3>Install</h3>
+    <div class="step"><div class="n">1</div><div>
+      <p><strong>macOS:</strong> download
+        <code>worktree-tool-&lt;version&gt;-macos-universal.zip</code> from the
+        <a href="https://github.com/gregnazario/worktree-ui/releases">releases page</a>,
+        unzip, and drag <em>Worktree Tool.app</em> to <code>/Applications</code>.
+        The build is ad-hoc signed, so on first launch right-click → <em>Open</em>
+        to get past Gatekeeper.</p></div></div>
+    <div class="step"><div class="n">2</div><div>
+      <p><strong>Any platform, from source:</strong></p>
+      <pre><code>git clone https://github.com/gregnazario/worktree-ui
+cd worktree-ui
+cargo build --release        # first build takes a few minutes
+# binary: target/release/worktree-tool</code></pre></div></div>
+
+    <h3>Your first five minutes</h3>
+    <div class="step"><div class="n">1</div><div>
+      <p><strong>Open a repository.</strong> Run the binary from inside a git
+        repository — it detects the repo from the working directory. Launched
+        from Finder/Dock you'll get a path picker instead; type or paste the
+        repository path and press <em>Load</em>.</p></div></div>
+    <div class="step"><div class="n">2</div><div>
+      <p><strong>Read the room.</strong> The main worktree is tagged
+        <code style="color:var(--accent)">main</code>; linked worktrees are
+        <code style="color:var(--accent)">linked</code>. Amber badges mean
+        uncommitted work; <code>↑2</code> means 2 commits ahead of upstream.</p></div></div>
+    <div class="step"><div class="n">3</div><div>
+      <p><strong>Create a worktree.</strong> Press <kbd>n</kbd>. Give the
+        branch a name — the destination path fills in automatically as
+        <code>&lt;repo&gt;-worktrees/&lt;branch&gt;</code> next to your repo
+        (edit it if you like), pick a base branch, and hit <em>Create</em>.
+        Your existing checkout is untouched.</p></div></div>
+    <div class="step"><div class="n">4</div><div>
+      <p><strong>Jump into it.</strong> Select the row and press
+        <kbd>enter</kbd> — a terminal opens with that worktree as its working
+        directory. <em>Copy Path</em> and <em>Show in Finder</em> are one
+        click away in the detail pane.</p></div></div>
+    <div class="step"><div class="n">5</div><div>
+      <p><strong>Clean up.</strong> Merged the branch? Select the worktree and
+        press <kbd>backspace</kbd>. If it has uncommitted changes the dialog
+        tells you and refuses unless you explicitly check <em>Force</em>.
+        Deleted a worktree folder behind git's back? <em>Prune</em> clears the
+        stale entry.</p></div></div>
+
+    <h3>Pick your terminal</h3>
+    <p>Press the <em>Settings</em> button in the toolbar. It lists every
+      terminal installed on your machine — click one to pin it. Preferences
+      are stored at an XDG path on every platform:</p>
+    <pre><code>$XDG_CONFIG_HOME/worktree-tool/settings.toml   # default: ~/.config/worktree-tool/settings.toml
+
+# terminal: one of terminal, iterm, wezterm, ghostty, alacritty, kitty, warp, hyper
+terminal = "iterm"</code></pre>
+    <div class="note">Resolution order: <code>settings.toml</code> → the
+      <code>$TERMCMD</code> environment variable (Zed's convention) → first
+      auto-detected terminal. Unset the preference to go back to automatic.</div>
+  </section>
+
+  <section id="examples">
+    <h2>Example workflows</h2>
+    <table>
+      <tr><th>Workflow</th><th>How</th></tr>
+      <tr><td><strong>Hotfix mid-feature</strong></td>
+          <td>Press <kbd>n</kbd>, base <code>main</code>, branch <code>hotfix/crash</code>, create. You get a second checkout instantly; your feature worktree keeps its uncommitted state. Ship the fix, <kbd>backspace</kbd> the worktree, done.</td></tr>
+      <tr><td><strong>Run tests on main while editing a branch</strong></td>
+          <td>Keep <code>main</code> in one worktree and your branch in another; <kbd>enter</kbd> opens each in its own terminal so long test runs and editing never fight over one checkout.</td></tr>
+      <tr><td><strong>Review someone's PR locally</strong></td>
+          <td>Create a worktree for <code>their-branch</code> (existing-branch mode), build and run it there, remove afterwards — your checkout never moves.</td></tr>
+      <tr><td><strong>Audit parallel experiments</strong></td>
+          <td>Type <kbd>/</kbd> then a branch fragment to slice the list; the status badges show at a glance which experiments have uncommitted or unpushed work worth rescuing before you prune.</td></tr>
+    </table>
+  </section>
+
+  <section id="shortcuts">
+    <h2>Keyboard shortcuts</h2>
+    <table>
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td><kbd>n</kbd> / <kbd>⌘n</kbd></td><td>New worktree</td></tr>
+      <tr><td><kbd>/</kbd> / <kbd>⌘f</kbd></td><td>Focus search</td></tr>
+      <tr><td><kbd>esc</kbd></td><td>Clear search / close dialog</td></tr>
+      <tr><td><kbd>r</kbd> / <kbd>⌘r</kbd></td><td>Refresh statuses</td></tr>
+      <tr><td><kbd>↑</kbd> <kbd>↓</kbd></td><td>Move selection</td></tr>
+      <tr><td><kbd>enter</kbd></td><td>Open selection in terminal</td></tr>
+      <tr><td><kbd>backspace</kbd> / <kbd>delete</kbd></td><td>Remove selected worktree</td></tr>
+      <tr><td><kbd>⌘q</kbd></td><td>Quit</td></tr>
+    </table>
+    <p style="color:var(--dim);font-size:.93rem">In text fields:
+      <kbd>enter</kbd> confirms a dialog, <kbd>esc</kbd> cancels,
+      <kbd>←</kbd><kbd>→</kbd><kbd>home</kbd><kbd>end</kbd> move the caret.
+      IME/marked-text input is not supported yet.</p>
+  </section>
+
+  <section id="terminals">
+    <h2>Terminal support</h2>
+    <table>
+      <tr><th>Platform</th><th>Terminals, in auto-detect preference order</th></tr>
+      <tr><td>macOS</td><td>Terminal, iTerm2, WezTerm, Ghostty, Alacritty, Kitty, Warp, Hyper</td></tr>
+      <tr><td>Linux / BSD</td><td>xdg-terminal-exec, GNOME Terminal, Konsole, Xfce Terminal, foot, Tilix, Kitty, Ghostty, Alacritty, WezTerm, xterm</td></tr>
+      <tr><td>Windows</td><td>Windows Terminal, PowerShell 7, Windows PowerShell, Command Prompt, Alacritty, WezTerm, Ghostty</td></tr>
+    </table>
+    <p style="color:var(--dim);font-size:.93rem">CLI terminals launch with the
+      worktree as their working directory; macOS bundles launch via
+      <code>open -a</code>; Windows Terminal gets an explicit
+      <code>-d</code> flag. "Show in Finder / Files / File Explorer" reveals
+      the worktree selected in its parent folder.</p>
+  </section>
+
+  <section id="development">
+    <h2>Development</h2>
+    <pre><code>cargo build                 # first build compiles GPUI's shader stack
+cargo test                  # 28 tests: parsers, git integration, headless GPUI UI tests
+cargo clippy --all-targets -- -D warnings
+cargo run --release --example bench    # performance harness
+scripts/package-macos.sh 0.1.0         # universal .app bundle + zip</code></pre>
+    <p>CI runs the full test suite on macOS, Linux, Windows, and a FreeBSD VM
+      on every push; tagging a release <code>v*</code> builds and publishes
+      the macOS package. The project is <a href="https://github.com/gregnazario/worktree-ui/blob/main/LICENSE">Apache-2.0</a>.</p>
+  </section>
+</main>
+
+<footer>
+  <img src="assets/logo-mark.svg" width="28" alt="" style="opacity:.6">
+  <p><a href="https://github.com/gregnazario/worktree-ui">gregnazario/worktree-ui</a>
+     · Apache-2.0 · built with <a href="https://gpui.rs">GPUI</a></p>
+</footer>
+</body>
+</html>
