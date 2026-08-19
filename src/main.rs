@@ -1,33 +1,39 @@
 use gpui::{
-    App, AppContext, Application, Bounds, Context, IntoElement, ParentElement, Point, Render,
-    Styled, Window, WindowBounds, WindowOptions, div, px, rgb, size,
+    App, Application, Bounds, KeyBinding, Point, TitlebarOptions, WindowBounds, WindowOptions,
+    px, size,
 };
+use worktree_tool::store::WorktreeStore;
+use worktree_tool::ui::{FocusSearch, NewWorktree, Quit, Refresh, RootView};
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-n", NewWorktree, Some("Root")),
+            KeyBinding::new("cmd-r", Refresh, Some("Root")),
+            KeyBinding::new("cmd-f", FocusSearch, Some("Root")),
+        ]);
+
         let bounds = Bounds {
             origin: Point::default(),
             size: size(px(960.), px(640.)),
         };
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Worktree Tool".into()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
-        cx.open_window(options, |_, cx| cx.new(|_| Hello)).unwrap();
+        cx.open_window(options, |window, cx| {
+            let store = WorktreeStore::new(cx);
+            RootView::new(store, window, cx)
+        })
+        .unwrap();
+
+        // Keep the app-lifetime subscriptions alive for the whole process.
+        std::mem::forget(cx.on_window_closed(|cx| cx.quit()));
+        cx.on_action(|_: &Quit, cx| cx.quit());
     });
-}
-
-struct Hello;
-
-impl Render for Hello {
-    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .justify_center()
-            .items_center()
-            .size_full()
-            .bg(rgb(0x1e1e2e))
-            .text_color(rgb(0xcdd6f4))
-            .child("worktree-tool")
-    }
 }

@@ -134,6 +134,31 @@ impl WorktreeStore {
         self.refresh(cx);
     }
 
+    /// Validates a user-entered path and loads it as the active repository.
+    pub fn load_repo_from_user_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.busy = true;
+        self.status_message = Some("Opening repository…".into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { git::repo_root(&path).await })
+                .await;
+            this.update(cx, |store, cx| {
+                store.busy = false;
+                match result {
+                    Ok(root) => store.load_repo(root, cx),
+                    Err(e) => {
+                        store.status_message = Some(format!("Not a git repository: {}", e.message));
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn load_branch_metadata(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let (default_base, branches) = cx
