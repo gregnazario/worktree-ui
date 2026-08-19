@@ -43,7 +43,7 @@ jobs:
         with:
           usesh: true
           prepare: |
-            pkg install -y git rust
+            pkg install -y git rust libxcb libxkbcommon gcc
           run: |
             cargo test
             cargo build --release
