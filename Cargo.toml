@@ -1,0 +1,12 @@
+[package]
+name = "worktree-tool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gpui = "=0.2.2"
+smol = "2"
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
