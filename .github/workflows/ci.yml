@@ -45,5 +45,9 @@ jobs:
           prepare: |
             pkg install -y git rust libxcb libxkbcommon gcc
           run: |
+            # ports install to /usr/local/lib, which base cc/ld and rtld
+            # do not search by default on FreeBSD
+            export LIBRARY_PATH=/usr/local/lib
+            export LD_LIBRARY_PATH=/usr/local/lib
             cargo test
             cargo build --release
