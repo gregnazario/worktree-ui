@@ -111,12 +111,14 @@ fn status_one(mut e: WorktreeEntry) -> WorktreeEntry {
 /// `base`; `branch: None` checks out `base` as an existing branch.
 pub fn add_worktree(root: &Path, path: &Path, branch: Option<&str>, base: &str) -> Result<()> {
     let path_str = path.to_string_lossy();
+    // `--` ends option parsing so user-supplied paths and refs can never be
+    // interpreted as git options (e.g. a destination literally named "-force").
     let res = match branch {
         Some(branch) => run_git(
             Some(root),
-            &["worktree", "add", &path_str, "-b", branch, base],
+            &["worktree", "add", "-b", branch, "--", &path_str, base],
         ),
-        None => run_git(Some(root), &["worktree", "add", &path_str, base]),
+        None => run_git(Some(root), &["worktree", "add", "--", &path_str, base]),
     };
     res.map(|_| ())
 }
@@ -124,9 +126,12 @@ pub fn add_worktree(root: &Path, path: &Path, branch: Option<&str>, base: &str) 
 pub fn remove_worktree(root: &Path, path: &Path, force: bool) -> Result<()> {
     let path_str = path.to_string_lossy();
     let res = if force {
-        run_git(Some(root), &["worktree", "remove", "--force", &path_str])
+        run_git(
+            Some(root),
+            &["worktree", "remove", "--force", "--", &path_str],
+        )
     } else {
-        run_git(Some(root), &["worktree", "remove", &path_str])
+        run_git(Some(root), &["worktree", "remove", "--", &path_str])
     };
     res.map(|_| ())
 }

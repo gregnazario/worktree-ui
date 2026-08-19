@@ -135,3 +135,50 @@ fn status_pass_parallel_preserves_order() {
         }
     }
 }
+
+#[test]
+fn dash_prefixed_names_are_not_interpreted_as_options() {
+    let tmp = tempfile::tempdir().unwrap();
+    // repo in its own dir; dash-named worktrees outside it
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    fixture_repo(&repo);
+    let wts = tmp.path().join("wts");
+    std::fs::create_dir(&wts).unwrap();
+
+    // A destination literally named "-force" must be a path, not an option:
+    // with the `--` separator git either creates it or refuses with a clean
+    // error — it must never succeed by treating it as --force.
+    let dash_dest = wts.join("-force");
+    match git::add_worktree(&repo, &dash_dest, Some("dash-dest"), "main") {
+        Ok(()) => {
+            assert!(dash_dest.is_dir(), "worktree dir should exist");
+            let list = git::list_worktrees(&repo).unwrap();
+            assert_eq!(list.len(), 2);
+        }
+        Err(e) => assert!(
+            !e.message.contains("usage:") && !e.message.contains("--force"),
+            "looked like option interpretation: {}",
+            e.message
+        ),
+    }
+    // Removing a dash-named worktree must also stay positional.
+    let _ = git::remove_worktree(&repo, &dash_dest, true);
+    assert_eq!(git::list_worktrees(&repo).unwrap().len(), 1);
+
+    // A dash-prefixed branch name: with `--` it is never option-parsed.
+    let wt = wts.join("b");
+    let res = git::add_worktree(&repo, &wt, Some("-b"), "main");
+    match res {
+        Ok(()) => {
+            assert!(git::local_branches(&repo)
+                .unwrap()
+                .contains(&"-b".to_string()));
+        }
+        Err(e) => assert!(
+            !e.message.contains("usage:"),
+            "option interpretation suspected: {}",
+            e.message
+        ),
+    }
+}

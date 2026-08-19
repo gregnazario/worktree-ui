@@ -94,6 +94,19 @@ fn confirm_create(this: &mut RootView, window: &mut Window, cx: &mut Context<Roo
         if branch_value.is_empty() || dest_value.is_empty() {
             return;
         }
+        // Defense in depth on top of the `--` separators in git.rs: reject
+        // dash-prefixed names outright so they can never confuse other
+        // tooling downstream.
+        if branch_value.starts_with('-')
+            || dest_value.starts_with('-')
+            || base_value.starts_with('-')
+        {
+            this.store.update(cx, |store, cx| {
+                store.status_message = Some("Names may not start with '-'".into());
+                cx.notify();
+            });
+            return;
+        }
         // new-branch mode: create `branch` off `base` (or the repo default).
         // existing-branch mode: check out `branch` itself.
         let (branch_arg, base_arg) = if *new_branch {
