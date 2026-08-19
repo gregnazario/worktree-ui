@@ -18,6 +18,10 @@ pub struct WorktreeStore {
     /// Loaded after repo detection; "main" until the git call returns.
     pub default_base: String,
     pub local_branches: Vec<String>,
+    /// Bumped on every spawned operation; completions carrying an older
+    /// generation are dropped so out-of-order results (e.g. a refresh that
+    /// raced a remove) can't reinstall stale state.
+    generation: u64,
 }
 
 /// Pure re-filtering: returns matching indices and the new selection,
@@ -58,6 +62,7 @@ impl WorktreeStore {
             last_refreshed: None,
             default_base: "main".into(),
             local_branches: Vec::new(),
+            generation: 0,
         })
     }
 
@@ -103,6 +108,8 @@ impl WorktreeStore {
     /// Repo detected at launch: `start` is the process cwd.
     pub fn detect_repo(&mut self, start: PathBuf, cx: &mut Context<Self>) {
         self.busy = true;
+        self.generation += 1;
+        let gen = self.generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -110,6 +117,9 @@ impl WorktreeStore {
                 .spawn(async move { git::repo_root(&start) })
                 .await;
             this.update(cx, |store, cx| {
+                if gen != store.generation {
+                    return;
+                }
                 store.busy = false;
                 match result {
                     Ok(root) => store.load_repo(root, cx),
@@ -138,6 +148,8 @@ impl WorktreeStore {
     pub fn load_repo_from_user_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.busy = true;
         self.status_message = Some("Opening repository…".into());
+        self.generation += 1;
+        let gen = self.generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -145,6 +157,9 @@ impl WorktreeStore {
                 .spawn(async move { git::repo_root(&path) })
                 .await;
             this.update(cx, |store, cx| {
+                if gen != store.generation {
+                    return;
+                }
                 store.busy = false;
                 match result {
                     Ok(root) => store.load_repo(root, cx),
@@ -160,6 +175,8 @@ impl WorktreeStore {
     }
 
     fn load_branch_metadata(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.generation += 1;
+        let gen = self.generation;
         cx.spawn(async move |this, cx| {
             let (default_base, branches) = cx
                 .background_executor()
@@ -170,6 +187,9 @@ impl WorktreeStore {
                 })
                 .await;
             this.update(cx, |store, cx| {
+                if gen != store.generation {
+                    return;
+                }
                 store.default_base = default_base;
                 store.local_branches = branches;
                 cx.notify();
@@ -185,6 +205,8 @@ impl WorktreeStore {
         };
         self.busy = true;
         self.status_message = Some("Refreshing…".into());
+        self.generation += 1;
+        let gen = self.generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -192,6 +214,9 @@ impl WorktreeStore {
                 .spawn(async move { git::list_worktrees(&root).map(git::status_pass) })
                 .await;
             this.update(cx, |store, cx| {
+                if gen != store.generation {
+                    return;
+                }
                 store.busy = false;
                 match result {
                     Ok(entries) => {
@@ -220,6 +245,8 @@ impl WorktreeStore {
         };
         self.busy = true;
         self.status_message = Some("Creating worktree…".into());
+        self.generation += 1;
+        let gen = self.generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let created = path.display().to_string();
@@ -228,6 +255,9 @@ impl WorktreeStore {
                 .spawn(async move { git::add_worktree(&root, &path, branch.as_deref(), &base) })
                 .await;
             this.update(cx, |store, cx| {
+                if gen != store.generation {
+                    return;
+                }
                 store.busy = false;
                 match result {
                     Ok(()) => {
@@ -248,6 +278,8 @@ impl WorktreeStore {
         };
         self.busy = true;
         self.status_message = Some("Removing worktree…".into());
+        self.generation += 1;
+        let gen = self.generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let removed = path.display().to_string();
@@ -256,6 +288,9 @@ impl WorktreeStore {
                 .spawn(async move { git::remove_worktree(&root, &path, force) })
                 .await;
             this.update(cx, |store, cx| {
+                if gen != store.generation {
+                    return;
+                }
                 store.busy = false;
                 match result {
                     Ok(()) => store.status_message = Some(format!("Removed {removed}")),
@@ -274,6 +309,8 @@ impl WorktreeStore {
         };
         self.busy = true;
         self.status_message = Some("Pruning…".into());
+        self.generation += 1;
+        let gen = self.generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -281,6 +318,9 @@ impl WorktreeStore {
                 .spawn(async move { git::prune(&root) })
                 .await;
             this.update(cx, |store, cx| {
+                if gen != store.generation {
+                    return;
+                }
                 store.busy = false;
                 match result {
                     Ok(()) => store.status_message = Some("Pruned stale entries".into()),

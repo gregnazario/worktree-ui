@@ -8,7 +8,8 @@
 
 set -euo pipefail
 
-VERSION="${1:-0.1.0}"
+VERSION="${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
+[ -n "$VERSION" ] || VERSION="0.0.0"
 APP_NAME="Worktree Tool"
 BUNDLE_ID="com.gregnazario.worktree-tool"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

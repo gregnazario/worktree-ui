@@ -139,6 +139,22 @@ pub fn default_worktree_path(repo_root: &Path, branch: &str) -> PathBuf {
         .join(sanitize_branch(branch))
 }
 
+/// Expands a leading `~`/`~/` to $HOME for user-entered paths; other inputs
+/// pass through unchanged. (std::process and git both treat `~` literally.)
+pub fn expand_tilde(input: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if input == "~" {
+        if let Some(home) = home {
+            return home;
+        }
+    } else if let Some(rest) = input.strip_prefix("~/") {
+        if let Some(home) = home {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(input)
+}
+
 /// Case-insensitive substring match on branch name and path.
 pub fn matches_filter(entry: &WorktreeEntry, filter: &str) -> bool {
     if filter.is_empty() {
@@ -220,6 +236,19 @@ mod tests {
     }
 
     const STATUS: &str = "# branch.oid abc (initial)\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +1 -2\n1 .M N... 100100 100100 100100 a1b2c3 a1b2c3 f.txt\n1 M. N... 100100 100100 100100 a1b2c3 a1b2c3 staged.txt\n2 R. N... 100100 100100 100100 a1b2c3 a1b2c3 R100 renamed\ntree new/old\n? untracked.txt\n";
+
+    #[test]
+    fn expands_tilde_prefixes_only() {
+        std::env::set_var("HOME", "/home/tester");
+        assert_eq!(
+            expand_tilde("~/code/repo"),
+            PathBuf::from("/home/tester/code/repo")
+        );
+        assert_eq!(expand_tilde("~"), PathBuf::from("/home/tester"));
+        assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
+        assert_eq!(expand_tilde("relative/x"), PathBuf::from("relative/x"));
+        assert_eq!(expand_tilde("a~b/c"), PathBuf::from("a~b/c"));
+    }
 
     #[test]
     fn status_parses_counts_and_divergence() {

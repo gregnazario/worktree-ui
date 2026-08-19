@@ -181,7 +181,7 @@ impl RootView {
     }
 
     pub fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.store.read(cx).repo_root.is_none() {
+        if self.dialog.is_open() || self.store.read(cx).repo_root.is_none() {
             return;
         }
         let default_base = self.store.read(cx).default_base.clone();
@@ -194,10 +194,15 @@ impl RootView {
         let dest = cx.new(|cx| TextField::new("worktree destination", cx));
 
         // Live-update the destination from the branch name until the user
-        // edits the destination directly.
+        // edits the destination directly. The dest observer can't tell user
+        // input from programmatic set_value on its own, so record the last
+        // derived value and treat a match as "still automatic".
         cx.observe(&branch.clone(), move |this, field, cx| {
             if let DialogState::Create {
-                dest, dest_edited, ..
+                dest,
+                dest_edited,
+                last_derived,
+                ..
             } = &mut this.dialog
             {
                 if !*dest_edited {
@@ -206,6 +211,7 @@ impl RootView {
                         if let Some(root) = this.store.read(cx).repo_root.clone() {
                             let path = crate::model::default_worktree_path(&root, &branch);
                             let display = path.display().to_string();
+                            *last_derived = display.clone();
                             dest.update(cx, |dest, cx| dest.set_value(&display, cx));
                         }
                     }
@@ -214,29 +220,46 @@ impl RootView {
             cx.notify();
         })
         .detach();
-        cx.observe(&dest.clone(), move |this, _field, _cx| {
-            if let DialogState::Create { dest_edited, .. } = &mut this.dialog {
-                *dest_edited = true;
+        cx.observe(&dest.clone(), move |this, field, cx| {
+            if let DialogState::Create {
+                dest_edited,
+                last_derived,
+                ..
+            } = &mut this.dialog
+            {
+                if field.read(cx).value != *last_derived {
+                    *dest_edited = true;
+                }
             }
         })
         .detach();
 
+        let branch_handle = branch.clone();
         self.dialog = DialogState::Create {
             branch,
             base,
             dest,
             new_branch: true,
             dest_edited: false,
+            last_derived: String::new(),
         };
-        window.focus(&self.dialog_focus);
+        // Start typing the branch name immediately.
+        let handle = branch_handle.read(cx).focus_handle.clone();
+        window.focus(&handle);
         cx.notify();
     }
 
     fn open_remove_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_open() {
+            return;
+        }
         let Some(entry) = self.store.read(cx).selected_entry().cloned() else {
             return;
         };
-        let dirty = !matches!(entry.status, WorktreeStatus::Clean { .. });
+        // Only genuinely dirty worktrees get the warning; Pending (status
+        // pass unfinished) and Unavailable (directory gone) are not "you
+        // have uncommitted changes".
+        let dirty = matches!(entry.status, WorktreeStatus::Dirty { .. });
         let branch_label = entry
             .branch
             .clone()
@@ -252,6 +275,9 @@ impl RootView {
     }
 
     fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_open() {
+            return;
+        }
         let terminals = terminal::detect_installed();
         let selected = terminal::load_settings().terminal;
         self.dialog = DialogState::Settings {
@@ -311,6 +337,12 @@ impl Render for RootView {
                 return;
             }
             if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
+                return;
+            }
+            // Only act on bare keys when the list itself is focused;
+            // otherwise we'd steal typing from any other focused text field
+            // (e.g. the empty-state path input, where "/" is unavoidable).
+            if !this.root_focus.is_focused(window) {
                 return;
             }
             match ks.key.as_str() {
@@ -392,8 +424,9 @@ impl Render for RootView {
                         .child(toolbar_button("load-repo", "Load", move |_, _, cx| {
                             let value = path_input.read(cx).value.trim().to_string();
                             if !value.is_empty() {
+                                let path = crate::model::expand_tilde(&value);
                                 store.update(cx, |store, cx| {
-                                    store.load_repo_from_user_path(PathBuf::from(&value), cx)
+                                    store.load_repo_from_user_path(path, cx)
                                 });
                             }
                         })),
@@ -652,6 +685,8 @@ impl Render for RootView {
                         .flex()
                         .items_center()
                         .justify_center()
+                        // Consume clicks so the dialog is truly modal.
+                        .on_mouse_down(MouseButton::Left, |_, _, _| {})
                         .child(card),
                 );
             }
@@ -716,6 +751,68 @@ mod tests {
         let window = cx.windows()[0];
         let vcx = gpui::VisualTestContext::from_window(window, cx);
         (view, vcx)
+    }
+
+    fn open_root_no_repo(cx: &mut TestAppContext) -> (Entity<RootView>, gpui::VisualTestContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        open_root(cx, &plain)
+    }
+
+    #[gpui::test]
+    fn create_dialog_destination_tracks_full_branch_name(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        // "n" opens the create dialog with the branch field focused.
+        vcx.simulate_keystrokes("n");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("f e a t");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let DialogState::Create {
+                branch,
+                dest,
+                dest_edited,
+                ..
+            } = &root.dialog
+            else {
+                panic!("create dialog not open");
+            };
+            assert_eq!(branch.read(cx).value, "feat");
+            let root_dir = root.store.read(cx).repo_root.clone().unwrap();
+            let expected = crate::model::default_worktree_path(&root_dir, "feat");
+            assert_eq!(dest.read(cx).value, expected.display().to_string());
+            assert!(
+                !*dest_edited,
+                "programmatic dest updates must not count as user edits"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn empty_state_path_input_keeps_typing(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_root_no_repo(cx);
+        vcx.run_until_parked();
+
+        // Focus the path input, then type an absolute path. "/" must be
+        // inserted, not repurposed to focus the (unrendered) search field.
+        let handle = view.update(&mut vcx.cx, |root, cx| {
+            root.path_input.read(cx).focus_handle.clone()
+        });
+        vcx.update(|window, _cx| window.focus(&handle));
+        vcx.simulate_keystrokes("/ U s e r s / g r e g");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            // If focus had been stolen to the unrendered search field after
+            // the first "/", the remaining characters would never arrive.
+            assert_eq!(root.path_input.read(cx).value, "/Users/greg");
+            assert!(root.store.read(cx).repo_root.is_none(), "still empty state");
+        });
     }
 
     #[gpui::test]

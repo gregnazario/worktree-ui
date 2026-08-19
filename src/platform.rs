@@ -27,7 +27,9 @@ pub fn reveal_in_file_manager(path: &Path) {
 
 #[cfg(target_os = "windows")]
 pub fn reveal_in_file_manager(path: &Path) {
+    // Known-good form: explorer /select,"C:\path with spaces" — embed the
+    // quotes so std's own quoting wraps exactly the path.
     let _ = std::process::Command::new("explorer")
-        .arg(format!("/select,{}", path.display()))
+        .arg(format!("/select,\"{}\"", path.display()))
         .spawn();
 }

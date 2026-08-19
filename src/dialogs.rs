@@ -24,6 +24,10 @@ pub enum DialogState {
         /// Set once the user edits the destination manually; disables the
         /// live default-path derivation.
         dest_edited: bool,
+        /// Last destination value derived programmatically from the branch
+        /// name; a dest observer seeing exactly this value knows the change
+        /// came from the derivation, not the user.
+        last_derived: String,
     },
     Remove {
         path: PathBuf,
@@ -109,6 +113,7 @@ fn confirm_create(this: &mut RootView, window: &mut Window, cx: &mut Context<Roo
         }
         // new-branch mode: create `branch` off `base` (or the repo default).
         // existing-branch mode: check out `branch` itself.
+        let dest_path = crate::model::expand_tilde(&dest_value);
         let (branch_arg, base_arg) = if *new_branch {
             let default_base = this.store.read(cx).default_base.clone();
             (
@@ -123,7 +128,7 @@ fn confirm_create(this: &mut RootView, window: &mut Window, cx: &mut Context<Roo
             (None, branch_value.clone())
         };
         this.store.update(cx, |store, cx| {
-            store.add(PathBuf::from(&dest_value), branch_arg, base_arg, cx)
+            store.add(dest_path, branch_arg, base_arg, cx)
         });
         this.close_dialog(window, cx);
     }
@@ -194,6 +199,7 @@ pub fn render_create_dialog(
         .flex_col()
         .gap_3()
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            cx.stop_propagation();
             match event.keystroke.key.as_str() {
                 "escape" => this.close_dialog(window, cx),
                 "enter" => confirm_create(this, window, cx),
@@ -285,6 +291,7 @@ pub fn render_remove_dialog(
         .flex_col()
         .gap_3()
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            cx.stop_propagation();
             match event.keystroke.key.as_str() {
                 "escape" => this.close_dialog(window, cx),
                 "enter" => this.confirm_remove(window, cx),
@@ -380,6 +387,7 @@ pub fn render_settings_dialog(
         .flex_col()
         .gap_3()
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            cx.stop_propagation();
             if event.keystroke.key == "escape" || event.keystroke.key == "enter" {
                 this.close_dialog(window, cx);
             }
@@ -393,8 +401,11 @@ pub fn render_settings_dialog(
         )
         .child(label("Terminal for \"Open in Terminal\"".into()));
 
-    // Automatic (auto-detect) row.
-    let auto_is_selected = selected.is_none();
+    // Automatic (auto-detect) row. A stale saved id (terminal since
+    // uninstalled) effectively behaves as automatic, so highlight it too.
+    let auto_is_selected = selected
+        .as_ref()
+        .is_none_or(|s| !terminals.iter().any(|t| t.id == s.as_str()));
     card = card.child(
         div()
             .id("settings-terminal-auto")
@@ -433,7 +444,7 @@ pub fn render_settings_dialog(
     for t in terminals {
         let id = t.id;
         let name = t.name;
-        let is_selected = selected.as_deref() == Some(id);
+        let is_selected = !auto_is_selected && selected.as_deref() == Some(id);
         let describe = terminal::describe_launch(&t.launch);
         card = card.child(
             div()

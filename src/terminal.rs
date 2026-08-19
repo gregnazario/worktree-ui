@@ -233,11 +233,15 @@ pub struct Settings {
 pub fn parse_settings(text: &str) -> Settings {
     let mut terminal = None;
     for raw in text.lines() {
-        let line = match raw.find('#') {
-            Some(i) => &raw[..i],
-            None => raw,
+        // Comments run to end of line only when they start the line or
+        // follow whitespace; a '#' inside a value is kept.
+        let mut line: &str = raw;
+        if line.trim_start().starts_with('#') {
+            line = "";
+        } else if let Some(i) = line.find(" #") {
+            line = &line[..i];
         }
-        .trim();
+        let line = line.trim();
         if line.is_empty() {
             continue;
         }
