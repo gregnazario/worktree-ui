@@ -3,18 +3,27 @@ use crate::model::WorktreeEntry;
 use crate::model::WorktreeStatus;
 use crate::platform;
 use crate::store::WorktreeStore;
+use crate::terminal;
 use crate::text_field::TextField;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    actions, App, AppContext, ClipboardItem, Context, Entity, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, SharedString, Styled,
-    StatefulInteractiveElement, Window, div, px, rgba,
+    actions, div, px, rgba, App, AppContext, ClipboardItem, Context, Entity, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
+    SharedString, StatefulInteractiveElement, Styled, Window,
 };
 use std::path::PathBuf;
 
 actions!(
     worktree_tool,
-    [NewWorktree, Refresh, Prune, OpenSelected, RemoveSelected, FocusSearch, Quit]
+    [
+        NewWorktree,
+        Refresh,
+        Prune,
+        OpenSelected,
+        RemoveSelected,
+        FocusSearch,
+        Quit
+    ]
 );
 
 /// Const equivalent of `gpui::rgb` (which is not a const fn).
@@ -65,10 +74,20 @@ fn status_badge(status: &WorktreeStatus) -> (String, gpui::Rgba) {
     match status {
         WorktreeStatus::Pending => ("…".into(), DIM),
         WorktreeStatus::Unavailable(_) => ("unavailable".into(), RED),
-        WorktreeStatus::Clean { .. } => {
-            (if arrows.is_empty() { "clean".into() } else { arrows }, DIM)
-        }
-        WorktreeStatus::Dirty { staged, unstaged, untracked, .. } => {
+        WorktreeStatus::Clean { .. } => (
+            if arrows.is_empty() {
+                "clean".into()
+            } else {
+                arrows
+            },
+            DIM,
+        ),
+        WorktreeStatus::Dirty {
+            staged,
+            unstaged,
+            untracked,
+            ..
+        } => {
             let mut parts = Vec::new();
             if *staged > 0 {
                 parts.push(format!("{staged} staged"));
@@ -105,8 +124,14 @@ fn toolbar_button(
 }
 
 impl RootView {
-    pub fn new(
+    pub fn new(store: Entity<WorktreeStore>, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::new_with_start(store, cwd, window, cx)
+    }
+
+    pub fn new_with_start(
         store: Entity<WorktreeStore>,
+        start_dir: PathBuf,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
@@ -133,8 +158,8 @@ impl RootView {
                 store.update(cx, |store, cx| store.set_filter(value, cx));
             })
             .detach();
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            this.store.update(cx, |store, cx| store.detect_repo(cwd, cx));
+            this.store
+                .update(cx, |store, cx| store.detect_repo(start_dir, cx));
         });
         view
     }
@@ -149,7 +174,8 @@ impl RootView {
         if let DialogState::Remove { path, force, .. } = &self.dialog {
             let path = path.clone();
             let force = *force;
-            self.store.update(cx, |store, cx| store.remove(path, force, cx));
+            self.store
+                .update(cx, |store, cx| store.remove(path, force, cx));
         }
         self.close_dialog(window, cx);
     }
@@ -170,7 +196,10 @@ impl RootView {
         // Live-update the destination from the branch name until the user
         // edits the destination directly.
         cx.observe(&branch.clone(), move |this, field, cx| {
-            if let DialogState::Create { dest, dest_edited, .. } = &mut this.dialog {
+            if let DialogState::Create {
+                dest, dest_edited, ..
+            } = &mut this.dialog
+            {
                 if !*dest_edited {
                     let branch = field.read(cx).value.trim().to_string();
                     if !branch.is_empty() {
@@ -222,6 +251,18 @@ impl RootView {
         cx.notify();
     }
 
+    fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let terminals = terminal::detect_installed();
+        let selected = terminal::load_settings().terminal;
+        self.dialog = DialogState::Settings {
+            terminals,
+            selected,
+            saved_to: None,
+        };
+        window.focus(&self.dialog_focus);
+        cx.notify();
+    }
+
     fn search_focused(&self, window: &Window, cx: &App) -> bool {
         self.search.read(cx).focus_handle.is_focused(window)
     }
@@ -261,7 +302,8 @@ impl Render for RootView {
             if this.search_focused(window, cx) {
                 if ks.key == "escape" {
                     this.search.update(cx, |field, cx| field.set_value("", cx));
-                    this.store.update(cx, |store, cx| store.set_filter(String::new(), cx));
+                    this.store
+                        .update(cx, |store, cx| store.set_filter(String::new(), cx));
                     window.focus(&this.root_focus);
                 } else if ks.key == "enter" {
                     window.focus(&this.root_focus);
@@ -277,7 +319,7 @@ impl Render for RootView {
                 "enter" => {
                     if let Some(entry) = this.store.read(cx).selected_entry() {
                         let path = entry.path.clone();
-                        platform::open_in_terminal(&path);
+                        terminal::open_in_terminal(&path);
                     }
                 }
                 "backspace" | "delete" => this.open_remove_dialog(window, cx),
@@ -314,7 +356,7 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &OpenSelected, _window, cx| {
                 if let Some(entry) = this.store.read(cx).selected_entry() {
                     let path = entry.path.clone();
-                    platform::open_in_terminal(&path);
+                    terminal::open_in_terminal(&path);
                 }
             }))
             .on_action(cx.listener(|this, _: &RemoveSelected, window, cx| {
@@ -374,14 +416,16 @@ impl Render for RootView {
                         .border_b_1()
                         .border_color(BORDER)
                         .child(
-                            div().flex().flex_col().child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .child(repo_name),
-                            ).child(
-                                div().text_size(px(11.)).text_color(DIM).child(repo_path),
-                            ),
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .child(repo_name),
+                                )
+                                .child(div().text_size(px(11.)).text_color(DIM).child(repo_path)),
                         )
                         .child(div().flex_1())
                         .child(self.search.clone())
@@ -403,6 +447,13 @@ impl Render for RootView {
                             cx.listener(|this, _, _window, cx| {
                                 this.store.update(cx, |store, cx| store.prune(cx))
                             }),
+                        ))
+                        .child(toolbar_button(
+                            "btn-settings",
+                            "Settings",
+                            cx.listener(|this, _, window, cx| {
+                                this.open_settings_dialog(window, cx)
+                            }),
                         )),
                 )
                 .child(
@@ -417,15 +468,13 @@ impl Render for RootView {
                             let pos = *pos;
                             let is_selected = selected == Some(pos);
                             let (badge, badge_color) = status_badge(&entry.status);
-                            let branch = entry
-                                .branch
-                                .clone()
-                                .unwrap_or_else(|| {
-                                    format!("({})", entry.head.clone().unwrap_or_default())
-                                });
+                            let branch = entry.branch.clone().unwrap_or_else(|| {
+                                format!("({})", entry.head.clone().unwrap_or_default())
+                            });
                             let path = entry.path.display().to_string();
                             let kind = if entry.is_main { "main" } else { "linked" };
-                            let row_id = SharedString::from(format!("wt-row-{}", entry.path.display()));
+                            let row_id =
+                                SharedString::from(format!("wt-row-{}", entry.path.display()));
                             div()
                                 .id(row_id)
                                 .flex()
@@ -461,13 +510,15 @@ impl Render for RootView {
                                                 ),
                                         )
                                         .child(
-                                            div()
-                                                .text_size(px(11.))
-                                                .text_color(DIM)
-                                                .child(path),
+                                            div().text_size(px(11.)).text_color(DIM).child(path),
                                         ),
                                 )
-                                .child(div().text_size(px(12.)).text_color(badge_color).child(badge))
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(badge_color)
+                                        .child(badge),
+                                )
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |this, _, _window, cx| {
@@ -513,12 +564,12 @@ impl Render for RootView {
                                 "detail-terminal",
                                 "Open in Terminal ⏎",
                                 cx.listener(move |_, _, _window, _cx| {
-                                    platform::open_in_terminal(&terminal_path);
+                                    terminal::open_in_terminal(&terminal_path);
                                 }),
                             ))
                             .child(toolbar_button(
                                 "detail-reveal",
-                                "Reveal",
+                                platform::SHOW_IN_FILE_MANAGER_LABEL,
                                 cx.listener(move |_, _, _window, _cx| {
                                     platform::reveal_in_file_manager(&reveal_path);
                                 }),
@@ -585,6 +636,9 @@ impl Render for RootView {
                 DialogState::Remove { .. } => {
                     Some(dialogs::render_remove_dialog(self, window, cx).into_any_element())
                 }
+                DialogState::Settings { .. } => {
+                    Some(dialogs::render_settings_dialog(self, window, cx).into_any_element())
+                }
             };
             if let Some(card) = card {
                 root = root.child(
@@ -604,5 +658,131 @@ impl Render for RootView {
         }
 
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    fn sh(dir: &std::path::Path, cmd: &[&str]) {
+        let status = std::process::Command::new(cmd[0])
+            .args(&cmd[1..])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed: {cmd:?}");
+    }
+
+    fn fixture_repo(dir: &std::path::Path) {
+        sh(dir, &["git", "init", "-q", "-b", "main"]);
+        sh(dir, &["git", "config", "user.email", "t@t.t"]);
+        sh(dir, &["git", "config", "user.name", "t"]);
+        std::fs::write(dir.join("f.txt"), "one").unwrap();
+        sh(dir, &["git", "add", "."]);
+        sh(dir, &["git", "commit", "-qm", "init"]);
+        sh(
+            dir,
+            &[
+                "git",
+                "worktree",
+                "add",
+                "-q",
+                &dir.parent().unwrap().join("feat").display().to_string(),
+                "-b",
+                "feat",
+                "main",
+            ],
+        );
+    }
+
+    fn open_root(
+        cx: &mut TestAppContext,
+        repo: &std::path::Path,
+    ) -> (Entity<RootView>, gpui::VisualTestContext) {
+        let view_cell = std::cell::RefCell::new(None);
+        cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                let store = WorktreeStore::new(cx);
+                let view = RootView::new_with_start(store, repo.to_path_buf(), window, cx);
+                *view_cell.borrow_mut() = Some(view.clone());
+                view
+            })
+            .unwrap();
+        });
+        let view = view_cell.into_inner().unwrap();
+        cx.run_until_parked();
+        let window = cx.windows()[0];
+        let vcx = gpui::VisualTestContext::from_window(window, cx);
+        (view, vcx)
+    }
+
+    #[gpui::test]
+    fn lists_worktrees_and_opens_create_dialog(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        view.update(&mut vcx.cx, |root, cx| {
+            let store = root.store.read(cx);
+            assert_eq!(store.entries.len(), 2);
+            assert!(store.entries[0].is_main);
+            assert!(matches!(
+                store.entries[0].status,
+                crate::model::WorktreeStatus::Clean { .. }
+            ));
+            assert_eq!(store.entries[1].branch.as_deref(), Some("feat"));
+            assert!(matches!(root.dialog, DialogState::None));
+        });
+
+        // "n" opens the create dialog pre-filled with the default base.
+        vcx.simulate_keystrokes("n");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            assert!(matches!(root.dialog, DialogState::Create { .. }));
+            if let DialogState::Create { base, .. } = &root.dialog {
+                assert_eq!(base.read(cx).value, "main");
+            }
+        });
+
+        // escape closes it.
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert!(matches!(root.dialog, DialogState::None));
+        });
+    }
+
+    #[gpui::test]
+    fn typing_in_search_filters_the_list(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("/ f e a t");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let store = root.store.read(cx);
+            assert_eq!(store.filter, "feat");
+            assert_eq!(store.filtered.len(), 1);
+            assert_eq!(
+                store.entries[store.filtered[0]].branch.as_deref(),
+                Some("feat")
+            );
+        });
+
+        // escape clears the filter and refocuses the list.
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let store = root.store.read(cx);
+            assert!(store.filter.is_empty());
+            assert_eq!(store.filtered.len(), 2);
+        });
     }
 }

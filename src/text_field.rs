@@ -1,6 +1,6 @@
 use gpui::{
-    Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-    ParentElement, Render, SharedString, Styled, Window, div, px, rgb,
+    div, px, rgb, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
+    ParentElement, Render, SharedString, Styled, Window,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -152,7 +152,9 @@ impl Render for TextField {
             }));
 
         if self.value.is_empty() {
-            field = field.text_color(rgb(0x6c7086)).child(self.placeholder.clone());
+            field = field
+                .text_color(rgb(0x6c7086))
+                .child(self.placeholder.clone());
         } else {
             field = field.text_color(rgb(0xcdd6f4)).child(text);
         }

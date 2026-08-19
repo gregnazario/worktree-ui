@@ -7,7 +7,10 @@ pub enum WorktreeStatus {
     Pending,
     /// `git status` failed for this worktree (e.g. directory is gone).
     Unavailable(String),
-    Clean { ahead: u32, behind: u32 },
+    Clean {
+        ahead: u32,
+        behind: u32,
+    },
     Dirty {
         staged: u32,
         unstaged: u32,

@@ -37,6 +37,29 @@ cargo run --release
 | `backspace` / `delete` | Remove selected worktree |
 | `esc` | Clear search / close dialog |
 
+## Settings
+
+The **Settings** button (toolbar) lists the terminals detected on this
+machine; clicking one persists the choice immediately. The config file lives
+at an XDG path on every platform:
+
+```sh
+$XDG_CONFIG_HOME/worktree-tool/settings.toml   # e.g. ~/.config/worktree-tool/settings.toml
+```
+
+```toml
+# worktree-tool settings
+# terminal: one of terminal, iterm, wezterm, ghostty, alacritty, kitty, warp,
+# hyper (or unset for auto-detect)
+terminal = "iterm"
+```
+
+Terminal resolution order: `settings.toml` → `$TERMCMD` env var (app name,
+[Zed convention](https://zed.dev)) → first detected terminal. Terminal.app
+ships with macOS, so auto-detect always resolves there by default. For
+terminals with a CLI on `PATH` (wezterm, ghostty, alacritty, kitty), the CLI
+form is preferred so the new window opens in the worktree's directory.
+
 ## Development
 
 ```sh

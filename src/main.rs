@@ -1,6 +1,6 @@
 use gpui::{
-    App, Application, Bounds, KeyBinding, Point, TitlebarOptions, WindowBounds, WindowOptions,
-    px, size,
+    px, size, App, Application, Bounds, KeyBinding, Point, TitlebarOptions, WindowBounds,
+    WindowOptions,
 };
 use worktree_tool::store::WorktreeStore;
 use worktree_tool::ui::{FocusSearch, NewWorktree, Quit, Refresh, RootView};

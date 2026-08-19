@@ -2,13 +2,14 @@
 //! (not separate entities); the render helpers below take the root view
 //! directly and attach listeners against it.
 
+use crate::terminal::{self, InstalledTerminal};
 use crate::text_field::TextField;
 use crate::ui::RootView;
-use crate::ui::{ACCENT, BORDER, DIM, GREEN, PANEL, RED, TEXT};
+use crate::ui::{ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED, TEXT};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, SharedString, Styled, StatefulInteractiveElement, Window, div, px, rgb,
+    div, px, rgb, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 use std::path::PathBuf;
 
@@ -29,6 +30,11 @@ pub enum DialogState {
         branch_label: SharedString,
         dirty: bool,
         force: bool,
+    },
+    Settings {
+        terminals: Vec<InstalledTerminal>,
+        selected: Option<String>,
+        saved_to: Option<String>,
     },
 }
 
@@ -94,15 +100,18 @@ fn confirm_create(this: &mut RootView, window: &mut Window, cx: &mut Context<Roo
             let default_base = this.store.read(cx).default_base.clone();
             (
                 Some(branch_value.clone()),
-                if base_value.is_empty() { default_base } else { base_value },
+                if base_value.is_empty() {
+                    default_base
+                } else {
+                    base_value
+                },
             )
         } else {
             (None, branch_value.clone())
         };
-        this.store
-            .update(cx, |store, cx| {
-                store.add(PathBuf::from(&dest_value), branch_arg, base_arg, cx)
-            });
+        this.store.update(cx, |store, cx| {
+            store.add(PathBuf::from(&dest_value), branch_arg, base_arg, cx)
+        });
         this.close_dialog(window, cx);
     }
 }
@@ -132,7 +141,11 @@ pub fn render_create_dialog(
     let branches = this.store.read(cx).local_branches.clone();
     let default_base = this.store.read(cx).default_base.clone();
 
-    let mode_label = if *new_branch { "Branch (new)" } else { "Branch (existing)" };
+    let mode_label = if *new_branch {
+        "Branch (new)"
+    } else {
+        "Branch (existing)"
+    };
     let hint = if *new_branch {
         if base_value.is_empty() {
             format!("base: {default_base}")
@@ -320,4 +333,148 @@ pub fn render_remove_dialog(
                     cx.listener(|this, _, window, cx| this.confirm_remove(window, cx)),
                 )),
         )
+}
+
+pub fn render_settings_dialog(
+    this: &mut RootView,
+    _window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let DialogState::Settings {
+        terminals,
+        selected,
+        saved_to,
+    } = &this.dialog
+    else {
+        unreachable!("settings dialog rendered without settings state")
+    };
+    let dialog_focus = this.dialog_focus.clone();
+    let config_path = terminal::settings_path().display().to_string();
+    let saved_note = saved_to.clone().unwrap_or_default();
+
+    let mut card = div()
+        .id("settings-dialog")
+        .track_focus(&dialog_focus)
+        .w(px(480.))
+        .max_h(px(420.))
+        .p_4()
+        .rounded_lg()
+        .bg(PANEL)
+        .border_1()
+        .border_color(BORDER)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            if event.keystroke.key == "escape" || event.keystroke.key == "enter" {
+                this.close_dialog(window, cx);
+            }
+        }))
+        .child(
+            div()
+                .text_size(px(15.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(TEXT)
+                .child("Settings"),
+        )
+        .child(label("Terminal for \"Open in Terminal\"".into()));
+
+    // Automatic (auto-detect) row.
+    let auto_is_selected = selected.is_none();
+    card = card.child(
+        div()
+            .id("settings-terminal-auto")
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .when(auto_is_selected, |row| row.bg(ROW_SELECTED))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(if auto_is_selected { ACCENT } else { TEXT })
+                    .child("Automatic".to_string()),
+            )
+            .child(label(
+                "first detected terminal (falls back to Terminal.app)".into(),
+            ))
+            .on_click(cx.listener(|this, _, _window, cx| {
+                if let DialogState::Settings {
+                    selected, saved_to, ..
+                } = &mut this.dialog
+                {
+                    *selected = None;
+                    match terminal::save_settings(&terminal::Settings::default()) {
+                        Ok(path) => *saved_to = Some(path.display().to_string()),
+                        Err(e) => *saved_to = Some(format!("save failed: {e}")),
+                    }
+                    cx.notify();
+                }
+            })),
+    );
+
+    // One row per installed terminal, registry order.
+    for t in terminals {
+        let id = t.id;
+        let name = t.name;
+        let is_selected = selected.as_deref() == Some(id);
+        let describe = match &t.launch {
+            terminal::Launch::OpenApp(app) => format!("open -a {app}"),
+            terminal::Launch::Cli(bin, _) => format!("{bin} …"),
+        };
+        card = card.child(
+            div()
+                .id(SharedString::from(format!("settings-terminal-{id}")))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .when(is_selected, |row| row.bg(ROW_SELECTED))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(if is_selected { ACCENT } else { TEXT })
+                        .child(name.to_string()),
+                )
+                .child(label(describe))
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    if let DialogState::Settings {
+                        selected, saved_to, ..
+                    } = &mut this.dialog
+                    {
+                        *selected = Some(id.to_string());
+                        match terminal::save_settings(&terminal::Settings {
+                            terminal: Some(id.to_string()),
+                        }) {
+                            Ok(path) => *saved_to = Some(path.display().to_string()),
+                            Err(e) => *saved_to = Some(format!("save failed: {e}")),
+                        }
+                        cx.notify();
+                    }
+                })),
+        );
+    }
+
+    card = card
+        .child(label(format!("Config file: {config_path}")))
+        .child(label(
+            "$TERMCMD is used when no terminal is set above.".into(),
+        ))
+        .when(!saved_note.is_empty(), |c| {
+            c.child(label(format!("Saved: {saved_note}")))
+        })
+        .child(div().flex().justify_end().child(button(
+            "settings-close",
+            "Done",
+            rgb(0x11111b),
+            Some(GREEN),
+            None,
+            cx.listener(|this, _, window, cx| this.close_dialog(window, cx)),
+        )));
+    card
 }

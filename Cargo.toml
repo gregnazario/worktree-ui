@@ -5,8 +5,7 @@ edition = "2021"
 
 [dependencies]
 gpui = "=0.2.2"
-smol = "2"
-futures = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+gpui = { version = "=0.2.2", features = ["test-support"] }

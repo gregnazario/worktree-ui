@@ -33,15 +33,15 @@ pub fn apply_filter(
         .filter(|(_, e)| model::matches_filter(e, filter))
         .map(|(i, _)| i)
         .collect();
-    let selected = keep_path
-        .and_then(|p| {
-            indices
-                .iter()
-                .position(|&i| entries[i].path == p)
-                .or_else(|| None)
-        })
-        .or(Some(0).filter(|_| !indices.is_empty()))
-        .filter(|_| !indices.is_empty());
+    let selected = if indices.is_empty() {
+        None
+    } else {
+        Some(
+            keep_path
+                .and_then(|p| indices.iter().position(|&i| entries[i].path == p))
+                .unwrap_or(0),
+        )
+    };
     (indices, selected)
 }
 
@@ -107,7 +107,7 @@ impl WorktreeStore {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { git::repo_root(&start).await })
+                .spawn(async move { git::repo_root(&start) })
                 .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
@@ -142,7 +142,7 @@ impl WorktreeStore {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { git::repo_root(&path).await })
+                .spawn(async move { git::repo_root(&path) })
                 .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
@@ -164,8 +164,8 @@ impl WorktreeStore {
             let (default_base, branches) = cx
                 .background_executor()
                 .spawn(async move {
-                    let default = git::default_branch(&root).await;
-                    let branches = git::local_branches(&root).await.unwrap_or_default();
+                    let default = git::default_branch(&root);
+                    let branches = git::local_branches(&root).unwrap_or_default();
                     (default, branches)
                 })
                 .await;
@@ -189,10 +189,7 @@ impl WorktreeStore {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    let entries = git::list_worktrees(&root).await?;
-                    Ok::<_, git::GitError>(git::status_pass(entries).await)
-                })
+                .spawn(async move { git::list_worktrees(&root).map(git::status_pass) })
                 .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
@@ -211,7 +208,13 @@ impl WorktreeStore {
         .detach();
     }
 
-    pub fn add(&mut self, path: PathBuf, branch: Option<String>, base: String, cx: &mut Context<Self>) {
+    pub fn add(
+        &mut self,
+        path: PathBuf,
+        branch: Option<String>,
+        base: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = self.repo_root.clone() else {
             return;
         };
@@ -222,9 +225,7 @@ impl WorktreeStore {
             let created = path.display().to_string();
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    git::add_worktree(&root, &path, branch.as_deref(), &base).await
-                })
+                .spawn(async move { git::add_worktree(&root, &path, branch.as_deref(), &base) })
                 .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
@@ -252,7 +253,7 @@ impl WorktreeStore {
             let removed = path.display().to_string();
             let result = cx
                 .background_executor()
-                .spawn(async move { git::remove_worktree(&root, &path, force).await })
+                .spawn(async move { git::remove_worktree(&root, &path, force) })
                 .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
@@ -277,7 +278,7 @@ impl WorktreeStore {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { git::prune(&root).await })
+                .spawn(async move { git::prune(&root) })
                 .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
