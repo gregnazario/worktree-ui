@@ -4,6 +4,9 @@
   <img src="assets/logo.svg" width="96" alt="worktree-tool logo">
 </p>
 
+[![CI](https://github.com/gregnazario/worktree-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/gregnazario/worktree-ui/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 A native GUI for managing [git worktrees](https://git-scm.com/docs/git-worktree),
 built in Rust with [GPUI](https://gpui.rs) (Zed's GPU-accelerated UI framework).
 
@@ -11,6 +14,22 @@ Lists every worktree of a repository with its branch, status (dirty files,
 ahead/behind vs upstream), and offers create / remove / prune operations plus
 quick actions (open in terminal, show in file manager, copy path).
 Keyboard-first.
+
+## Install (macOS)
+
+Grab `worktree-tool-<version>-macos-universal.zip` from the latest
+[GitHub Release](https://github.com/gregnazario/worktree-ui/releases)
+(built automatically by CI: universal arm64 + x86_64 `.app` bundle), unzip,
+and drag **Worktree Tool.app** to `/Applications`.
+
+The release build is ad-hoc signed, not notarized — on first launch
+macOS Gatekeeper may ask you to confirm via right-click → Open. When launched
+from Finder the app starts at the path picker (there is no terminal cwd to
+detect); when run from a terminal it auto-detects the repository from the
+working directory.
+
+To package locally: `scripts/package-macos.sh 0.1.0` produces
+`dist/Worktree Tool.app` and the zip.
 
 ## Platform support
 
@@ -97,3 +116,7 @@ cargo clippy -- -D warnings
 
 Note: text inputs accept raw key events; IME/marked-text input is not
 supported in v1.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).

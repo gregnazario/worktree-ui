@@ -2,6 +2,9 @@
 name = "worktree-tool"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/gregnazario/worktree-ui"
+description = "A native GPUI GUI for managing git worktrees"
 
 [dependencies]
 gpui = "=0.2.2"
