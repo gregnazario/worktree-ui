@@ -5,15 +5,31 @@ built in Rust with [GPUI](https://gpui.rs) (Zed's GPU-accelerated UI framework).
 
 Lists every worktree of a repository with its branch, status (dirty files,
 ahead/behind vs upstream), and offers create / remove / prune operations plus
-quick actions (open in terminal, reveal, copy path). Keyboard-first.
+quick actions (open in terminal, show in file manager, copy path).
+Keyboard-first.
+
+## Platform support
+
+| Platform | Status |
+| --- | --- |
+| macOS (Apple silicon / Intel) | built, tested, and manually verified |
+| Linux (X11 / Wayland) | compiles and unit-tested via CI; rendering uses Vulkan through blade-graphics, linking needs `libxcb`, `libxkbcommon`, `libxkbcommon-x11`, `libstdc++` |
+| Windows | compiles and unit-tested via CI (MSVC toolchain) |
+| FreeBSD | compiles via CI (GPUI gates its X11/Wayland backend to `linux` + `freebsd`); least-tested platform |
+
+CI (`.github/workflows/ci.yml`) runs clippy, tests, and a release build on
+macOS, Linux, Windows, and FreeBSD on every push once a remote is added.
+For local cross-checks without target hardware:
+`cargo zigbuild --target x86_64-unknown-linux-gnu --lib` (also
+`x86_64-pc-windows-gnu`, `x86_64-unknown-freebsd`) — every crate compiles
+cross-platform; only the final Linux binary link needs native X11 libraries.
 
 ## Requirements
 
-- macOS (v1 is developed and tested on macOS; Linux/Windows backends exist in
-  GPUI but are untested here)
 - Stable Rust toolchain
 - `git` on your `PATH`
-- Xcode command line tools (`xcode-select --install`) for the Metal backend
+- macOS: Xcode command line tools (`xcode-select --install`) for the Metal backend
+- Linux: the X11/xkbcommon dev packages above plus a Vulkan-capable driver stack
 
 ## Usage
 
@@ -49,16 +65,23 @@ $XDG_CONFIG_HOME/worktree-tool/settings.toml   # e.g. ~/.config/worktree-tool/se
 
 ```toml
 # worktree-tool settings
-# terminal: one of terminal, iterm, wezterm, ghostty, alacritty, kitty, warp,
-# hyper (or unset for auto-detect)
+# terminal: one of the ids below (or unset for auto-detect)
 terminal = "iterm"
 ```
 
 Terminal resolution order: `settings.toml` → `$TERMCMD` env var (app name,
-[Zed convention](https://zed.dev)) → first detected terminal. Terminal.app
-ships with macOS, so auto-detect always resolves there by default. For
-terminals with a CLI on `PATH` (wezterm, ghostty, alacritty, kitty), the CLI
-form is preferred so the new window opens in the worktree's directory.
+[Zed convention](https://zed.dev)) → first detected terminal. CLI terminals
+launch with the worktree as their working directory; Windows Terminal gets an
+explicit `-d` flag because its profiles override the inherited directory.
+
+Supported terminals (auto-detected; the settings dialog only lists installed
+ones):
+
+| Platform | Terminals, in auto-detect preference order |
+| --- | --- |
+| macOS | Terminal, iTerm2, WezTerm, Ghostty, Alacritty, Kitty, Warp, Hyper |
+| Linux / BSD | xdg-terminal-exec, GNOME Terminal, Konsole, Xfce Terminal, foot, Tilix, Kitty, Ghostty, Alacritty, WezTerm, xterm |
+| Windows | Windows Terminal, PowerShell (7), Windows PowerShell, Command Prompt, Alacritty, WezTerm, Ghostty |
 
 ## Development
 

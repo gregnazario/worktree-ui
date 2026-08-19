@@ -421,10 +421,7 @@ pub fn render_settings_dialog(
         let id = t.id;
         let name = t.name;
         let is_selected = selected.as_deref() == Some(id);
-        let describe = match &t.launch {
-            terminal::Launch::OpenApp(app) => format!("open -a {app}"),
-            terminal::Launch::Cli(bin, _) => format!("{bin} …"),
-        };
+        let describe = terminal::describe_launch(&t.launch);
         card = card.child(
             div()
                 .id(SharedString::from(format!("settings-terminal-{id}")))
