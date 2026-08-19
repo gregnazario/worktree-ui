@@ -99,3 +99,39 @@ fn add_remove_prune_roundtrip() {
 
     assert_eq!(git::default_branch(tmp.path()), "main");
 }
+
+#[test]
+fn status_pass_parallel_preserves_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    // repo gets its own dir so worktrees can live OUTSIDE it — otherwise
+    // the main worktree sees them as untracked files.
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    fixture_repo(&repo);
+    // enough entries to engage the parallel path (threads >= 2)
+    for i in 0u32..10 {
+        let wt = tmp.path().join("wts").join(format!("wt-{i:02}"));
+        git::add_worktree(&repo, &wt, Some(&format!("b-{i:02}")), "main").unwrap();
+        if i.is_multiple_of(2) {
+            std::fs::create_dir_all(&wt).unwrap();
+            std::fs::write(wt.join("dirty.txt"), "x").unwrap();
+        }
+    }
+    let entries = git::list_worktrees(&repo).unwrap();
+    assert_eq!(entries.len(), 11);
+    let done = git::status_pass(entries);
+    // statuses must align with the entry they belong to
+    for (i, e) in done.iter().enumerate() {
+        let name = e.path.file_name().unwrap().to_string_lossy().into_owned();
+        if i == 0 {
+            assert!(
+                matches!(e.status, WorktreeStatus::Clean { .. }),
+                "main dirty"
+            );
+        } else {
+            let n: u32 = name.split('-').nth(1).unwrap().parse().unwrap();
+            let is_dirty = matches!(e.status, WorktreeStatus::Dirty { .. });
+            assert_eq!(is_dirty, n.is_multiple_of(2), "status mismatch for {name}");
+        }
+    }
+}

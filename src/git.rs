@@ -62,17 +62,49 @@ pub fn list_worktrees(root: &Path) -> Result<Vec<WorktreeEntry>> {
 
 /// Runs `git status` against every worktree, filling in each entry's status.
 /// Failures degrade that entry to `Unavailable`; the batch never fails.
+///
+/// Entries are split into contiguous chunks processed on scoped threads
+/// (bounded by CPU count) and reassembled in order. The bench example
+/// measured ~10 ms per worktree sequentially, so 50 worktrees would
+/// otherwise cost half a second per refresh.
 pub fn status_pass(entries: Vec<WorktreeEntry>) -> Vec<WorktreeEntry> {
-    entries
-        .into_iter()
-        .map(|mut e| {
-            match run_git(Some(&e.path), &["status", "--porcelain=v2", "--branch"]) {
-                Ok(out) => e.status = parse_status_porcelain_v2(&out),
-                Err(err) => e.status = WorktreeStatus::Unavailable(err.message),
-            }
-            e
-        })
-        .collect()
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(8)
+        .min(entries.len().max(1));
+    if threads <= 1 {
+        return entries.into_iter().map(status_one).collect();
+    }
+
+    let chunks: Vec<Vec<WorktreeEntry>> = {
+        let mut chunks = Vec::with_capacity(threads);
+        for chunk in entries.chunks(entries.len().div_ceil(threads)) {
+            chunks.push(chunk.to_vec());
+        }
+        chunks
+    };
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| scope.spawn(move || chunk.into_iter().map(status_one).collect::<Vec<_>>()))
+            .collect();
+        // status_one is total (no panicking operations), so a join failure
+        // is a bug worth crashing on rather than silently dropping rows.
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("status worker panicked"))
+            .collect()
+    })
+}
+
+fn status_one(mut e: WorktreeEntry) -> WorktreeEntry {
+    match run_git(Some(&e.path), &["status", "--porcelain=v2", "--branch"]) {
+        Ok(out) => e.status = parse_status_porcelain_v2(&out),
+        Err(err) => e.status = WorktreeStatus::Unavailable(err.message),
+    }
+    e
 }
 
 /// Adds a worktree at `path`. `branch: Some(name)` creates a new branch off
