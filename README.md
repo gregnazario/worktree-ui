@@ -1,5 +1,9 @@
 # worktree-tool
 
+<p align="left">
+  <img src="assets/logo.svg" width="96" alt="worktree-tool logo">
+</p>
+
 A native GUI for managing [git worktrees](https://git-scm.com/docs/git-worktree),
 built in Rust with [GPUI](https://gpui.rs) (Zed's GPU-accelerated UI framework).
 
