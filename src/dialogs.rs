@@ -2,6 +2,8 @@
 //! (not separate entities); the render helpers below take the root view
 //! directly and attach listeners against it.
 
+use crate::feedback;
+use crate::platform;
 use crate::terminal::{self, InstalledTerminal};
 use crate::text_field::TextField;
 use crate::ui::RootView;
@@ -489,13 +491,29 @@ pub fn render_settings_dialog(
         .when(!saved_note.is_empty(), |c| {
             c.child(label(format!("Saved: {saved_note}")))
         })
-        .child(div().flex().justify_end().child(button(
-            "settings-close",
-            "Done",
-            rgb(0x11111b),
-            Some(GREEN),
-            None,
-            cx.listener(|this, _, window, cx| this.close_dialog(window, cx)),
-        )));
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(button(
+                    "settings-report-bug",
+                    "Report a bug",
+                    TEXT,
+                    None,
+                    Some(BORDER),
+                    cx.listener(|_, _, _window, _cx| {
+                        platform::open_url(&feedback::report_bug_url());
+                    }),
+                ))
+                .child(button(
+                    "settings-close",
+                    "Done",
+                    rgb(0x11111b),
+                    Some(GREEN),
+                    None,
+                    cx.listener(|this, _, window, cx| this.close_dialog(window, cx)),
+                )),
+        );
     card
 }

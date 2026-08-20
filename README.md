@@ -101,7 +101,11 @@ terminal = "iterm"
 ```
 
 Terminal resolution order: `settings.toml` → `$TERMCMD` env var (app name,
-[Zed convention](https://zed.dev)) → first detected terminal. CLI terminals
+[Zed convention](https://zed.dev)) → first detected terminal.
+
+**Report a bug** (Settings → *Report a bug*) opens a prefilled GitHub issue
+in your browser. It includes only the app version and platform — nothing
+else is collected, and you review it before submitting. CLI terminals
 launch with the worktree as their working directory; Windows Terminal gets an
 explicit `-d` flag because its profiles override the inherited directory.
 

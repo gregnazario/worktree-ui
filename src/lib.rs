@@ -1,4 +1,5 @@
 pub mod dialogs;
+pub mod feedback;
 pub mod git;
 pub mod model;
 pub mod platform;
