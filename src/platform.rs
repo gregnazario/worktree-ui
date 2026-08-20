@@ -1,0 +1,54 @@
+//! Best-effort OS integration helpers. Fire-and-forget: failures to spawn
+//! are silently ignored in v1. Terminal launching lives in `terminal.rs`.
+
+use std::path::Path;
+
+/// Button label matching the platform's file-manager vocabulary.
+#[cfg(target_os = "macos")]
+pub const SHOW_IN_FILE_MANAGER_LABEL: &str = "Show in Finder";
+#[cfg(target_os = "windows")]
+pub const SHOW_IN_FILE_MANAGER_LABEL: &str = "Show in File Explorer";
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const SHOW_IN_FILE_MANAGER_LABEL: &str = "Show in Files";
+
+/// Opens a URL in the platform default browser (used for bug reporting).
+#[cfg(target_os = "macos")]
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+#[cfg(target_os = "windows")]
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start"])
+        .arg(url)
+        .spawn();
+}
+
+/// Reveals `path` in the platform file manager, selecting it in its parent.
+#[cfg(target_os = "macos")]
+pub fn reveal_in_file_manager(path: &Path) {
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn reveal_in_file_manager(path: &Path) {
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
+#[cfg(target_os = "windows")]
+pub fn reveal_in_file_manager(path: &Path) {
+    // Known-good form: explorer /select,"C:\path with spaces" — embed the
+    // quotes so std's own quoting wraps exactly the path.
+    let _ = std::process::Command::new("explorer")
+        .arg(format!("/select,\"{}\"", path.display()))
+        .spawn();
+}
