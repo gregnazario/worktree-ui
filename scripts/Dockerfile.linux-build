@@ -1,0 +1,20 @@
+# Reproducible Linux build environment for worktree-tool, usable from any
+# host with Docker (macOS, Windows, Linux). Mirrors the CI apt dependencies.
+#
+#   docker build -t worktree-tool/builder -f scripts/Dockerfile.linux-build scripts/
+#   docker run --rm -v "$PWD":/work -w /work -e TARGET=x86_64-unknown-linux-gnu \
+#       worktree-tool/builder
+FROM rust:1-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        g++ \
+        libxcb1-dev \
+        libxkbcommon-dev \
+        libxkbcommon-x11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+# TARGET selects the Rust triplet (default: matching glibc x86_64).
+CMD ["sh", "-c", "rustup target add \"$TARGET\" && cargo build --release --target \"$TARGET\""]

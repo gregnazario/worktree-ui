@@ -127,6 +127,16 @@ cargo test         # unit + git integration tests
 cargo clippy -- -D warnings
 ```
 
+Building for **any target** — native or cross (Windows `.exe` from macOS,
+Linux via Docker, FreeBSD, any Rust triplet) — is wrapped by:
+
+```sh
+scripts/build-target.sh <target>   # host | macos-universal | x86_64-pc-windows-gnu | …
+```
+
+See [docs/BUILDING.md](docs/BUILDING.md) for the full per-platform guide and
+the measured cross-compilation matrix.
+
 Note: text inputs accept raw key events; IME/marked-text input is not
 supported in v1.
 
