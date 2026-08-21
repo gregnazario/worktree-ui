@@ -5,6 +5,10 @@ on:
     branches: ["**"]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: ${{ matrix.os }}
@@ -51,3 +55,25 @@ jobs:
             export LD_LIBRARY_PATH=/usr/local/lib
             cargo test
             cargo build --release
+
+  docs:
+    name: docs sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Local asset references exist
+        run: |
+          python3 - <<'PY'
+          import re, sys, pathlib
+          docs = pathlib.Path("docs")
+          html = (docs / "index.html").read_text()
+          refs = re.findall(r'(?:src|href)="([^"#][^"]*)"', html)
+          missing = [
+              r for r in refs
+              if not r.startswith(("http://", "https://", "mailto:"))
+              and not (docs / r).exists()
+          ]
+          if missing:
+              sys.exit(f"docs/index.html references missing local files: {missing}")
+          print(f"docs: {len(refs)} references OK")
+          PY
