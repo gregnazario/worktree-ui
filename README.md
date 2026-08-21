@@ -21,10 +21,11 @@ Keyboard-first.
 
 ## Install (macOS)
 
-Grab `worktree-tool-<version>-macos-universal.zip` from the latest
+Grab `worktree-tool-<version>-macos-universal.dmg` from the latest
 [GitHub Release](https://github.com/gregnazario/worktree-ui/releases)
-(built automatically by CI: universal arm64 + x86_64 `.app` bundle), unzip,
-and drag **Worktree Tool.app** to `/Applications`.
+(built automatically by CI: universal arm64 + x86_64), open it, and drag
+**Worktree Tool** onto the **Applications** shortcut. A plain `.zip` of the
+`.app` bundle is attached alongside for tooling that prefers it.
 
 The release build is ad-hoc signed, not notarized — on first launch
 macOS Gatekeeper may ask you to confirm via right-click → Open. When launched
