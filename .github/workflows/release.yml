@@ -27,7 +27,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: worktree-tool-macos-universal
-          path: dist/worktree-tool-*.zip
+          path: |
+            dist/worktree-tool-*.dmg
+            dist/worktree-tool-*.zip
           if-no-files-found: error
 
       - name: Create GitHub Release (tags only)
@@ -36,7 +38,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          gh release create "$TAG" dist/worktree-tool-*.zip \
+          gh release create "$TAG" dist/worktree-tool-*.dmg dist/worktree-tool-*.zip \
             --title "worktree-tool $TAG" \
             --generate-notes \
-            || gh release upload "$TAG" dist/worktree-tool-*.zip --clobber
+            || gh release upload "$TAG" dist/worktree-tool-*.dmg dist/worktree-tool-*.zip --clobber
