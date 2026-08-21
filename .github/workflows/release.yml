@@ -147,7 +147,9 @@ jobs:
         run: |
           ls -la dist/
           TAG="${GITHUB_REF_NAME}"
+          # -R: this job has no checkout, so gh needs the repo spelled out
           gh release create "$TAG" dist/* \
+            -R "${GITHUB_REPOSITORY}" \
             --title "worktree-tool $TAG" \
             --generate-notes \
-            || gh release upload "$TAG" dist/* --clobber
+            || gh release upload "$TAG" dist/* -R "${GITHUB_REPOSITORY}" --clobber
