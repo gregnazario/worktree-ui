@@ -19,7 +19,7 @@ jobs:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Package .app (universal) and zip
-        run: scripts/package-macos.sh "$VERSION"
+        run: scripts/package-macos.sh "${VERSION#v}"
         env:
           VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.0.0-dev' }}
 
