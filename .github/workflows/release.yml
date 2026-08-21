@@ -16,19 +16,15 @@ jobs:
   macos-package:
     name: macOS universal package
     runs-on: macos-15
-    permissions:
-      contents: write # to create GitHub Releases on tag pushes
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
-
-      - name: Package .app (universal) and zip
+      - name: Package .app (universal), DMG, and zip
         run: scripts/package-macos.sh "${VERSION#v}"
         env:
           VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.0.0-dev' }}
-
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
@@ -38,13 +34,120 @@ jobs:
             dist/worktree-tool-*.zip
           if-no-files-found: error
 
-      - name: Create GitHub Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
+  package-linux:
+    name: package linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install system dependencies
+        run: >
+          sudo apt-get update &&
+          sudo apt-get install -y build-essential g++
+          libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+      - name: Build
+        run: cargo build --release --target "${{ matrix.target }}"
+      - name: Package
+        run: |
+          VERSION="${VERSION#v}"
+          tar -czf "worktree-tool-${VERSION}-linux-${{ matrix.arch }}.tar.gz" \
+              -C "target/${{ matrix.target }}/release" worktree-tool
+        env:
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.0.0-dev' }}
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: worktree-tool-linux-${{ matrix.arch }}
+          path: worktree-tool-*.tar.gz
+          if-no-files-found: error
+
+  package-windows:
+    name: package windows x86_64
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Built on a Windows host: gpui embeds its DirectX shaders via
+      # fxc.exe, which only runs on Windows.
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $ver = "${env:VERSION}".TrimStart("v")
+          Compress-Archive -Path target/release/worktree-tool.exe `
+              -DestinationPath "worktree-tool-$ver-windows-x86_64.zip"
+        env:
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.0.0-dev' }}
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: worktree-tool-windows-x86_64
+          path: worktree-tool-*.zip
+          if-no-files-found: error
+
+  package-freebsd:
+    name: package freebsd x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y git rust libxcb libxkbcommon gcc
+          run: |
+            # ports install to /usr/local/lib, which base cc/ld and rtld
+            # do not search by default on FreeBSD
+            export LIBRARY_PATH=/usr/local/lib
+            export LD_LIBRARY_PATH=/usr/local/lib
+            cargo build --release
+            # NOTE: step env does not propagate into the VM, so the version
+            # is inlined here workflow-side.
+            VERSION="${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.0.0-dev' }}"
+            VERSION="${VERSION#v}"
+            mkdir -p dist-back
+            tar -czf "dist-back/worktree-tool-${VERSION}-freebsd-x86_64.tar.gz" \
+                -C target/release worktree-tool
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: worktree-tool-freebsd-x86_64
+          path: dist-back/worktree-tool-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos-package, package-linux, package-windows, package-freebsd]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ls -la dist/
           TAG="${GITHUB_REF_NAME}"
-          gh release create "$TAG" dist/worktree-tool-*.dmg dist/worktree-tool-*.zip \
+          gh release create "$TAG" dist/* \
             --title "worktree-tool $TAG" \
             --generate-notes \
-            || gh release upload "$TAG" dist/worktree-tool-*.dmg dist/worktree-tool-*.zip --clobber
+            || gh release upload "$TAG" dist/* --clobber

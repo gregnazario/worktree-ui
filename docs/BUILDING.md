@@ -111,5 +111,11 @@ default there. For FreeBSD, CI's VM build is the practical path.
 Every PR to `main` runs: fmt + clippy + all tests + a release build on
 macOS, Linux, Windows, and FreeBSD, the universal macOS package build, and
 a docs sanity check — all six are required before merge (branch
-protection). Tagging `v*` publishes a GitHub Release with the macOS DMG and
-zip. See `.github/workflows/` for the definitions.
+protection). See `.github/workflows/` for the definitions.
+
+Tagging `v*` publishes a GitHub Release with a package for **every
+platform**: the macOS universal DMG + zip, `linux-x86_64` and
+`linux-aarch64` tarballs (built on native runners, including the arm64
+one), a `windows-x86_64` zip built on a Windows host (so gpui's DirectX
+shaders are compiled by fxc.exe), and a `freebsd-x86_64` tarball from the
+FreeBSD VM job.
