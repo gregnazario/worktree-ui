@@ -38,12 +38,6 @@ from Finder the app starts at the path picker (there is no terminal cwd to
 detect); when run from a terminal it auto-detects the repository from the
 working directory.
 
-The release build is ad-hoc signed, not notarized — on first launch
-macOS Gatekeeper may ask you to confirm via right-click → Open. When launched
-from Finder the app starts at the path picker (there is no terminal cwd to
-detect); when run from a terminal it auto-detects the repository from the
-working directory.
-
 To package locally: `scripts/package-macos.sh 0.1.0` produces
 `dist/Worktree Tool.app` and the zip.
 
