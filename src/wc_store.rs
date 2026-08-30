@@ -1,6 +1,7 @@
-//! State for one open worktree's Working Copy view. Same async discipline
-//! as `WorktreeStore`: operations spawn on the background executor with a
-//! generation counter; completions carrying a stale generation are dropped.
+//! State for one open worktree's Working Copy view. Operations spawn on the
+//! background executor with a generation counter; stale snapshot completions
+//! are dropped, while mutation completions always apply (the disk effect is
+//! real whenever it lands).
 
 use crate::engine::{self, commit, diff, mutate, working_copy as eng};
 use gpui::{App, AppContext, Context, Entity};
@@ -236,8 +237,9 @@ impl WorkingCopyStore {
         };
         let worktree = self.worktree.clone();
         let path = entry.path.clone();
+        // Bump to cancel in-flight snapshot loads; the mutation completion
+        // below applies regardless of generation (see `after_mutation`).
         self.generation += 1;
-        let gen = self.generation;
         self.busy = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -253,7 +255,7 @@ impl WorkingCopyStore {
                 })
                 .await;
             this.update(cx, |store, cx| {
-                store.after_mutation(gen, result, cx);
+                store.after_mutation(result, cx);
             })
             .ok();
         })
@@ -272,7 +274,6 @@ impl WorkingCopyStore {
             return;
         }
         self.generation += 1;
-        let gen = self.generation;
         self.busy = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -280,7 +281,7 @@ impl WorkingCopyStore {
                 .background_executor()
                 .spawn(async move { mutate::stage(&worktree, &paths) })
                 .await;
-            this.update(cx, |store, cx| store.after_mutation(gen, result, cx))
+            this.update(cx, |store, cx| store.after_mutation(result, cx))
                 .ok();
         })
         .detach();
@@ -297,7 +298,6 @@ impl WorkingCopyStore {
         let worktree = self.worktree.clone();
         let path = entry.path.clone();
         self.generation += 1;
-        let gen = self.generation;
         self.busy = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -311,16 +311,15 @@ impl WorkingCopyStore {
                     }
                 })
                 .await;
-            this.update(cx, |store, cx| store.after_mutation(gen, result, cx))
+            this.update(cx, |store, cx| store.after_mutation(result, cx))
                 .ok();
         })
         .detach();
     }
 
-    fn after_mutation(&mut self, gen: u64, result: engine::Result<()>, cx: &mut Context<Self>) {
-        if gen != self.generation {
-            return;
-        }
+    fn after_mutation(&mut self, result: engine::Result<()>, cx: &mut Context<Self>) {
+        // Mutation completions deliberately skip the generation guard: the
+        // disk effect is real whenever it lands; only snapshots are guarded.
         self.busy = false;
         match result {
             Ok(()) => {
@@ -349,8 +348,9 @@ impl WorkingCopyStore {
         let worktree = self.worktree.clone();
         self.busy = true;
         self.message = Some("Waiting for commit editor…".into());
+        // Bump to cancel in-flight snapshot loads; the completion below
+        // applies regardless of generation (see `after_mutation`).
         self.generation += 1;
-        let gen = self.generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -358,9 +358,6 @@ impl WorkingCopyStore {
                 .spawn(async move { commit::commit_with_editor(&worktree, &summary) })
                 .await;
             this.update(cx, |store, cx| {
-                if gen != store.generation {
-                    return;
-                }
                 store.busy = false;
                 match result {
                     Ok(commit::CommitOutcome::Committed) => {
