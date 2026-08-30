@@ -468,7 +468,12 @@ impl RootView {
                 }
             }
             "d" if list_focused => self.open_discard_dialog(window, cx),
-            // "c" (commit) arrives in Task 12; diff-pane hunk keys in Task 11.
+            "c" if list_focused => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.commit_with_editor(cx));
+                }
+            }
+            // Diff-pane hunk keys ("s" with diff focus) arrive in Phase 1b.
             _ => {}
         }
     }
@@ -1272,6 +1277,39 @@ mod tests {
                 Pane::Files,
                 "second tab returns to the file list"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn commit_key_requires_staged_changes(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            assert_eq!(
+                root.detail.as_ref().unwrap().read(cx).staged_count(),
+                0,
+                "fixture starts with nothing staged"
+            );
+        });
+        vcx.simulate_keystrokes("c");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert!(
+                wc.message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("Nothing staged"),
+                "expected the nothing-staged hint, got {:?}",
+                wc.message
+            );
+            assert!(!wc.busy, "no editor spawned");
         });
     }
 }
