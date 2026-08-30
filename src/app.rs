@@ -213,6 +213,13 @@ impl RootView {
         self.close_dialog(window, cx);
     }
 
+    pub fn confirm_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(wc) = self.detail.clone() {
+            wc.update(cx, |store, cx| store.discard_selected(cx));
+        }
+        self.close_dialog(window, cx);
+    }
+
     pub fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dialog.is_open() || self.store.read(cx).repo_root.is_none() {
             return;
@@ -302,6 +309,32 @@ impl RootView {
             branch_label: SharedString::from(branch_label),
             dirty,
             force: false,
+        };
+        window.focus(&self.dialog_focus);
+        cx.notify();
+    }
+
+    /// Only Unstaged/Untracked file rows can be discarded (staged changes
+    /// unstage first; conflicts and directories are not offered in Phase 1).
+    fn open_discard_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_open() {
+            return;
+        }
+        let Some(wc) = &self.detail else { return };
+        let Some((group, entry)) = wc.read(cx).selected_row().map(|(g, e)| (g, e.clone())) else {
+            return;
+        };
+        let eligible = matches!(
+            group,
+            crate::engine::working_copy::Group::Unstaged
+                | crate::engine::working_copy::Group::Untracked
+        ) && !entry.is_dir();
+        if !eligible {
+            return;
+        }
+        self.dialog = DialogState::Discard {
+            path: entry.path.clone(),
+            untracked: entry.untracked,
         };
         window.focus(&self.dialog_focus);
         cx.notify();
@@ -417,7 +450,18 @@ impl RootView {
                     wc.update(cx, |store, cx| store.select_next(cx));
                 }
             }
-            // "s", "S", "d", "c", diff-pane hunk keys arrive in Tasks 10–12.
+            "s" if list_focused => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.toggle_stage(cx));
+                }
+            }
+            "S" if list_focused => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.stage_all(cx));
+                }
+            }
+            "d" if list_focused => self.open_discard_dialog(window, cx),
+            // "c" (commit) arrives in Task 12; diff-pane hunk keys in Task 11.
             _ => {}
         }
     }
@@ -725,7 +769,7 @@ impl Render for RootView {
                             )
                             .child(toolbar_button(
                                 "detail-terminal",
-                                "Open in Terminal ⏎",
+                                "Open in Terminal (t)",
                                 cx.listener(move |_, _, _window, _cx| {
                                     terminal::open_in_terminal(&terminal_path);
                                 }),
@@ -802,6 +846,9 @@ impl Render for RootView {
                 }
                 DialogState::Settings { .. } => {
                     Some(dialogs::render_settings_dialog(self, window, cx).into_any_element())
+                }
+                DialogState::Discard { .. } => {
+                    Some(dialogs::render_discard_dialog(self, window, cx).into_any_element())
                 }
             };
             if let Some(card) = card {
@@ -1073,5 +1120,89 @@ mod tests {
             vec![selected_path],
             "detail-context t records the same worktree path"
         );
+    }
+
+    #[gpui::test]
+    fn stage_keys_toggle_files(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("new.txt"), "untracked").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        // navigate to the untracked row and stage it
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        let refreshed_before =
+            view.update(&mut vcx.cx, |root, cx| root.store.read(cx).last_refreshed);
+        vcx.simulate_keystrokes("s");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(wc.staged_count(), 1, "s stages the selected untracked file");
+            // `mutated` itself is consumed by the detail observer (Task 9) to
+            // trigger the home refresh, so assert the observable effect: the
+            // home list re-refreshed with fresh status data.
+            let home = root.store.read(cx);
+            assert_ne!(
+                home.last_refreshed, refreshed_before,
+                "staging flags home refresh"
+            );
+            // The refresh carried fresh data: the untracked file moved into
+            // the index (staging makes the worktree dirty-staged, not clean).
+            match home.entries[0].status {
+                crate::model::WorktreeStatus::Dirty {
+                    staged, untracked, ..
+                } => assert_eq!(
+                    (staged, untracked),
+                    (1, 0),
+                    "untracked file moved to staged on the home badge"
+                ),
+                _ => panic!("expected a dirty badge after staging"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn discard_opens_confirm_dialog_and_esc_cancels(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "changed").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        // f.txt is modified-unstaged; it's row 0 of Unstaged (only row)
+        vcx.simulate_keystrokes("d");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert!(
+                matches!(root.dialog, DialogState::Discard { .. }),
+                "discard needs confirmation"
+            );
+        });
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            assert!(matches!(root.dialog, DialogState::None));
+            assert_eq!(
+                root.detail
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .wc
+                    .as_ref()
+                    .unwrap()
+                    .entries
+                    .len(),
+                1,
+                "nothing discarded"
+            );
+        });
     }
 }
