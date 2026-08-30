@@ -20,6 +20,11 @@ pub fn fixture_repo(dir: &Path) {
     sh(Some(dir), &["git", "init", "-q", "-b", "main"]);
     sh(Some(dir), &["git", "config", "user.email", "t@t.t"]);
     sh(Some(dir), &["git", "config", "user.name", "t"]);
+    // The developer's global config may sign commits; parallel test runs
+    // spawn concurrent gpg processes that intermittently die with
+    // "Cannot allocate memory", flaking every fixture. Fixtures are
+    // throwaway — never sign in them.
+    sh(Some(dir), &["git", "config", "commit.gpgsign", "false"]);
     std::fs::write(dir.join("f.txt"), "one").unwrap();
     sh(Some(dir), &["git", "add", "."]);
     sh(Some(dir), &["git", "commit", "-qm", "init"]);
