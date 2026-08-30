@@ -27,6 +27,8 @@ impl std::fmt::Display for GitError {
 
 pub type Result<T> = std::result::Result<T, GitError>;
 
+pub mod working_copy;
+
 /// Runs `git` and returns stdout verbatim (no trailing trim): `-z` records
 /// are NUL-terminated and parsed positionally.
 pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
