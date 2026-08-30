@@ -199,7 +199,14 @@ impl RootView {
 
     pub fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dialog = DialogState::None;
-        window.focus(&self.root_focus);
+        // Over the detail view, focus must return to the detail list:
+        // `detail_keydown` early-returns when no detail handle is focused, so
+        // refocusing the root would leave every detail key dead.
+        if self.detail.is_some() {
+            window.focus(&self.detail_list_focus);
+        } else {
+            window.focus(&self.root_focus);
+        }
         cx.notify();
     }
 
@@ -1188,6 +1195,13 @@ mod tests {
         });
         vcx.simulate_keystrokes("escape");
         vcx.run_until_parked();
+        let list_focus = view.update(&mut vcx.cx, |root, _cx| root.detail_list_focus.clone());
+        vcx.update(|window, _cx| {
+            assert!(
+                list_focus.is_focused(window),
+                "esc over the detail view must hand focus back to the detail list"
+            );
+        });
         view.update(&mut vcx.cx, |root, cx| {
             assert!(matches!(root.dialog, DialogState::None));
             assert_eq!(
