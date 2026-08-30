@@ -1,3 +1,6 @@
+use crate::engine;
+use std::path::Path;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BranchInfo {
     /// `# branch.head` value: branch name or `(detached)`.
@@ -170,6 +173,55 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
 fn xy(field: &str) -> (char, char) {
     let mut chars = field.chars();
     (chars.next().unwrap_or('.'), chars.next().unwrap_or('.'))
+}
+
+/// Parses `git diff --numstat -z`: records are `added\tdeleted\tpath` NUL-
+/// terminated; rename records are followed by their orig path in the next
+/// NUL chunk (no tabs — skipped here). `-` counts mean binary.
+pub fn parse_numstat_z(input: &str) -> Vec<(String, Option<(u64, u64)>)> {
+    let mut out = Vec::new();
+    for chunk in input.split('\0') {
+        if chunk.is_empty() {
+            continue;
+        }
+        let mut parts = chunk.splitn(3, '\t');
+        let (Some(a), Some(d), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+            continue; // rename orig-path chunk has no tabs
+        };
+        let counts = if a == "-" || d == "-" {
+            None
+        } else {
+            Some((a.parse().unwrap_or(0), d.parse().unwrap_or(0)))
+        };
+        out.push((path.to_string(), counts));
+    }
+    out
+}
+
+/// Full working-copy snapshot: status v2 `-z` + numstat for both diff
+/// surfaces. Read-only (`--no-optional-locks`, which git only accepts as a
+/// global option BEFORE the subcommand).
+pub fn status(worktree: &Path) -> engine::Result<WorkingCopy> {
+    let raw = engine::run(
+        worktree,
+        &["--no-optional-locks", "status", "--porcelain=v2", "-z", "--branch"],
+    )?;
+    let mut wc = parse_status_z(&raw);
+    for (args, key) in [
+        (vec!["--no-optional-locks", "diff", "--numstat", "-z"], 0),
+        (vec!["--no-optional-locks", "diff", "--cached", "--numstat", "-z"], 1),
+    ] {
+        let raw = engine::run(worktree, &args)?;
+        for (path, counts) in parse_numstat_z(&raw) {
+            let entry = wc.entries.iter_mut().find(|e| e.path == path);
+            match (entry, key) {
+                (Some(e), 0) => e.unstaged_lines = counts,
+                (Some(e), _) => e.staged_lines = counts,
+                _ => {}
+            }
+        }
+    }
+    Ok(wc)
 }
 
 /// Display order with stable indices into `wc.entries`. A file changed in
