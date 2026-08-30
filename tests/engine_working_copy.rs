@@ -115,6 +115,84 @@ mod diff_tests {
     }
 }
 
+mod mutate_tests {
+    use worktree_tool::engine::mutate;
+    use worktree_tool::engine::working_copy::status;
+
+    use super::common;
+
+    #[test]
+    fn stage_unstage_discard_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        common::fixture_repo(tmp.path());
+        std::fs::write(tmp.path().join("f.txt"), "changed").unwrap();
+        std::fs::write(tmp.path().join("u.txt"), "untracked").unwrap();
+
+        // stage file + untracked file, then unstage one
+        mutate::stage(tmp.path(), &["f.txt".to_string(), "u.txt".to_string()]).unwrap();
+        let wc = status(tmp.path()).unwrap();
+        let f = wc.entries.iter().find(|e| e.path == "f.txt").unwrap();
+        assert_eq!(f.index_status, 'M');
+        let u = wc.entries.iter().find(|e| e.path == "u.txt").unwrap();
+        assert_eq!(u.index_status, 'A'); // untracked → staged new file
+        mutate::unstage(tmp.path(), &["u.txt".to_string()]).unwrap();
+        let wc = status(tmp.path()).unwrap();
+        assert!(
+            wc.entries
+                .iter()
+                .find(|e| e.path == "u.txt")
+                .unwrap()
+                .untracked
+        );
+
+        // discard unstaged: back to committed content
+        mutate::discard_unstaged(tmp.path(), "f.txt").unwrap();
+        let wc = status(tmp.path()).unwrap();
+        // porcelain v2 omits unchanged files, so "fully clean" means the
+        // entry is gone entirely (equivalent to index '.' + wt '.').
+        assert!(wc.entries.iter().all(|e| e.path != "f.txt"));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("f.txt")).unwrap(),
+            "one"
+        );
+
+        // discard untracked: file gone
+        mutate::discard_untracked(tmp.path(), "u.txt").unwrap();
+        assert!(!tmp.path().join("u.txt").exists());
+    }
+
+    #[test]
+    fn dash_and_space_names_stay_positional() {
+        let tmp = tempfile::tempdir().unwrap();
+        common::fixture_repo(tmp.path());
+        // A file literally named "-weird name.txt" must never be an option.
+        let weird = "-weird name.txt";
+        std::fs::write(tmp.path().join(weird), "x").unwrap();
+        mutate::stage(tmp.path(), &[weird.to_string()]).unwrap();
+        let wc = status(tmp.path()).unwrap();
+        assert_eq!(wc.entries[0].path, weird);
+        mutate::unstage(tmp.path(), &[weird.to_string()]).unwrap();
+        let wc = status(tmp.path()).unwrap();
+        assert!(wc.entries[0].untracked);
+    }
+
+    #[test]
+    fn empty_paths_are_noops() {
+        let tmp = tempfile::tempdir().unwrap();
+        common::fixture_repo(tmp.path());
+        mutate::stage(tmp.path(), &[]).unwrap();
+        mutate::unstage(tmp.path(), &[]).unwrap();
+    }
+
+    #[test]
+    fn discard_untracked_refuses_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        common::fixture_repo(tmp.path());
+        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+        assert!(mutate::discard_untracked(tmp.path(), "sub").is_err());
+    }
+}
+
 mod status_tests {
     use super::*;
 
