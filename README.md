@@ -97,6 +97,7 @@ Detail view (per worktree):
 | `d` | Discard selected file's changes (confirmation) |
 | `c` | Commit staged changes via your editor |
 | `t` | Open worktree in terminal |
+| `r` | Refresh working copy |
 | `esc` | Back to worktree list |
 
 ## Working Copy

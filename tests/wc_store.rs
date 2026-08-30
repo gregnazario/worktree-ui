@@ -20,6 +20,7 @@ fn fixture(cx_work: &std::path::Path) {
     sh(Some(cx_work), &["git", "init", "-q", "-b", "main"]);
     sh(Some(cx_work), &["git", "config", "user.email", "t@t.t"]);
     sh(Some(cx_work), &["git", "config", "user.name", "t"]);
+    sh(Some(cx_work), &["git", "config", "commit.gpgsign", "false"]);
     std::fs::write(cx_work.join("f.txt"), "one").unwrap();
     std::fs::write(cx_work.join("g.txt"), "one").unwrap();
     sh(Some(cx_work), &["git", "add", "."]);

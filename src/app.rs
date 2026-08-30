@@ -905,6 +905,7 @@ mod tests {
         sh(dir, &["git", "init", "-q", "-b", "main"]);
         sh(dir, &["git", "config", "user.email", "t@t.t"]);
         sh(dir, &["git", "config", "user.name", "t"]);
+        sh(dir, &["git", "config", "commit.gpgsign", "false"]);
         std::fs::write(dir.join("f.txt"), "one").unwrap();
         sh(dir, &["git", "add", "."]);
         sh(dir, &["git", "commit", "-qm", "init"]);

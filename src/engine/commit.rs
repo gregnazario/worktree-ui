@@ -68,8 +68,13 @@ pub enum CommitOutcome {
 pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<CommitOutcome> {
     let config_editor = engine::run_trimmed(worktree, &["config", "--get", "core.editor"]).ok();
     let argv = resolve_editor(config_editor.as_deref(), &|k| {
-        std::env::var(k).ok().filter(|v| !v.is_empty())
+        std::env::var(k).ok().filter(|v| !v.trim().is_empty())
     });
+    if argv.is_empty() {
+        return Err(GitError {
+            message: "no commit editor configured".into(),
+        });
+    }
     let msg_path = temp_msg_path();
     std::fs::write(&msg_path, template(staged_summary)).map_err(|e| GitError {
         message: format!("could not write commit template: {e}"),

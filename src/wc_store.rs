@@ -267,7 +267,7 @@ impl WorkingCopyStore {
         let paths: Vec<String> = self
             .rows()
             .into_iter()
-            .filter(|(g, _)| !matches!(g, eng::Group::Staged))
+            .filter(|(g, _)| !matches!(g, eng::Group::Staged | eng::Group::Conflicts))
             .filter_map(|(_, i)| self.wc.as_ref().map(|wc| wc.entries[i].path.clone()))
             .collect();
         if paths.is_empty() {
