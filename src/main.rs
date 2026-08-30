@@ -2,8 +2,8 @@ use gpui::{
     px, size, App, Application, Bounds, KeyBinding, Point, TitlebarOptions, WindowBounds,
     WindowOptions,
 };
+use worktree_tool::app::{FocusSearch, NewWorktree, Quit, Refresh, RootView};
 use worktree_tool::store::WorktreeStore;
-use worktree_tool::ui::{FocusSearch, NewWorktree, Quit, Refresh, RootView};
 
 fn main() {
     Application::new().run(|cx: &mut App| {

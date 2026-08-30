@@ -2,12 +2,12 @@
 //! (not separate entities); the render helpers below take the root view
 //! directly and attach listeners against it.
 
+use crate::app::RootView;
+use crate::app::{ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED, TEXT};
 use crate::feedback;
 use crate::platform;
 use crate::terminal::{self, InstalledTerminal};
 use crate::text_field::TextField;
-use crate::ui::RootView;
-use crate::ui::{ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED, TEXT};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, rgb, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
