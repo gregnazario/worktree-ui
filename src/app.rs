@@ -49,6 +49,19 @@ pub const GREEN: gpui::Rgba = hex_rgb(0xa6e3a1);
 pub const YELLOW: gpui::Rgba = hex_rgb(0xf9e2af);
 pub const RED: gpui::Rgba = hex_rgb(0xf38ba8);
 
+/// Test seam: records requested terminal opens instead of spawning a real
+/// terminal (tests run on headless CI machines).
+#[cfg(test)]
+pub(crate) static TERMINAL_REQUESTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn open_terminal(path: &std::path::Path) {
+    #[cfg(test)]
+    TERMINAL_REQUESTS.lock().unwrap().push(path.to_path_buf());
+    #[cfg(not(test))]
+    terminal::open_in_terminal(path);
+}
+
 pub struct RootView {
     pub store: Entity<WorktreeStore>,
     pub search: Entity<TextField>,
@@ -60,6 +73,10 @@ pub struct RootView {
     /// Open Working Copy drill-in. When set, the detail view replaces the
     /// worktree list as the content branch.
     pub detail: Option<Entity<WorkingCopyStore>>,
+    /// Observation of the open detail store. Kept on the view (not
+    /// `.detach()`ed) so re-drilling in replaces it instead of accumulating
+    /// one subscription per `open_detail`; dropping it unsubscribes.
+    pub detail_subscription: Option<gpui::Subscription>,
     pub detail_focus: FocusHandle,
     pub detail_list_focus: FocusHandle,
     pub detail_diff_focus: FocusHandle,
@@ -159,6 +176,7 @@ impl RootView {
             root_focus,
             dialog_focus,
             detail: None,
+            detail_subscription: None,
             detail_focus,
             detail_list_focus,
             detail_diff_focus,
@@ -320,15 +338,16 @@ impl RootView {
         };
         let wc = WorkingCopyStore::new(entry.path.clone(), cx);
         // One successful mutation inside the detail view must refresh the home
-        // worktree list (status, ahead/behind, dirty badge all change).
-        cx.observe(&wc, move |this, wc, cx| {
-            let mutated = wc.update(cx, |wc, _cx| wc.take_mutated());
-            if mutated {
+        // worktree list (status, ahead/behind, dirty badge all change). The
+        // subscription is stored on the view, not detached: a previous drill-in's
+        // observer would otherwise accumulate (dropped stores make old observers
+        // inert but never remove their subscription entries).
+        self.detail_subscription = Some(cx.observe(&wc, move |this, wc, cx| {
+            if wc.update(cx, |store, _cx| store.take_mutated()) {
                 this.store.update(cx, |store, cx| store.refresh(cx));
             }
             cx.notify();
-        })
-        .detach();
+        }));
         self.detail = Some(wc);
         window.focus(&self.detail_list_focus);
         cx.notify();
@@ -337,6 +356,8 @@ impl RootView {
     /// Returns to the home list: refocus it and refresh, since the user may
     /// have mutated the worktree from the detail view.
     pub fn close_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Drop the observer first: a dropped Subscription unsubscribes.
+        self.detail_subscription = None;
         self.detail = None;
         window.focus(&self.root_focus);
         self.store.update(cx, |store, cx| store.refresh(cx));
@@ -360,7 +381,7 @@ impl RootView {
             "t" => {
                 if let Some(wc) = &self.detail {
                     let path = wc.read(cx).worktree.clone();
-                    terminal::open_in_terminal(&path);
+                    open_terminal(&path);
                 }
             }
             "r" => {
@@ -464,7 +485,7 @@ impl Render for RootView {
                 "t" => {
                     if let Some(entry) = this.store.read(cx).selected_entry() {
                         let path = entry.path.clone();
-                        terminal::open_in_terminal(&path);
+                        open_terminal(&path);
                     }
                 }
                 "backspace" | "delete" => this.open_remove_dialog(window, cx),
@@ -1018,20 +1039,39 @@ mod tests {
 
     #[gpui::test]
     fn t_still_opens_terminal_from_list(cx: &mut TestAppContext) {
-        // terminal::open_in_terminal spawns a real process; instead assert
-        // that "t" is routed by checking the key handler's observable
-        // effect: none (spawning is fire-and-forget). This test guards the
-        // keybinding table: "t" must not select/drill in.
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("fixture");
         std::fs::create_dir(&repo).unwrap();
         fixture_repo(&repo);
         let (view, mut vcx) = open_root(cx, &repo);
+        let selected_path = view.update(&mut vcx.cx, |root, cx| {
+            root.store.read(cx).selected_entry().unwrap().path.clone()
+        });
+
+        TERMINAL_REQUESTS.lock().unwrap().clear();
         vcx.simulate_keystrokes("t");
         vcx.run_until_parked();
         view.update(&mut vcx.cx, |root, _cx| {
             assert!(root.detail.is_none(), "t must not open the detail view");
             assert!(matches!(root.dialog, DialogState::None));
         });
+        assert_eq!(
+            TERMINAL_REQUESTS.lock().unwrap().clone(),
+            vec![selected_path.clone()],
+            "t must request exactly one terminal open at the selected worktree"
+        );
+
+        // Drilled in, "t" opens a terminal at the same worktree via the
+        // detail-context path.
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        TERMINAL_REQUESTS.lock().unwrap().clear();
+        vcx.simulate_keystrokes("t");
+        vcx.run_until_parked();
+        assert_eq!(
+            TERMINAL_REQUESTS.lock().unwrap().clone(),
+            vec![selected_path],
+            "detail-context t records the same worktree path"
+        );
     }
 }
