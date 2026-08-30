@@ -33,9 +33,9 @@ pub mod working_copy;
 /// Runs `git` and returns stdout verbatim (no trailing trim): `-z` records
 /// are NUL-terminated and parsed positionally.
 pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = command(cwd, args)
-        .output()
-        .map_err(|e| GitError { message: format!("failed to run git: {e}") })?;
+    let output = command(cwd, args).output().map_err(|e| GitError {
+        message: format!("failed to run git: {e}"),
+    })?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {

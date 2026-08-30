@@ -49,7 +49,11 @@ pub fn parse_unified_diff(input: &str) -> UnifiedDiff {
                 h.raw = std::mem::take(&mut cur_raw);
                 diff.hunks.push(h);
             }
-            cur = Some(DiffHunk { header: line.to_string(), lines: Vec::new(), raw: String::new() });
+            cur = Some(DiffHunk {
+                header: line.to_string(),
+                lines: Vec::new(),
+                raw: String::new(),
+            });
             cur_raw.push_str(line);
             cur_raw.push('\n');
             continue;
@@ -66,14 +70,26 @@ pub fn parse_unified_diff(input: &str) -> UnifiedDiff {
         cur_raw.push('\n');
         let hunk = cur.as_mut().expect("checked Some above");
         match line.chars().next() {
-            Some('+') => hunk.lines.push(DiffLine { kind: DiffLineKind::Add, content: line[1..].to_string(), no_newline: false }),
-            Some('-') => hunk.lines.push(DiffLine { kind: DiffLineKind::Del, content: line[1..].to_string(), no_newline: false }),
+            Some('+') => hunk.lines.push(DiffLine {
+                kind: DiffLineKind::Add,
+                content: line[1..].to_string(),
+                no_newline: false,
+            }),
+            Some('-') => hunk.lines.push(DiffLine {
+                kind: DiffLineKind::Del,
+                content: line[1..].to_string(),
+                no_newline: false,
+            }),
             Some('\\') => {
                 if let Some(last) = hunk.lines.last_mut() {
                     last.no_newline = true;
                 }
             }
-            _ => hunk.lines.push(DiffLine { kind: DiffLineKind::Context, content: line.strip_prefix(' ').unwrap_or(line).to_string(), no_newline: false }),
+            _ => hunk.lines.push(DiffLine {
+                kind: DiffLineKind::Context,
+                content: line.strip_prefix(' ').unwrap_or(line).to_string(),
+                no_newline: false,
+            }),
         }
     }
     if let Some(mut h) = cur.take() {
@@ -115,7 +131,10 @@ mod tests {
         let d = parse_unified_diff(PATCH);
         let raw = &d.hunks[0].raw;
         assert!(raw.starts_with("@@ -1,2 +1,3 @@\n one\n+two\n three\n"));
-        assert_eq!(&d.hunks[1].raw, "@@ -10,2 +11,2 @@\n four\n-five\n+six\n\\ No newline at end of file\n");
+        assert_eq!(
+            &d.hunks[1].raw,
+            "@@ -10,2 +11,2 @@\n four\n-five\n+six\n\\ No newline at end of file\n"
+        );
     }
 
     #[test]

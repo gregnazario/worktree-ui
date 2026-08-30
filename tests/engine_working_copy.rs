@@ -8,8 +8,15 @@ fn run_preserves_nul_records_untrimmed() {
     let tmp = tempfile::tempdir().unwrap();
     fixture_repo(tmp.path());
     std::fs::write(tmp.path().join("n.txt"), "x").unwrap();
-    let out = engine::run(tmp.path(), &["status", "--porcelain=v2", "-z", "--untracked-files=normal"]).unwrap();
-    assert!(out.contains('\0'), "-z output must keep NUL separators: {out:?}");
+    let out = engine::run(
+        tmp.path(),
+        &["status", "--porcelain=v2", "-z", "--untracked-files=normal"],
+    )
+    .unwrap();
+    assert!(
+        out.contains('\0'),
+        "-z output must keep NUL separators: {out:?}"
+    );
     assert!(out.contains("n.txt"));
 }
 
@@ -27,7 +34,11 @@ fn lock_contention_is_classified() {
     fixture_repo(tmp.path());
     std::fs::write(tmp.path().join(".git/index.lock"), "").unwrap();
     let err = engine::run(tmp.path(), &["add", "--", "f.txt"]).unwrap_err();
-    assert!(err.is_lock_error(), "expected lock error, got: {}", err.message);
+    assert!(
+        err.is_lock_error(),
+        "expected lock error, got: {}",
+        err.message
+    );
 }
 
 mod status_tests {

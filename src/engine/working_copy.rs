@@ -65,7 +65,10 @@ impl Group {
 /// rename record's orig path rides in the NEXT NUL chunk. Lenient: unknown
 /// chunks are ignored.
 pub fn parse_status_z(input: &str) -> WorkingCopy {
-    let mut wc = WorkingCopy { branch: BranchInfo::default(), entries: Vec::new() };
+    let mut wc = WorkingCopy {
+        branch: BranchInfo::default(),
+        entries: Vec::new(),
+    };
     let mut expect_orig_path = false;
     for chunk in input.split('\0') {
         if expect_orig_path {
@@ -204,12 +207,21 @@ pub fn parse_numstat_z(input: &str) -> Vec<(String, Option<(u64, u64)>)> {
 pub fn status(worktree: &Path) -> engine::Result<WorkingCopy> {
     let raw = engine::run(
         worktree,
-        &["--no-optional-locks", "status", "--porcelain=v2", "-z", "--branch"],
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--branch",
+        ],
     )?;
     let mut wc = parse_status_z(&raw);
     for (args, key) in [
         (vec!["--no-optional-locks", "diff", "--numstat", "-z"], 0),
-        (vec!["--no-optional-locks", "diff", "--cached", "--numstat", "-z"], 1),
+        (
+            vec!["--no-optional-locks", "diff", "--cached", "--numstat", "-z"],
+            1,
+        ),
     ] {
         let raw = engine::run(worktree, &args)?;
         for (path, counts) in parse_numstat_z(&raw) {
@@ -307,7 +319,13 @@ mod tests {
         let groups: Vec<Group> = rows.iter().map(|(g, _)| *g).collect();
         assert_eq!(
             groups,
-            vec![Group::Conflicts, Group::Staged, Group::Staged, Group::Unstaged, Group::Untracked]
+            vec![
+                Group::Conflicts,
+                Group::Staged,
+                Group::Staged,
+                Group::Unstaged,
+                Group::Untracked
+            ]
         );
         // same file staged+unstaged appears in both groups:
         let both = parse_status_z("1 MM N... 1 1 1 a b both.txt\u{0}");
