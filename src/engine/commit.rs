@@ -4,8 +4,23 @@
 //! paths with spaces are a documented Phase 1 limitation).
 
 use crate::engine::{self, GitError, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Per-invocation temp file for the commit message. The pid alone is not
+/// unique across concurrent commit flows in one process (GPUI background
+/// threads); the counter suffix keeps them from clobbering each other.
+fn temp_msg_path() -> PathBuf {
+    let n = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "worktree-tool-commit-{}-{}.msg",
+        std::process::id(),
+        n
+    ))
+}
 
 pub fn author(worktree: &Path) -> (String, String) {
     let name = engine::run_trimmed(worktree, &["config", "user.name"])
@@ -55,8 +70,7 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     let argv = resolve_editor(config_editor.as_deref(), &|k| {
         std::env::var(k).ok().filter(|v| !v.is_empty())
     });
-    let msg_path =
-        std::env::temp_dir().join(format!("worktree-tool-commit-{}.msg", std::process::id()));
+    let msg_path = temp_msg_path();
     std::fs::write(&msg_path, template(staged_summary)).map_err(|e| GitError {
         message: format!("could not write commit template: {e}"),
     })?;
@@ -110,8 +124,7 @@ pub fn strip_comments(raw: &str) -> String {
 /// `git commit -q -F <file>` — `-F` avoids every quoting/length issue of
 /// `-m`. User hooks run normally.
 pub fn commit(worktree: &Path, message: &str) -> Result<()> {
-    let msg_path =
-        std::env::temp_dir().join(format!("worktree-tool-commit-{}.msg", std::process::id()));
+    let msg_path = temp_msg_path();
     std::fs::write(&msg_path, message).map_err(|e| GitError {
         message: format!("could not write commit message: {e}"),
     })?;
