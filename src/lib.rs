@@ -8,3 +8,4 @@ pub mod store;
 pub mod terminal;
 pub mod text_field;
 pub mod ui;
+pub mod wc_store;
