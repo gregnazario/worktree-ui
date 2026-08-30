@@ -41,6 +41,80 @@ fn lock_contention_is_classified() {
     );
 }
 
+mod diff_tests {
+    use worktree_tool::engine::diff::{self, DiffLineKind, Preview};
+
+    use super::common;
+
+    #[test]
+    fn unstaged_and_staged_diffs_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = Some(tmp.path());
+        common::fixture_repo(tmp.path());
+        std::fs::write(tmp.path().join("f.txt"), "one\ntwo\n").unwrap();
+        common::sh(cwd, &["git", "add", "--", "f.txt"]); // staged
+        std::fs::write(tmp.path().join("f.txt"), "one\nTHREE\n").unwrap(); // unstaged on top
+
+        let staged = diff::diff_staged(tmp.path(), "f.txt").unwrap();
+        assert_eq!(staged.hunks.len(), 1);
+        // `git diff --cached` is HEAD→index, so the staged "two" is an
+        // addition (the brief's draft asserted Del here; real git emits
+        // `+two`).
+        assert!(staged.hunks[0]
+            .lines
+            .iter()
+            .any(|l| l.content == "two" && l.kind == DiffLineKind::Add));
+
+        let unstaged = diff::diff_unstaged(tmp.path(), "f.txt").unwrap();
+        assert_eq!(unstaged.hunks.len(), 1);
+        assert!(unstaged.hunks[0]
+            .lines
+            .iter()
+            .any(|l| l.content == "THREE" && l.kind == DiffLineKind::Add));
+
+        // clean file → empty diff, no error
+        let empty = diff::diff_unstaged(tmp.path(), "does-not-exist.txt").unwrap();
+        assert!(empty.hunks.is_empty());
+    }
+
+    #[test]
+    fn preview_classifies_text_binary_dir_and_truncation() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("t.txt"), "hello").unwrap();
+        std::fs::write(tmp.path().join("b.bin"), [0u8, 1, 2, 3]).unwrap();
+        std::fs::create_dir(tmp.path().join("subdir")).unwrap();
+        let big = "x".repeat(300 * 1024);
+        std::fs::write(tmp.path().join("big.txt"), &big).unwrap();
+
+        match diff::read_preview(tmp.path(), "t.txt") {
+            Preview::Text { content, truncated } => {
+                assert_eq!(content, "hello");
+                assert!(!truncated);
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
+        assert!(matches!(
+            diff::read_preview(tmp.path(), "b.bin"),
+            Preview::Binary
+        ));
+        assert!(matches!(
+            diff::read_preview(tmp.path(), "subdir"),
+            Preview::Directory
+        ));
+        assert!(matches!(
+            diff::read_preview(tmp.path(), "nope"),
+            Preview::Missing
+        ));
+        match diff::read_preview(tmp.path(), "big.txt") {
+            Preview::Text { content, truncated } => {
+                assert!(truncated);
+                assert_eq!(content.len(), diff::PREVIEW_MAX_BYTES);
+            }
+            other => panic!("expected truncated text, got {other:?}"),
+        }
+    }
+}
+
 mod status_tests {
     use super::*;
 

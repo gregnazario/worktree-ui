@@ -1,3 +1,7 @@
+use crate::engine::{self, Result};
+use std::io::Read as _;
+use std::path::Path;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffLineKind {
     Context,
@@ -98,6 +102,90 @@ pub fn parse_unified_diff(input: &str) -> UnifiedDiff {
     }
     diff.header = header;
     diff
+}
+
+/// Single known path → `:(literal)` pathspec (never glob-interpreted).
+fn literal(rel_path: &str) -> String {
+    format!(":(literal){rel_path}")
+}
+
+pub fn diff_unstaged(worktree: &Path, rel_path: &str) -> Result<UnifiedDiff> {
+    // NOTE: `--no-optional-locks` is a GLOBAL git option — it must appear
+    // before the `diff` subcommand or git exits 129.
+    let out = engine::run(
+        worktree,
+        &[
+            "--no-optional-locks",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "-U3",
+            "--",
+            &literal(rel_path),
+        ],
+    )?;
+    Ok(parse_unified_diff(&out))
+}
+
+pub fn diff_staged(worktree: &Path, rel_path: &str) -> Result<UnifiedDiff> {
+    // NOTE: `--no-optional-locks` is a GLOBAL git option — it must appear
+    // before the `diff` subcommand or git exits 129.
+    let out = engine::run(
+        worktree,
+        &[
+            "--no-optional-locks",
+            "diff",
+            "--cached",
+            "--no-color",
+            "--no-ext-diff",
+            "-U3",
+            "--",
+            &literal(rel_path),
+        ],
+    )?;
+    Ok(parse_unified_diff(&out))
+}
+
+pub const PREVIEW_MAX_BYTES: usize = 256 * 1024;
+
+#[derive(Clone, Debug)]
+pub enum Preview {
+    Text { content: String, truncated: bool },
+    Binary,
+    Directory,
+    Missing,
+}
+
+/// Working-tree content for untracked and conflicted files (which `git
+/// diff` doesn't express), bounded to `PREVIEW_MAX_BYTES` with a NUL sniff
+/// over the first 8 KiB for binary detection.
+pub fn read_preview(worktree: &Path, rel_path: &str) -> Preview {
+    let full = worktree.join(rel_path);
+    match std::fs::metadata(&full) {
+        Ok(m) if m.is_dir() => return Preview::Directory,
+        Err(_) => return Preview::Missing,
+        Ok(_) => {}
+    }
+    let Ok(file) = std::fs::File::open(&full) else {
+        return Preview::Missing;
+    };
+    let mut bytes = Vec::new();
+    let mut limited = file.take((PREVIEW_MAX_BYTES + 1) as u64);
+    if limited.read_to_end(&mut bytes).is_err() {
+        return Preview::Missing;
+    }
+    let sniff = bytes.len().min(8192);
+    if bytes[..sniff].contains(&0) {
+        return Preview::Binary;
+    }
+    let truncated = bytes.len() > PREVIEW_MAX_BYTES;
+    if truncated {
+        bytes.truncate(PREVIEW_MAX_BYTES);
+    }
+    Preview::Text {
+        content: String::from_utf8_lossy(&bytes).into_owned(),
+        truncated,
+    }
 }
 
 #[cfg(test)]
