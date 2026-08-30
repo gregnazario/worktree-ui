@@ -126,6 +126,26 @@ fn bench_git_layer(repo: &Path, label: &str) {
     );
 }
 
+fn bench_working_copy(repo: &Path) {
+    let changes = repo.join("bench-changes");
+    std::fs::create_dir_all(&changes).unwrap();
+    for i in 0..2000u32 {
+        std::fs::write(changes.join(format!("f{i:04}.txt")), format!("content {i}")).unwrap();
+    }
+    use worktree_tool::engine::{diff, working_copy};
+    let t = Instant::now();
+    let wc = working_copy::status(repo).expect("status");
+    let status_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let t = Instant::now();
+    let d = diff::diff_unstaged(repo, "bench-changes/f0000.txt").expect("diff");
+    let diff_ms = t.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "working copy: status = {status_ms:7.1} ms ({} entries), single-file diff = {diff_ms:5.1} ms ({} hunks)",
+        wc.entries.len(),
+        d.hunks.len()
+    );
+}
+
 fn main() {
     println!("== parsers ==");
     bench_parser(10);
@@ -156,4 +176,7 @@ fn main() {
         " 50 worktrees full refresh: {:.1} ms",
         t.elapsed().as_secs_f64() * 1000.0
     );
+
+    println!("== working copy ==");
+    bench_working_copy(&repo20);
 }
