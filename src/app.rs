@@ -5,6 +5,8 @@ use crate::platform;
 use crate::store::WorktreeStore;
 use crate::terminal;
 use crate::text_field::TextField;
+use crate::views::working_copy;
+use crate::wc_store::{Pane, WorkingCopyStore};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     actions, div, px, rgba, App, AppContext, ClipboardItem, Context, Entity, FocusHandle,
@@ -55,6 +57,12 @@ pub struct RootView {
     pub dialog: DialogState,
     pub root_focus: FocusHandle,
     pub dialog_focus: FocusHandle,
+    /// Open Working Copy drill-in. When set, the detail view replaces the
+    /// worktree list as the content branch.
+    pub detail: Option<Entity<WorkingCopyStore>>,
+    pub detail_focus: FocusHandle,
+    pub detail_list_focus: FocusHandle,
+    pub detail_diff_focus: FocusHandle,
 }
 
 fn status_badge(status: &WorktreeStatus) -> (String, gpui::Rgba) {
@@ -139,6 +147,9 @@ impl RootView {
         let path_input = cx.new(|cx| TextField::new("/path/to/repository", cx));
         let root_focus = cx.focus_handle();
         let dialog_focus = cx.focus_handle();
+        let detail_focus = cx.focus_handle();
+        let detail_list_focus = cx.focus_handle();
+        let detail_diff_focus = cx.focus_handle();
         window.focus(&root_focus);
         let view = cx.new(|_| Self {
             store,
@@ -147,6 +158,10 @@ impl RootView {
             dialog: DialogState::None,
             root_focus,
             dialog_focus,
+            detail: None,
+            detail_focus,
+            detail_list_focus,
+            detail_diff_focus,
         });
         view.update(cx, |this, cx| {
             // Typing in the search field drives the store filter; the
@@ -292,6 +307,99 @@ impl RootView {
     fn search_focused(&self, window: &Window, cx: &App) -> bool {
         self.search.read(cx).focus_handle.is_focused(window)
     }
+
+    /// Drills into the selected worktree's Working Copy view. Focus moves to
+    /// the detail list handle; keys are routed through `detail_keydown` until
+    /// `close_detail`.
+    pub fn open_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_open() {
+            return;
+        }
+        let Some(entry) = self.store.read(cx).selected_entry().cloned() else {
+            return;
+        };
+        let wc = WorkingCopyStore::new(entry.path.clone(), cx);
+        // One successful mutation inside the detail view must refresh the home
+        // worktree list (status, ahead/behind, dirty badge all change).
+        cx.observe(&wc, move |this, wc, cx| {
+            let mutated = wc.update(cx, |wc, _cx| wc.take_mutated());
+            if mutated {
+                this.store.update(cx, |store, cx| store.refresh(cx));
+            }
+            cx.notify();
+        })
+        .detach();
+        self.detail = Some(wc);
+        window.focus(&self.detail_list_focus);
+        cx.notify();
+    }
+
+    /// Returns to the home list: refocus it and refresh, since the user may
+    /// have mutated the worktree from the detail view.
+    pub fn close_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.detail = None;
+        window.focus(&self.root_focus);
+        self.store.update(cx, |store, cx| store.refresh(cx));
+        cx.notify();
+    }
+
+    fn detail_keydown(
+        &mut self,
+        ks: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let list_focused = self.detail_list_focus.is_focused(window);
+        let diff_focused = self.detail_diff_focus.is_focused(window);
+        let container_focused = self.detail_focus.is_focused(window);
+        if !list_focused && !diff_focused && !container_focused {
+            return; // don't steal keys from other focused surfaces
+        }
+        match ks.key.as_str() {
+            "escape" => self.close_detail(window, cx),
+            "t" => {
+                if let Some(wc) = &self.detail {
+                    let path = wc.read(cx).worktree.clone();
+                    terminal::open_in_terminal(&path);
+                }
+            }
+            "r" => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.refresh(cx));
+                }
+            }
+            "tab" if list_focused => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| {
+                        store.pane = Pane::Diff;
+                        cx.notify();
+                    });
+                }
+                window.focus(&self.detail_diff_focus);
+            }
+            "tab" if diff_focused => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| {
+                        store.pane = Pane::Files;
+                        cx.notify();
+                    });
+                }
+                window.focus(&self.detail_list_focus);
+            }
+            "up" if list_focused => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.select_prev(cx));
+                }
+            }
+            "down" if list_focused => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.select_next(cx));
+                }
+            }
+            // "s", "S", "d", "c", diff-pane hunk keys arrive in Tasks 10–12.
+            _ => {}
+        }
+    }
 }
 
 impl Render for RootView {
@@ -339,7 +447,11 @@ impl Render for RootView {
             if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
                 return;
             }
-            // Only act on bare keys when the list itself is focused;
+            if this.detail.is_some() {
+                this.detail_keydown(ks, window, cx);
+                return;
+            }
+            // Home list: only act when the list itself is focused;
             // otherwise we'd steal typing from any other focused text field
             // (e.g. the empty-state path input, where "/" is unavoidable).
             if !this.root_focus.is_focused(window) {
@@ -348,7 +460,8 @@ impl Render for RootView {
             match ks.key.as_str() {
                 "up" => this.store.update(cx, |store, cx| store.select_prev(cx)),
                 "down" => this.store.update(cx, |store, cx| store.select_next(cx)),
-                "enter" => {
+                "enter" => this.open_detail(window, cx),
+                "t" => {
                     if let Some(entry) = this.store.read(cx).selected_entry() {
                         let path = entry.path.clone();
                         terminal::open_in_terminal(&path);
@@ -432,64 +545,60 @@ impl Render for RootView {
                         })),
                 )
         } else {
-            div()
-                .id("main")
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h_0()
-                .child(
-                    div()
-                        .id("toolbar")
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .px_3()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(BORDER)
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .child(repo_name),
-                                )
-                                .child(div().text_size(px(11.)).text_color(DIM).child(repo_path)),
-                        )
-                        .child(div().flex_1())
-                        .child(self.search.clone())
-                        .child(toolbar_button(
-                            "btn-new",
-                            "New (n)",
-                            cx.listener(|this, _, window, cx| this.open_create_dialog(window, cx)),
-                        ))
-                        .child(toolbar_button(
-                            "btn-refresh",
-                            "Refresh (r)",
-                            cx.listener(|this, _, _window, cx| {
-                                this.store.update(cx, |store, cx| store.refresh(cx))
-                            }),
-                        ))
-                        .child(toolbar_button(
-                            "btn-prune",
-                            "Prune",
-                            cx.listener(|this, _, _window, cx| {
-                                this.store.update(cx, |store, cx| store.prune(cx))
-                            }),
-                        ))
-                        .child(toolbar_button(
-                            "btn-settings",
-                            "Settings",
-                            cx.listener(|this, _, window, cx| {
-                                this.open_settings_dialog(window, cx)
-                            }),
-                        )),
-                )
-                .child(
+            let main = div().id("main").flex().flex_col().flex_1().min_h_0().child(
+                div()
+                    .id("toolbar")
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child(repo_name),
+                            )
+                            .child(div().text_size(px(11.)).text_color(DIM).child(repo_path)),
+                    )
+                    .child(div().flex_1())
+                    .child(self.search.clone())
+                    .child(toolbar_button(
+                        "btn-new",
+                        "New (n)",
+                        cx.listener(|this, _, window, cx| this.open_create_dialog(window, cx)),
+                    ))
+                    .child(toolbar_button(
+                        "btn-refresh",
+                        "Refresh (r)",
+                        cx.listener(|this, _, _window, cx| {
+                            this.store.update(cx, |store, cx| store.refresh(cx))
+                        }),
+                    ))
+                    .child(toolbar_button(
+                        "btn-prune",
+                        "Prune",
+                        cx.listener(|this, _, _window, cx| {
+                            this.store.update(cx, |store, cx| store.prune(cx))
+                        }),
+                    ))
+                    .child(toolbar_button(
+                        "btn-settings",
+                        "Settings",
+                        cx.listener(|this, _, window, cx| this.open_settings_dialog(window, cx)),
+                    )),
+            );
+
+            if self.detail.is_some() {
+                main.child(working_copy::render(self, window, cx).into_any_element())
+            } else {
+                main.child(
                     div()
                         .id("worktree-list")
                         .flex_1()
@@ -625,6 +734,7 @@ impl Render for RootView {
                             )),
                     )
                 })
+            }
         };
 
         root = root.child(content);
@@ -880,6 +990,48 @@ mod tests {
             let store = root.store.read(cx);
             assert!(store.filter.is_empty());
             assert_eq!(store.filtered.len(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn enter_drills_into_detail_and_esc_returns(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            assert!(root.detail.is_some(), "detail opens on enter");
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert!(wc.wc.is_some(), "working copy loaded");
+        });
+
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert!(root.detail.is_none(), "esc returns to the list");
+        });
+    }
+
+    #[gpui::test]
+    fn t_still_opens_terminal_from_list(cx: &mut TestAppContext) {
+        // terminal::open_in_terminal spawns a real process; instead assert
+        // that "t" is routed by checking the key handler's observable
+        // effect: none (spawning is fire-and-forget). This test guards the
+        // keybinding table: "t" must not select/drill in.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let (view, mut vcx) = open_root(cx, &repo);
+        vcx.simulate_keystrokes("t");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert!(root.detail.is_none(), "t must not open the detail view");
+            assert!(matches!(root.dialog, DialogState::None));
         });
     }
 }
