@@ -884,6 +884,7 @@ impl Render for RootView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wc_store::FileDetail;
     use gpui::TestAppContext;
 
     fn sh(dir: &std::path::Path, cmd: &[&str]) {
@@ -1216,6 +1217,60 @@ mod tests {
                     .len(),
                 1,
                 "nothing discarded"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn diff_pane_renders_selected_file_and_caps_long_files(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "one\ntwo\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            // f.txt is the default selection (its unstaged modification is
+            // the only row); the pane's data — the unified diff — must be
+            // loaded and contain the modification's hunk.
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            match &wc.detail {
+                Some(FileDetail::Diff(d)) => {
+                    assert!(!d.hunks.is_empty(), "f.txt modification has a hunk");
+                    assert!(
+                        d.hunks.iter().any(|h| {
+                            h.lines.iter().any(|l| {
+                                l.kind == crate::engine::diff::DiffLineKind::Add
+                                    && l.content == "two"
+                            })
+                        }),
+                        "the +two modification line is in the rendered diff"
+                    );
+                }
+                other => panic!("expected a loaded diff for f.txt, got {other:?}"),
+            }
+        });
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap();
+            assert_eq!(
+                wc.read(cx).pane,
+                Pane::Diff,
+                "tab moves the pane state to the diff"
+            );
+        });
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap();
+            assert_eq!(
+                wc.read(cx).pane,
+                Pane::Files,
+                "second tab returns to the file list"
             );
         });
     }

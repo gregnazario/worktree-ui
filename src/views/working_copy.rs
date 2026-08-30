@@ -1,16 +1,17 @@
 //! Working Copy detail view rendering. Listeners attach against `RootView`
 //! (same pattern as dialogs.rs).
 
-use crate::app::{RootView, ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED, YELLOW};
+use crate::app::{RootView, ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED, TEXT, YELLOW};
+use crate::engine::diff::{self, DiffLineKind};
 use crate::engine::working_copy::Group;
+use crate::wc_store::FileDetail;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window,
+    div, px, rgba, Context, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
 /// Caps rendered diff lines. Wired into the diff pane by Task 11.
-#[allow(dead_code)]
 const DIFF_RENDER_CAP: usize = 5000;
 
 /// One visible file-list row: (group, entry index, selected?, status letter
@@ -277,14 +278,159 @@ fn render_file_list(
     list
 }
 
-/// Placeholder right pane (Task 11 fills it in). Must exist and track the
-/// diff focus handle so tab routing and `detail_keydown` keep dispatching.
-fn render_diff_pane(this: &mut RootView, _cx: &mut Context<RootView>) -> impl IntoElement {
+/// The right pane: unified diff rows for the selected file, preview text for
+/// untracked/conflicted rows, placeholders for binary/missing/failed. Must
+/// keep tracking the diff focus handle so tab routing and `detail_keydown`
+/// keep dispatching.
+fn render_diff_pane(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoElement {
     let diff_focus = this.detail_diff_focus.clone();
-    div()
+    let mut pane = div()
         .id("wc-diff")
         .track_focus(&diff_focus)
         .flex_1()
         .min_w_0()
-        .bg(PANEL)
+        .flex()
+        .flex_col()
+        .overflow_y_scroll()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, _cx| {
+                window.focus(&this.detail_diff_focus);
+            }),
+        );
+    let Some(wc) = this.detail.clone() else {
+        return pane;
+    };
+    let store = wc.read(cx);
+    let Some(detail) = &store.detail else {
+        return pane.child(
+            div()
+                .p_4()
+                .text_size(px(13.))
+                .text_color(DIM)
+                .child("No selection"),
+        );
+    };
+    if matches!(store.selected_row(), Some((Group::Conflicts, _))) {
+        pane = pane.child(placeholder(
+            "Resolve in your editor, then press s to mark resolved",
+        ));
+    }
+    let transparent = rgba(0x00000000);
+    match detail {
+        FileDetail::Diff(ud) if ud.binary => pane.child(placeholder("Binary file — not shown")),
+        FileDetail::Diff(ud) => {
+            let total: usize = ud.hunks.iter().map(|h| h.lines.len()).sum();
+            let mut rendered = 0usize;
+            pane = pane.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(11.))
+                    .text_color(DIM)
+                    .child(
+                        ud.header
+                            .lines()
+                            .filter(|l| !l.is_empty())
+                            .map(String::from)
+                            .collect::<Vec<_>>()
+                            .join("  ·  "),
+                    ),
+            );
+            for hunk in &ud.hunks {
+                if rendered >= DIFF_RENDER_CAP {
+                    break;
+                }
+                pane = pane.child(
+                    div()
+                        .px_3()
+                        .py_0p5()
+                        .text_size(px(11.))
+                        .text_color(DIM)
+                        .child(hunk.header.clone()),
+                );
+                for line in &hunk.lines {
+                    if rendered >= DIFF_RENDER_CAP {
+                        break;
+                    }
+                    rendered += 1;
+                    let (marker, color, bg) = match line.kind {
+                        DiffLineKind::Add => ("+", GREEN, rgba(0xa6e3a120)),
+                        DiffLineKind::Del => ("−", RED, rgba(0xf38ba820)),
+                        DiffLineKind::Context => (" ", TEXT, transparent),
+                    };
+                    let row = div()
+                        .flex()
+                        .px_3()
+                        .text_size(px(12.))
+                        .when(bg != transparent, |r| r.bg(bg));
+                    pane = pane.child(
+                        row.child(
+                            div()
+                                .w(px(14.))
+                                .flex_shrink_0()
+                                .text_color(color)
+                                .child(marker),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .child(if line.no_newline {
+                                    format!("{}\\ (no newline)", line.content)
+                                } else {
+                                    line.content.clone()
+                                }),
+                        ),
+                    );
+                }
+            }
+            if total > DIFF_RENDER_CAP {
+                pane = pane.child(placeholder(&format!(
+                    "… {} more lines — open the file in your editor",
+                    total - DIFF_RENDER_CAP
+                )));
+            }
+            pane
+        }
+        FileDetail::Preview(p) => match p {
+            diff::Preview::Text { content, truncated } => {
+                let lines: Vec<&str> = content.lines().collect();
+                let shown = lines.len().min(DIFF_RENDER_CAP);
+                for l in lines.iter().take(shown) {
+                    pane = pane.child(
+                        div()
+                            .px_3()
+                            .text_size(px(12.))
+                            .text_color(TEXT)
+                            .child(l.to_string()),
+                    );
+                }
+                if *truncated || lines.len() > DIFF_RENDER_CAP {
+                    pane = pane.child(placeholder("… truncated — open the file in your editor"));
+                }
+                pane
+            }
+            diff::Preview::Binary => pane.child(placeholder("Binary file — not shown")),
+            diff::Preview::Directory => pane.child(placeholder(
+                "Untracked directory — press S to stage its contents",
+            )),
+            diff::Preview::Missing => pane.child(placeholder("File missing on disk")),
+        },
+        FileDetail::Failed(msg) => pane.child(
+            div()
+                .p_4()
+                .text_size(px(12.))
+                .text_color(RED)
+                .child(msg.clone()),
+        ),
+    }
+}
+
+fn placeholder(text: &str) -> impl IntoElement {
+    div()
+        .p_4()
+        .text_size(px(13.))
+        .text_color(DIM)
+        .child(text.to_string())
 }
