@@ -145,16 +145,21 @@ mod mutate_tests {
                 .untracked
         );
 
-        // discard unstaged: back to committed content
+        // discard unstaged: restores the worktree file from the index, so
+        // the staged delta survives. f.txt is staged as "changed"; add a
+        // further unstaged edit, then throw away only that unstaged delta.
+        std::fs::write(tmp.path().join("f.txt"), "changed2").unwrap();
         mutate::discard_unstaged(tmp.path(), "f.txt").unwrap();
-        let wc = status(tmp.path()).unwrap();
-        // porcelain v2 omits unchanged files, so "fully clean" means the
-        // entry is gone entirely (equivalent to index '.' + wt '.').
-        assert!(wc.entries.iter().all(|e| e.path != "f.txt"));
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("f.txt")).unwrap(),
-            "one"
+            "changed" // staged content survived
         );
+        let wc = status(tmp.path()).unwrap();
+        let f = wc.entries.iter().find(|e| e.path == "f.txt").unwrap();
+        assert_eq!(f.index_status, 'M');
+        // porcelain v2 marks a clean worktree delta as '.', it does not
+        // omit the file while the index still differs from HEAD.
+        assert_eq!(f.wt_status, '.');
 
         // discard untracked: file gone
         mutate::discard_untracked(tmp.path(), "u.txt").unwrap();
@@ -174,6 +179,16 @@ mod mutate_tests {
         mutate::unstage(tmp.path(), &[weird.to_string()]).unwrap();
         let wc = status(tmp.path()).unwrap();
         assert!(wc.entries[0].untracked);
+
+        // discard_unstaged must also stay positional: stage it, add an
+        // unstaged delta on top, then restore the worktree from the index.
+        mutate::stage(tmp.path(), &[weird.to_string()]).unwrap();
+        std::fs::write(tmp.path().join(weird), "y").unwrap();
+        mutate::discard_unstaged(tmp.path(), weird).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(weird)).unwrap(),
+            "x" // staged content survived
+        );
     }
 
     #[test]

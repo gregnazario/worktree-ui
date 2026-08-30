@@ -36,17 +36,13 @@ pub fn unstage(worktree: &Path, rel_paths: &[String]) -> Result<()> {
     engine::run_trimmed(worktree, &refs).map(|_| ())
 }
 
-/// `git checkout -q HEAD -- <path>`: restore the committed version (index
-/// and working tree). Only offered by the UI for unstaged rows. HEAD is the
-/// restore source — plain `git checkout -- <path>` would restore the index
-/// copy, which for a staged-modified file is the change meant to be thrown
-/// away.
+/// `git checkout -q -- <path>`: restore the worktree file from the index,
+/// so staged changes survive — only the unstaged delta is discarded.
+/// (Plain `git checkout -- <path>` copies index → worktree and leaves the
+/// index untouched; the `HEAD` form would overwrite the index too, wiping
+/// the staged part.)
 pub fn discard_unstaged(worktree: &Path, rel_path: &str) -> Result<()> {
-    engine::run_trimmed(
-        worktree,
-        &["checkout", "-q", "HEAD", "--", &literal(rel_path)],
-    )
-    .map(|_| ())
+    engine::run_trimmed(worktree, &["checkout", "-q", "--", &literal(rel_path)]).map(|_| ())
 }
 
 /// Deletes an untracked file. Directories are refused here and by the UI —
