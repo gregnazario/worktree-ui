@@ -19,16 +19,21 @@ Keyboard-first.
 
 <img src="docs/assets/screenshot.png" width="860" alt="worktree-tool showing three worktrees with clean, dirty, and ahead statuses">
 
-## Install (macOS)
+## Install
 
-Grab `worktree-tool-<version>-macos-universal.dmg` from the latest
+Prebuilt packages for every platform are attached to each
 [GitHub Release](https://github.com/gregnazario/worktree-ui/releases)
-(built automatically by CI: universal arm64 + x86_64), open it, and drag
-**Worktree Tool** onto the **Applications** shortcut. A plain `.zip` of the
-`.app` bundle is attached alongside for tooling that prefers it.
+(built by CI on native runners):
 
-The release build is ad-hoc signed, not notarized — on first launch
-macOS Gatekeeper may ask you to confirm via right-click → Open. When launched
+| Platform | Package |
+| --- | --- |
+| macOS (universal arm64 + x86_64) | `…-macos-universal.dmg` — open and drag **Worktree Tool** onto **Applications** (a plain `.app` zip is attached too) |
+| Linux x86_64 / aarch64 | `…-linux-<arch>.tar.gz` — extract the binary; runtime deps are `libxcb`, `libxkbcommon`(+x11) and a Vulkan stack (standard on any desktop) |
+| Windows x86_64 | `…-windows-x86_64.zip` — extract and run `worktree-tool.exe` |
+| FreeBSD x86_64 | `…-freebsd-x86_64.tar.gz` — runtime needs `libxcb`/`libxkbcommon` from ports and `LD_LIBRARY_PATH=/usr/local/lib` |
+
+The macOS build is ad-hoc signed, not notarized — on first launch
+Gatekeeper may ask you to confirm via right-click → Open. When launched
 from Finder the app starts at the path picker (there is no terminal cwd to
 detect); when run from a terminal it auto-detects the repository from the
 working directory.
