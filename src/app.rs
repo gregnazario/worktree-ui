@@ -457,14 +457,17 @@ impl RootView {
                     wc.update(cx, |store, cx| store.select_next(cx));
                 }
             }
+            // gpui normalizes an uppercase keystroke to lowercase key +
+            // shift modifier (platform/keystroke.rs), so stage-all must
+            // match shift+s — a literal "S" key never occurs.
+            "s" if list_focused && ks.modifiers.shift => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.stage_all(cx));
+                }
+            }
             "s" if list_focused => {
                 if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| store.toggle_stage(cx));
-                }
-            }
-            "S" if list_focused => {
-                if let Some(wc) = &self.detail {
-                    wc.update(cx, |store, cx| store.stage_all(cx));
                 }
             }
             "d" if list_focused => self.open_discard_dialog(window, cx),
@@ -1177,6 +1180,29 @@ mod tests {
                 ),
                 _ => panic!("expected a dirty badge after staging"),
             }
+        });
+
+        // "S" (stage all): gpui normalizes capital keystrokes to lowercase
+        // key + shift, so simulate the same shape real keyboards produce.
+        std::fs::write(repo.join("another.txt"), "x").unwrap();
+        vcx.simulate_keystrokes("r");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("shift-s");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            let groups: Vec<_> = wc.rows().iter().map(|(g, _)| *g).collect();
+            assert!(
+                !groups.contains(&crate::engine::working_copy::Group::Untracked),
+                "shift-s stages everything, including untracked rows"
+            );
+            assert!(
+                matches!(
+                    wc.selected_row(),
+                    Some((crate::engine::working_copy::Group::Staged, _))
+                ),
+                "selection stays on a staged row after stage-all"
+            );
         });
     }
 
