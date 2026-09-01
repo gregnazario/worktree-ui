@@ -26,6 +26,10 @@ pub struct FileEntry {
     /// numstat (+added, −deleted); `None` = binary or not applicable.
     pub staged_lines: Option<(u64, u64)>,
     pub unstaged_lines: Option<(u64, u64)>,
+    /// The raw filename was not valid UTF-8, so the lossy path string here
+    /// is mangled: `:(literal)` pathspecs can't match it, and the store
+    /// refuses mutations on this entry rather than failing opaquely.
+    pub unsupported: bool,
 }
 
 impl FileEntry {
@@ -111,6 +115,7 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
                 untracked: true,
                 staged_lines: None,
                 unstaged_lines: None,
+                unsupported: false,
             });
             continue;
         }
@@ -127,6 +132,7 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
                     untracked: false,
                     staged_lines: None,
                     unstaged_lines: None,
+                    unsupported: false,
                 });
             }
             continue;
@@ -145,6 +151,7 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
                     untracked: false,
                     staged_lines: None,
                     unstaged_lines: None,
+                    unsupported: false,
                 });
                 if is_rename {
                     expect_orig_path = true;
@@ -164,11 +171,21 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
                     untracked: false,
                     staged_lines: None,
                     unstaged_lines: None,
+                    unsupported: false,
                 });
             }
             continue;
         }
         // "!" ignored records and anything unknown: ignore.
+    }
+    // from_utf8_lossy replaced undecodable filename bytes with U+FFFD: the
+    // path string no longer matches anything git can act on.
+    for entry in wc.entries.iter_mut() {
+        entry.unsupported = entry.path.contains('\u{FFFD}')
+            || entry
+                .orig_path
+                .as_deref()
+                .is_some_and(|p| p.contains('\u{FFFD}'));
     }
     wc
 }
@@ -337,5 +354,18 @@ mod tests {
     fn untracked_directory_row_is_detected() {
         let wc = parse_status_z("? vendor/\u{0}");
         assert!(wc.entries[0].is_dir());
+    }
+
+    #[test]
+    fn marks_lossy_decoded_paths_unsupported() {
+        // A filename whose bytes weren't valid UTF-8 arrives with U+FFFD
+        // replacement characters baked in.
+        let wc = parse_status_z("1 .M N... 1 1 1 a b bad\u{FFFD}name.txt\u{0}");
+        assert!(wc.entries[0].unsupported);
+        let wc =
+            parse_status_z("2 R. N... 1 1 1 a b R100 new\u{FFFD}.txt\u{0}old\u{FFFD}.txt\u{0}");
+        assert!(wc.entries[0].unsupported, "rename with lossy orig path");
+        let wc = parse_status_z("1 .M N... 1 1 1 a b ok.txt\u{0}");
+        assert!(!wc.entries[0].unsupported);
     }
 }

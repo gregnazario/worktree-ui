@@ -108,7 +108,7 @@ Actions (keyboard, gated on the existing root-focus rule):
 
 | Key | Scope | Action |
 |---|---|---|
-| `↑`/`↓` | file list | move selection (wraps within group) |
+| `↑`/`↓` | file list | move selection (list-bounded: stops at the first/last row) |
 | `tab` | view | toggle focus: file list ↔ diff |
 | `s` | file | stage (if unstaged/untracked) or unstage (if staged) |
 | `S` | view | stage all remaining changes (unstaged + untracked); no unstage-all in Phase 1 |

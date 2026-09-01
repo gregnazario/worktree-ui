@@ -15,25 +15,36 @@ fn literal_args(prefix: &[&str], rel_paths: &[String]) -> Vec<String> {
     args
 }
 
-/// `git add -- <paths>`. Also how a conflict is marked resolved. An empty
-/// slice is a no-op (callers use this for "stage all" with nothing left).
+/// Windows caps a single CreateProcess command line at ~32,767 chars and
+/// even Linux can hit ARG_MAX on monorepo-scale path lists, so path
+/// arguments are batched into bounded chunks per git invocation.
+const MAX_PATHS_PER_INVOCATION: usize = 200;
+
+fn for_each_chunk(worktree: &Path, prefix: &[&str], rel_paths: &[String]) -> Result<()> {
+    for chunk in rel_paths.chunks(MAX_PATHS_PER_INVOCATION) {
+        let args = literal_args(prefix, chunk);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        engine::run_trimmed(worktree, &refs)?;
+    }
+    Ok(())
+}
+
+/// `git add -- <paths>`, batched. Also how a conflict is marked resolved.
+/// An empty slice is a no-op (callers use this for "stage all" with nothing
+/// left).
 pub fn stage(worktree: &Path, rel_paths: &[String]) -> Result<()> {
     if rel_paths.is_empty() {
         return Ok(());
     }
-    let args = literal_args(&["add"], rel_paths);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    engine::run_trimmed(worktree, &refs).map(|_| ())
+    for_each_chunk(worktree, &["add"], rel_paths)
 }
 
-/// `git reset -q HEAD -- <paths>`.
+/// `git reset -q HEAD -- <paths>`, batched.
 pub fn unstage(worktree: &Path, rel_paths: &[String]) -> Result<()> {
     if rel_paths.is_empty() {
         return Ok(());
     }
-    let args = literal_args(&["reset", "-q", "HEAD"], rel_paths);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    engine::run_trimmed(worktree, &refs).map(|_| ())
+    for_each_chunk(worktree, &["reset", "-q", "HEAD"], rel_paths)
 }
 
 /// `git checkout -q -- <path>`: restore the worktree file from the index,

@@ -33,7 +33,14 @@ pub struct WorkingCopyStore {
     /// Consumed by the app shell: one successful mutation → one home-list
     /// refresh.
     mutated: bool,
+    /// Guards status/numstat snapshot loads. Bumped by refresh and by
+    /// mutations (a mutation invalidates any in-flight snapshot), but NOT
+    /// by detail loads — changing the selected file must never cancel a
+    /// status refresh, or post-mutation groups go stale.
     generation: u64,
+    /// Guards detail (diff/preview) loads, independent of `generation` so
+    /// the two load kinds can't cancel each other.
+    detail_generation: u64,
 }
 
 impl WorkingCopyStore {
@@ -49,6 +56,7 @@ impl WorkingCopyStore {
             message: None,
             mutated: false,
             generation: 0,
+            detail_generation: 0,
         });
         entity.update(cx, |store, cx| {
             store.refresh(cx);
@@ -97,7 +105,7 @@ impl WorkingCopyStore {
         }
         let next = match self.selected {
             None => 0,
-            Some(s) if s + 1 >= len => s, // group-bounded: stop at the last row
+            Some(s) if s + 1 >= len => s, // list-bounded: stop at the last row
             Some(s) => s + 1,
         };
         self.select(Some(next), cx);
@@ -188,8 +196,11 @@ impl WorkingCopyStore {
             self.detail = None;
             return;
         };
-        self.generation += 1;
-        let gen = self.generation;
+        // Detail loads use their own counter: a selection change must cancel
+        // an in-flight diff load, but must NOT cancel a status refresh that
+        // shares the other counter (and vice versa).
+        self.detail_generation += 1;
+        let gen = self.detail_generation;
         let worktree = self.worktree.clone();
         let path = entry.path.clone();
         let kind = match group {
@@ -215,7 +226,7 @@ impl WorkingCopyStore {
                 })
                 .await;
             this.update(cx, |store, cx| {
-                if gen != store.generation {
+                if gen != store.detail_generation {
                     return;
                 }
                 store.detail = Some(match result {
@@ -235,6 +246,14 @@ impl WorkingCopyStore {
         let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
             return;
         };
+        if entry.unsupported {
+            self.message = Some(
+                "filename contains characters git's output lost — stage this one in a terminal"
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
         let worktree = self.worktree.clone();
         let path = entry.path.clone();
         // Bump to cancel in-flight snapshot loads; the mutation completion
@@ -287,16 +306,42 @@ impl WorkingCopyStore {
         .detach();
     }
 
-    /// Caller shows the confirmation dialog first; this executes.
+    /// Caller shows the confirmation dialog first; this executes. The
+    /// dialog captures the path it was opened for — always discard THAT
+    /// path, never "the current selection": a refresh completing while the
+    /// dialog is open can move the selection, and Enter must never delete a
+    /// different file than the one the user confirmed.
     pub fn discard_selected(&mut self, cx: &mut Context<Self>) {
-        let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
+        let Some((group, path)) = self.selected_row().map(|(g, e)| (g, e.path.clone())) else {
             return;
         };
-        if entry.is_dir() {
+        self.discard_path(group, path, cx);
+    }
+
+    /// Discards a specific path by its owning group (Unstaged → restore
+    /// from index, Untracked → delete file). Other groups are refused:
+    /// their discard is either not offered or unsafe.
+    pub fn discard_path(&mut self, group: eng::Group, path: String, cx: &mut Context<Self>) {
+        if matches!(group, eng::Group::Staged | eng::Group::Conflicts) {
+            return;
+        }
+        if path.ends_with('/') {
             return; // no recursive delete in Phase 1
         }
+        if self
+            .wc
+            .as_ref()
+            .and_then(|wc| wc.entries.iter().find(|e| e.path == path))
+            .is_some_and(|e| e.unsupported)
+        {
+            self.message = Some(
+                "filename contains characters git's output lost — discard this one in a terminal"
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
         let worktree = self.worktree.clone();
-        let path = entry.path.clone();
         self.generation += 1;
         self.busy = true;
         cx.notify();
@@ -306,8 +351,7 @@ impl WorkingCopyStore {
                 .spawn(async move {
                     match group {
                         eng::Group::Untracked => mutate::discard_untracked(&worktree, &path),
-                        eng::Group::Unstaged => mutate::discard_unstaged(&worktree, &path),
-                        _ => Ok(()), // staged/conflicts: dialog is not offered
+                        _ => mutate::discard_unstaged(&worktree, &path),
                     }
                 })
                 .await;

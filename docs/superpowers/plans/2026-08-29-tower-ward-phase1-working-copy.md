@@ -3163,5 +3163,5 @@ git commit -m "feat: phase 1 working copy view — docs, bench, version 0.2.0"
 
 ## Deliberate deviations from the spec (documented)
 
-- Spec said "wraps within group" for selection; implemented as **stops at group edges** (simpler, and wrapping inside a group reads as a bug when groups are short). Update the spec when merging.
+- Spec said "wraps within group" for selection; implemented as **list-bounded** (selection stops at the ends of the whole row list, Tower/lazygit-style — crossing group boundaries while moving feels natural). Spec keybinding table updated to match.
 - Untracked directories collapse to one row (git's `-unormal` default, made explicit) rather than enumerating every file — protects against `node_modules`-scale untracked trees; staging a directory row stages its contents.

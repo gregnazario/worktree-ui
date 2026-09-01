@@ -78,10 +78,15 @@ pub fn render(
                     Group::Unstaged => e.unstaged_lines,
                     _ => None,
                 };
-                let path = match &e.orig_path {
+                let mut path = match &e.orig_path {
                     Some(old) => format!("{old} → {}", e.path),
                     None => e.path.clone(),
                 };
+                if e.unsupported {
+                    // The name git gave us was lossy-decoded; show that it
+                    // can't be acted on instead of presenting a fake path.
+                    path.push_str("  (non-UTF-8 name — unsupported)");
+                }
                 (
                     *group,
                     *i,

@@ -10,16 +10,46 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Per-invocation temp file for the commit message. The pid alone is not
-/// unique across concurrent commit flows in one process (GPUI background
-/// threads); the counter suffix keeps them from clobbering each other.
-fn temp_msg_path() -> PathBuf {
-    let n = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "worktree-tool-commit-{}-{}.msg",
-        std::process::id(),
-        n
-    ))
+/// Creates the commit-message file with EXCLUSIVE creation and (on unix)
+/// owner-only permissions. Both matter in the shared temp dir: `create_new`
+/// refuses to follow a pre-planted symlink or clobber an existing file, and
+/// 0600 keeps the in-progress message private. Returns the open handle —
+/// callers write through it, never by path, so a path swap can't redirect
+/// the write.
+fn create_msg_file() -> Result<(std::fs::File, PathBuf)> {
+    for _ in 0..32 {
+        let n = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "worktree-tool-commit-{}-{n}.msg",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                        .map_err(|e| GitError {
+                            message: format!("could not secure commit message file: {e}"),
+                        })?;
+                }
+                return Ok((file, path));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(GitError {
+                    message: format!("could not create commit message file: {e}"),
+                })
+            }
+        }
+    }
+    Err(GitError {
+        message: "could not create a unique commit message file".into(),
+    })
 }
 
 pub fn author(worktree: &Path) -> (String, String) {
@@ -75,10 +105,13 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
             message: "no commit editor configured".into(),
         });
     }
-    let msg_path = temp_msg_path();
-    std::fs::write(&msg_path, template(staged_summary)).map_err(|e| GitError {
-        message: format!("could not write commit template: {e}"),
-    })?;
+    let (mut file, msg_path) = create_msg_file()?;
+    use std::io::Write as _;
+    file.write_all(template(staged_summary).as_bytes())
+        .map_err(|e| GitError {
+            message: format!("could not write commit template: {e}"),
+        })?;
+    drop(file);
 
     let run_result = (|| -> std::io::Result<()> {
         let mut cmd = Command::new(&argv[0]);
@@ -93,7 +126,9 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
         }
     })();
     let raw = match run_result {
-        Ok(()) => std::fs::read_to_string(&msg_path).unwrap_or_default(),
+        Ok(()) => std::fs::read_to_string(&msg_path).map_err(|e| GitError {
+            message: format!("could not read commit message — re-save it as UTF-8: {e}"),
+        })?,
         Err(e) => {
             let _ = std::fs::remove_file(&msg_path);
             return Err(GitError {
@@ -129,10 +164,12 @@ pub fn strip_comments(raw: &str) -> String {
 /// `git commit -q -F <file>` — `-F` avoids every quoting/length issue of
 /// `-m`. User hooks run normally.
 pub fn commit(worktree: &Path, message: &str) -> Result<()> {
-    let msg_path = temp_msg_path();
-    std::fs::write(&msg_path, message).map_err(|e| GitError {
+    let (mut file, msg_path) = create_msg_file()?;
+    use std::io::Write as _;
+    file.write_all(message.as_bytes()).map_err(|e| GitError {
         message: format!("could not write commit message: {e}"),
     })?;
+    drop(file);
     let msg_arg = msg_path.to_string_lossy().into_owned();
     let res = engine::run_trimmed(worktree, &["commit", "-q", "-F", &msg_arg]);
     let _ = std::fs::remove_file(&msg_path);

@@ -199,15 +199,21 @@ impl RootView {
 
     pub fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dialog = DialogState::None;
-        // Over the detail view, focus must return to the detail list:
-        // `detail_keydown` early-returns when no detail handle is focused, so
-        // refocusing the root would leave every detail key dead.
+        self.focus_active_surface(window, cx);
+        cx.notify();
+    }
+
+    /// Refocuses whichever surface is active: the detail list while a
+    /// detail view is open, the worktree list otherwise. Every "hand focus
+    /// back" path must go through this — `detail_keydown` early-returns
+    /// when no detail handle is focused, so refocusing the root while the
+    /// detail view is open leaves every detail key dead (keyboard trap).
+    fn focus_active_surface(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         if self.detail.is_some() {
             window.focus(&self.detail_list_focus);
         } else {
             window.focus(&self.root_focus);
         }
-        cx.notify();
     }
 
     pub fn confirm_remove(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -221,8 +227,24 @@ impl RootView {
     }
 
     pub fn confirm_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(wc) = self.detail.clone() {
-            wc.update(cx, |store, cx| store.discard_selected(cx));
+        use crate::engine::working_copy::Group;
+        if let (
+            Some(wc),
+            DialogState::Discard {
+                path, untracked, ..
+            },
+        ) = (&self.detail, &self.dialog)
+        {
+            // Discard exactly the path the dialog was opened for — never
+            // "the current selection", which a refresh can move while the
+            // dialog sits open.
+            let group = if *untracked {
+                Group::Untracked
+            } else {
+                Group::Unstaged
+            };
+            let path = path.clone();
+            wc.update(cx, |store, cx| store.discard_path(group, path, cx));
         }
         self.close_dialog(window, cx);
     }
@@ -518,9 +540,9 @@ impl Render for RootView {
                     this.search.update(cx, |field, cx| field.set_value("", cx));
                     this.store
                         .update(cx, |store, cx| store.set_filter(String::new(), cx));
-                    window.focus(&this.root_focus);
+                    this.focus_active_surface(window, cx);
                 } else if ks.key == "enter" {
-                    window.focus(&this.root_focus);
+                    this.focus_active_surface(window, cx);
                 }
                 return;
             }
@@ -1251,6 +1273,53 @@ mod tests {
                 "nothing discarded"
             );
         });
+    }
+
+    #[gpui::test]
+    fn discard_confirms_the_dialog_path_not_the_current_selection(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("h.txt"), "one").unwrap();
+        sh(&repo, &["git", "add", "--", "h.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "add h.txt"]);
+        std::fs::write(repo.join("f.txt"), "F-EDIT").unwrap();
+        std::fs::write(repo.join("h.txt"), "H-EDIT").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        // Two unstaged rows: f.txt (0), h.txt (1). Open the dialog for
+        // h.txt…
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("d");
+        vcx.run_until_parked();
+        // …then move the selection back to f.txt, the way a refresh
+        // completing mid-dialog could.
+        view.update(&mut vcx.cx, |root, cx| {
+            root.detail
+                .as_ref()
+                .unwrap()
+                .update(cx, |wc, cx| wc.select(Some(0), cx));
+        });
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("enter"); // confirm
+        vcx.run_until_parked();
+
+        // The dialog's path (h.txt) was discarded; the newly selected file
+        // (f.txt) must be untouched.
+        assert_eq!(
+            std::fs::read_to_string(repo.join("h.txt")).unwrap(),
+            "one",
+            "h.txt reverted to committed content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+            "F-EDIT",
+            "f.txt must NOT be discarded — the dialog was opened for h.txt"
+        );
     }
 
     #[gpui::test]
