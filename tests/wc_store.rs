@@ -1,4 +1,4 @@
-//! GPUI-store tests for `WorkingCopyStore`: grouping, group-bounded
+//! GPUI-store tests for `WorkingCopyStore`: grouping, list-bounded
 //! selection, async detail loading, and mutation flagging.
 
 use gpui::TestAppContext;
@@ -75,13 +75,17 @@ fn selection_moves_within_groups_and_loads_diffs(cx: &mut TestAppContext) {
         wc.select_next(cx);
         let (group, entry) = wc.selected_row().unwrap();
         assert_eq!((group, entry.path.as_str()), (Group::Untracked, "u.txt"));
-        // group-bounded: one more step stays on the last row of Untracked
+        // list-bounded: one more step would stay on the last row of the list
         wc.select_next(cx);
         assert_eq!(wc.selected, Some(2));
         wc.select_prev(cx);
         wc.select_prev(cx);
         wc.select_prev(cx);
-        assert_eq!(wc.selected, Some(0), "group-bounded at the top");
+        assert_eq!(
+            wc.selected,
+            Some(0),
+            "list-bounded: stopped at the first row"
+        );
     });
     // The detail view loads off the background executor: jump back to the
     // untracked row and let its preview arrive.

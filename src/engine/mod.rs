@@ -35,11 +35,17 @@ pub mod working_copy;
 /// Runs `git` and returns stdout verbatim (no trailing trim): `-z` records
 /// are NUL-terminated and parsed positionally.
 pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8_lossy(&run_bytes(cwd, args)?).into_owned())
+}
+
+/// Raw stdout as bytes — required wherever output must survive byte-exact
+/// even when it isn't valid UTF-8 (e.g. diff hunks destined for `git apply`).
+pub fn run_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = command(cwd, args).output().map_err(|e| GitError {
         message: format!("failed to run git: {e}"),
     })?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(output.stdout)
     } else {
         Err(stderr_error(&output.stderr))
     }

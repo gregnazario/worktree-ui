@@ -20,78 +20,81 @@ pub struct DiffLine {
 
 #[derive(Clone, Debug)]
 pub struct DiffHunk {
-    /// The full `@@ -a,b +c,d @@ context` line.
+    /// The full `@@ -a,b +c,d @@ context` line (lossy-decoded for display).
     pub header: String,
     pub lines: Vec<DiffLine>,
     /// Byte-exact hunk text (header + lines), consumed verbatim by
-    /// `git apply --cached` in Phase 1b hunk staging.
-    pub raw: String,
+    /// `git apply --cached` in Phase 1b hunk staging. Bytes, because diff
+    /// content and header paths may not be valid UTF-8.
+    pub raw: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct UnifiedDiff {
     /// Everything before the first hunk: `diff --git`, index, `---/+++`,
-    /// rename/mode lines.
+    /// rename/mode lines (lossy-decoded for display).
     pub header: String,
     pub hunks: Vec<DiffHunk>,
     pub binary: bool,
 }
 
-/// Parses a single-file `git diff -U3 --no-color` output.
-pub fn parse_unified_diff(input: &str) -> UnifiedDiff {
+/// Parses a single-file `git diff -U3 --no-color` output. Display strings
+/// are lossy-decoded, but every hunk's `raw` preserves the exact bytes.
+pub fn parse_unified_diff(input: &[u8]) -> UnifiedDiff {
     let mut diff = UnifiedDiff::default();
-    let mut header = String::new();
+    let mut header: Vec<u8> = Vec::new();
     let mut cur: Option<DiffHunk> = None;
-    let mut cur_raw = String::new();
-    for line in input.split_inclusive('\n') {
-        let line = line.strip_suffix('\n').unwrap_or(line);
+    let mut cur_raw: Vec<u8> = Vec::new();
+    for line in input.split_inclusive(|b| *b == b'\n') {
         if diff.binary {
             continue;
         }
-        if line.starts_with("@@") {
+        if line.starts_with(b"@@") {
             if let Some(mut h) = cur.take() {
                 h.raw = std::mem::take(&mut cur_raw);
                 diff.hunks.push(h);
             }
             cur = Some(DiffHunk {
-                header: line.to_string(),
+                header: String::from_utf8_lossy(line).into_owned(),
                 lines: Vec::new(),
-                raw: String::new(),
+                raw: Vec::new(),
             });
-            cur_raw.push_str(line);
-            cur_raw.push('\n');
+            cur_raw.extend_from_slice(line);
             continue;
         }
         if cur.is_none() {
-            if line.starts_with("Binary files ") || line.starts_with("GIT binary patch") {
+            if line.starts_with(b"Binary files ") || line.starts_with(b"GIT binary patch") {
                 diff.binary = true;
             }
-            header.push_str(line);
-            header.push('\n');
+            header.extend_from_slice(line);
             continue;
         }
-        cur_raw.push_str(line);
-        cur_raw.push('\n');
+        cur_raw.extend_from_slice(line);
+        let stripped = line.strip_suffix(b"\n").unwrap_or(line);
         let hunk = cur.as_mut().expect("checked Some above");
-        match line.chars().next() {
-            Some('+') => hunk.lines.push(DiffLine {
+        match stripped.first() {
+            Some(b'+') => hunk.lines.push(DiffLine {
                 kind: DiffLineKind::Add,
-                content: line[1..].to_string(),
+                content: String::from_utf8_lossy(&stripped[1..]).into_owned(),
                 no_newline: false,
             }),
-            Some('-') => hunk.lines.push(DiffLine {
+            Some(b'-') => hunk.lines.push(DiffLine {
                 kind: DiffLineKind::Del,
-                content: line[1..].to_string(),
+                content: String::from_utf8_lossy(&stripped[1..]).into_owned(),
                 no_newline: false,
             }),
-            Some('\\') => {
+            Some(b'\\') => {
+                // `\ No newline at end of file` — annotate the previous line.
                 if let Some(last) = hunk.lines.last_mut() {
                     last.no_newline = true;
                 }
             }
-            _ => hunk.lines.push(DiffLine {
+            first => hunk.lines.push(DiffLine {
                 kind: DiffLineKind::Context,
-                content: line.strip_prefix(' ').unwrap_or(line).to_string(),
+                content: match first {
+                    Some(b' ') => String::from_utf8_lossy(&stripped[1..]).into_owned(),
+                    _ => String::from_utf8_lossy(stripped).into_owned(),
+                },
                 no_newline: false,
             }),
         }
@@ -100,7 +103,7 @@ pub fn parse_unified_diff(input: &str) -> UnifiedDiff {
         h.raw = cur_raw;
         diff.hunks.push(h);
     }
-    diff.header = header;
+    diff.header = String::from_utf8_lossy(&header).into_owned();
     diff
 }
 
@@ -112,7 +115,7 @@ fn literal(rel_path: &str) -> String {
 pub fn diff_unstaged(worktree: &Path, rel_path: &str) -> Result<UnifiedDiff> {
     // NOTE: `--no-optional-locks` is a GLOBAL git option — it must appear
     // before the `diff` subcommand or git exits 129.
-    let out = engine::run(
+    let out = engine::run_bytes(
         worktree,
         &[
             "--no-optional-locks",
@@ -130,7 +133,7 @@ pub fn diff_unstaged(worktree: &Path, rel_path: &str) -> Result<UnifiedDiff> {
 pub fn diff_staged(worktree: &Path, rel_path: &str) -> Result<UnifiedDiff> {
     // NOTE: `--no-optional-locks` is a GLOBAL git option — it must appear
     // before the `diff` subcommand or git exits 129.
-    let out = engine::run(
+    let out = engine::run_bytes(
         worktree,
         &[
             "--no-optional-locks",
@@ -196,7 +199,7 @@ mod tests {
 
     #[test]
     fn parses_hunks_lines_and_no_newline_marker() {
-        let d = parse_unified_diff(PATCH);
+        let d = parse_unified_diff(PATCH.as_bytes());
         assert_eq!(d.hunks.len(), 2);
         assert!(!d.binary);
         assert!(d.header.contains("diff --git a/f.txt"));
@@ -216,28 +219,43 @@ mod tests {
 
     #[test]
     fn raw_is_byte_exact_for_hunk_staging() {
-        let d = parse_unified_diff(PATCH);
+        let d = parse_unified_diff(PATCH.as_bytes());
         let raw = &d.hunks[0].raw;
-        assert!(raw.starts_with("@@ -1,2 +1,3 @@\n one\n+two\n three\n"));
+        assert!(raw.starts_with(b"@@ -1,2 +1,3 @@\n one\n+two\n three\n"));
         assert_eq!(
-            &d.hunks[1].raw,
-            "@@ -10,2 +11,2 @@\n four\n-five\n+six\n\\ No newline at end of file\n"
+            d.hunks[1].raw,
+            b"@@ -10,2 +11,2 @@\n four\n-five\n+six\n\\ No newline at end of file\n"
         );
     }
 
     #[test]
+    fn raw_preserves_non_utf8_bytes_exactly() {
+        // 0xFF is not valid UTF-8: display text must lossy-decode, but the
+        // hunk raw — the Phase 1b `git apply --cached` payload — must keep
+        // the original bytes.
+        let mut patch = b"diff --git a/b b/b\n@@ -1 +1 @@\n-old\xff\n".to_vec();
+        patch.extend_from_slice(b"+new\xfe\n");
+        let d = parse_unified_diff(&patch);
+        assert_eq!(d.hunks.len(), 1);
+        assert_eq!(d.hunks[0].raw, patch[b"diff --git a/b b/b\n".len()..]);
+        assert!(d.hunks[0].lines[0].content.contains('\u{FFFD}'));
+    }
+
+    #[test]
     fn detects_binary_and_mode_only_changes() {
-        let d = parse_unified_diff("diff --git a/img.png b/img.png\nindex a..b 100644\nBinary files a/img.png and b/img.png differ\n");
+        let d = parse_unified_diff("diff --git a/img.png b/img.png\nindex a..b 100644\nBinary files a/img.png and b/img.png differ\n".as_bytes());
         assert!(d.binary);
         assert!(d.hunks.is_empty());
-        let d = parse_unified_diff("diff --git a/s.sh b/s.sh\nold mode 100644\nnew mode 100755\n");
+        let d = parse_unified_diff(
+            "diff --git a/s.sh b/s.sh\nold mode 100644\nnew mode 100755\n".as_bytes(),
+        );
         assert!(!d.binary);
         assert!(d.hunks.is_empty());
     }
 
     #[test]
     fn empty_input_is_empty_diff() {
-        let d = parse_unified_diff("");
+        let d = parse_unified_diff(b"");
         assert!(d.hunks.is_empty());
         assert!(d.header.is_empty());
     }

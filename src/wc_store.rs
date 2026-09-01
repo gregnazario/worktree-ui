@@ -243,6 +243,9 @@ impl WorkingCopyStore {
     /// `s` on a row: stage unstaged/untracked/conflict rows, unstage staged
     /// rows. Conflicts: staging marks them resolved.
     pub fn toggle_stage(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
         let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
             return;
         };
@@ -282,12 +285,24 @@ impl WorkingCopyStore {
     }
 
     pub fn stage_all(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
         let worktree = self.worktree.clone();
+        // Lossy-decoded names can't be matched by a pathspec; including one
+        // would abort the whole `git add` (a chunk may already have
+        // applied), so they're skipped — the rows are visibly marked
+        // "(non-UTF-8 name — unsupported)".
         let paths: Vec<String> = self
             .rows()
             .into_iter()
             .filter(|(g, _)| !matches!(g, eng::Group::Staged | eng::Group::Conflicts))
-            .filter_map(|(_, i)| self.wc.as_ref().map(|wc| wc.entries[i].path.clone()))
+            .filter_map(|(_, i)| {
+                self.wc.as_ref().and_then(|wc| {
+                    let e = &wc.entries[i];
+                    (!e.unsupported).then(|| e.path.clone())
+                })
+            })
             .collect();
         if paths.is_empty() {
             return;
@@ -322,6 +337,9 @@ impl WorkingCopyStore {
     /// from index, Untracked → delete file). Other groups are refused:
     /// their discard is either not offered or unsafe.
     pub fn discard_path(&mut self, group: eng::Group, path: String, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
         if matches!(group, eng::Group::Staged | eng::Group::Conflicts) {
             return;
         }
@@ -381,7 +399,15 @@ impl WorkingCopyStore {
         self.refresh(cx);
     }
 
+    /// While an operation is in flight (`busy`), every mutating entry point
+    /// below early-returns: a second commit editor, or an index mutation
+    /// under the pending commit, would corrupt what the user is committing.
     pub fn commit_with_editor(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            self.message = Some("Busy — wait for the current operation".into());
+            cx.notify();
+            return;
+        }
         let Some(wc) = self.wc.clone() else { return };
         if self.staged_count() == 0 {
             self.message = Some("Nothing staged — press s on files to stage them first".into());
