@@ -104,14 +104,16 @@ fn write_editor_script(message: &str) -> String {
     }
     #[cfg(windows)]
     {
+        // std refuses to spawn .cmd/.bat directly (BatBadBut mitigation), so
+        // the GIT_EDITOR string routes through `cmd /c`; resolve_editor's
+        // whitespace split yields ["cmd", "/c", script] and the message file
+        // is appended as the script's %1.
         let script = path.with_extension("cmd");
         std::fs::write(
             &script,
-            format!(
-                "@echo off\n(set /p _=<nul) > nul\n(type nul > \"%~1\")\n(echo|set /p=\"{message}\" > \"%~1\")\n"
-            ),
+            format!("@echo off\r\n(echo {message})> \"%~1\"\r\n"),
         )
         .unwrap();
-        script.display().to_string()
+        format!("cmd /c {}", script.display())
     }
 }
