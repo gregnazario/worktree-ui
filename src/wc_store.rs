@@ -33,9 +33,6 @@ pub struct WorkingCopyStore {
     /// detail view — never raised by snapshot refreshes, so a refresh can
     /// neither re-arm keys under a pending commit nor trap the user.
     pub(crate) mutating: bool,
-    /// A status/diff snapshot load is in flight. Informational only; keys
-    /// stay live during refreshes.
-    pub(crate) refreshing: bool,
     pub message: Option<String>,
     /// Consumed by the app shell: one successful mutation → one home-list
     /// refresh.
@@ -64,7 +61,6 @@ impl WorkingCopyStore {
             pane: Pane::Files,
             author: None,
             mutating: false,
-            refreshing: false,
             message: None,
             mutated: false,
             busy_hint: false,
@@ -135,7 +131,6 @@ impl WorkingCopyStore {
     /// Re-runs status and reloads the selected row's detail. Keeps the
     /// selection on the same path when it still exists.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.refreshing = true;
         self.generation += 1;
         let gen = self.generation;
         let worktree = self.worktree.clone();
@@ -149,7 +144,6 @@ impl WorkingCopyStore {
                 if gen != store.generation {
                     return;
                 }
-                store.refreshing = false;
                 match result {
                     Ok(wc) => {
                         if store.busy_hint {
@@ -257,8 +251,6 @@ impl WorkingCopyStore {
         .detach();
     }
 
-    /// `s` on a row: stage unstaged/untracked/conflict rows, unstage staged
-    /// rows. Conflicts: staging marks them resolved.
     /// Transient "busy" hint, shared by the mutating entry points and the
     /// shell's guards (e.g. refusing to close the detail view mid-commit).
     pub fn busy_message(&mut self, cx: &mut Context<Self>) {
@@ -267,6 +259,8 @@ impl WorkingCopyStore {
         cx.notify();
     }
 
+    /// `s` on a row: stage unstaged/untracked/conflict rows, unstage staged
+    /// rows. Conflicts: staging marks them resolved.
     pub fn toggle_stage(&mut self, cx: &mut Context<Self>) {
         if self.mutating {
             self.busy_message(cx);
@@ -465,6 +459,10 @@ impl WorkingCopyStore {
                 .await;
             this.update(cx, |store, cx| {
                 store.mutating = false;
+                // A hint raised mid-editor session (e.g. a swallowed `s`)
+                // must not let the follow-up refresh completion erase the
+                // commit outcome below.
+                store.busy_hint = false;
                 match result {
                     Ok(commit::CommitOutcome::Committed) => {
                         store.message = Some("Committed".into());
