@@ -28,7 +28,14 @@ pub struct WorkingCopyStore {
     pub selected: Option<usize>,
     pub pane: Pane,
     pub author: Option<(String, String)>,
-    pub busy: bool,
+    /// A mutation (stage/unstage/discard/commit) is in flight. Blocks all
+    /// other mutating entry points, the discard dialog, and closing the
+    /// detail view — never raised by snapshot refreshes, so a refresh can
+    /// neither re-arm keys under a pending commit nor trap the user.
+    pub(crate) mutating: bool,
+    /// A status/diff snapshot load is in flight. Informational only; keys
+    /// stay live during refreshes.
+    pub(crate) refreshing: bool,
     pub message: Option<String>,
     /// Consumed by the app shell: one successful mutation → one home-list
     /// refresh.
@@ -56,7 +63,8 @@ impl WorkingCopyStore {
             selected: None,
             pane: Pane::Files,
             author: None,
-            busy: false,
+            mutating: false,
+            refreshing: false,
             message: None,
             mutated: false,
             busy_hint: false,
@@ -127,7 +135,7 @@ impl WorkingCopyStore {
     /// Re-runs status and reloads the selected row's detail. Keeps the
     /// selection on the same path when it still exists.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.busy = true;
+        self.refreshing = true;
         self.generation += 1;
         let gen = self.generation;
         let worktree = self.worktree.clone();
@@ -141,7 +149,7 @@ impl WorkingCopyStore {
                 if gen != store.generation {
                     return;
                 }
-                store.busy = false;
+                store.refreshing = false;
                 match result {
                     Ok(wc) => {
                         if store.busy_hint {
@@ -260,7 +268,7 @@ impl WorkingCopyStore {
     }
 
     pub fn toggle_stage(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.mutating {
             self.busy_message(cx);
             return;
         }
@@ -280,7 +288,7 @@ impl WorkingCopyStore {
         // Bump to cancel in-flight snapshot loads; the mutation completion
         // below applies regardless of generation (see `after_mutation`).
         self.generation += 1;
-        self.busy = true;
+        self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -303,7 +311,7 @@ impl WorkingCopyStore {
     }
 
     pub fn stage_all(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.mutating {
             self.busy_message(cx);
             return;
         }
@@ -327,7 +335,7 @@ impl WorkingCopyStore {
             return;
         }
         self.generation += 1;
-        self.busy = true;
+        self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -359,7 +367,7 @@ impl WorkingCopyStore {
     /// Untracked → delete the file; tracked → restore from the index
     /// (staged changes survive). Anything else is refused.
     pub fn discard_path(&mut self, path: String, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.mutating {
             self.busy_message(cx);
             return;
         }
@@ -388,7 +396,7 @@ impl WorkingCopyStore {
         let worktree = self.worktree.clone();
         let untracked = entry.untracked;
         self.generation += 1;
-        self.busy = true;
+        self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -410,7 +418,7 @@ impl WorkingCopyStore {
     fn after_mutation(&mut self, result: engine::Result<()>, cx: &mut Context<Self>) {
         // Mutation completions deliberately skip the generation guard: the
         // disk effect is real whenever it lands; only snapshots are guarded.
-        self.busy = false;
+        self.mutating = false;
         self.busy_hint = false;
         match result {
             Ok(()) => {
@@ -432,7 +440,7 @@ impl WorkingCopyStore {
     /// below early-returns: a second commit editor, or an index mutation
     /// under the pending commit, would corrupt what the user is committing.
     pub fn commit_with_editor(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.mutating {
             self.busy_message(cx);
             return;
         }
@@ -444,7 +452,7 @@ impl WorkingCopyStore {
         }
         let summary = staged_summary(&wc);
         let worktree = self.worktree.clone();
-        self.busy = true;
+        self.mutating = true;
         self.message = Some("Waiting for commit editor…".into());
         // Bump to cancel in-flight snapshot loads; the completion below
         // applies regardless of generation (see `after_mutation`).
@@ -456,7 +464,7 @@ impl WorkingCopyStore {
                 .spawn(async move { commit::commit_with_editor(&worktree, &summary) })
                 .await;
             this.update(cx, |store, cx| {
-                store.busy = false;
+                store.mutating = false;
                 match result {
                     Ok(commit::CommitOutcome::Committed) => {
                         store.message = Some("Committed".into());

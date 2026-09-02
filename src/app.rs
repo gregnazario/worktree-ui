@@ -342,7 +342,7 @@ impl RootView {
         let Some(wc) = &self.detail else { return };
         // Don't snapshot a working copy whose refresh is still in flight:
         // the dialog would describe a state that's about to change.
-        if wc.read(cx).busy {
+        if wc.read(cx).mutating {
             wc.update(cx, |store, cx| store.busy_message(cx));
             return;
         }
@@ -419,7 +419,7 @@ impl RootView {
         // would orphan it: re-drilling opens a fresh, idle store while the
         // old commit is still pending, re-opening the mutate-under-pending-
         // commit hole the busy-gating exists to close.
-        let busy = self.detail.as_ref().is_some_and(|wc| wc.read(cx).busy);
+        let busy = self.detail.as_ref().is_some_and(|wc| wc.read(cx).mutating);
         if busy {
             if let Some(wc) = &self.detail {
                 wc.update(cx, |store, cx| store.busy_message(cx));
@@ -1346,7 +1346,7 @@ mod tests {
         // fresh idle store while the old commit is still pending.
         view.update(&mut vcx.cx, |root, cx| {
             root.detail.as_ref().unwrap().update(cx, |wc, _cx| {
-                wc.busy = true;
+                wc.mutating = true;
             });
         });
         vcx.simulate_keystrokes("escape");
@@ -1362,7 +1362,7 @@ mod tests {
         // Once the operation completes, esc works again.
         view.update(&mut vcx.cx, |root, cx| {
             root.detail.as_ref().unwrap().update(cx, |wc, _cx| {
-                wc.busy = false;
+                wc.mutating = false;
                 wc.message = None;
             });
         });
@@ -1496,7 +1496,7 @@ mod tests {
                 "expected the nothing-staged hint, got {:?}",
                 wc.message
             );
-            assert!(!wc.busy, "no editor spawned");
+            assert!(!wc.mutating, "no editor spawned");
         });
     }
 }
