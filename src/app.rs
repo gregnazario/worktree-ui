@@ -227,24 +227,14 @@ impl RootView {
     }
 
     pub fn confirm_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::engine::working_copy::Group;
-        if let (
-            Some(wc),
-            DialogState::Discard {
-                path, untracked, ..
-            },
-        ) = (&self.detail, &self.dialog)
-        {
+        if let (Some(wc), DialogState::Discard { path, .. }) = (&self.detail, &self.dialog) {
             // Discard exactly the path the dialog was opened for — never
             // "the current selection", which a refresh can move while the
-            // dialog sits open.
-            let group = if *untracked {
-                Group::Untracked
-            } else {
-                Group::Unstaged
-            };
+            // dialog sits open. The store derives HOW from the file's
+            // current state, so a mid-dialog untracked→tracked flip can't
+            // redirect the destructive action.
             let path = path.clone();
-            wc.update(cx, |store, cx| store.discard_path(group, path, cx));
+            wc.update(cx, |store, cx| store.discard_path(path, cx));
         }
         self.close_dialog(window, cx);
     }
@@ -350,6 +340,11 @@ impl RootView {
             return;
         }
         let Some(wc) = &self.detail else { return };
+        // Don't snapshot a working copy whose refresh is still in flight:
+        // the dialog would describe a state that's about to change.
+        if wc.read(cx).busy {
+            return;
+        }
         let Some((group, entry)) = wc.read(cx).selected_row().map(|(g, e)| (g, e.clone())) else {
             return;
         };
@@ -1319,6 +1314,46 @@ mod tests {
             std::fs::read_to_string(repo.join("f.txt")).unwrap(),
             "F-EDIT",
             "f.txt must NOT be discarded — the dialog was opened for h.txt"
+        );
+    }
+
+    #[gpui::test]
+    fn discard_derives_action_from_live_state_not_dialog_snapshot(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("u.txt"), "brand new").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        // Only change is the untracked u.txt → row 0. Open the dialog for
+        // it while it's untracked…
+        vcx.simulate_keystrokes("d");
+        vcx.run_until_parked();
+        // …then stage it mid-dialog (as a pre-dialog mutation landing would).
+        view.update(&mut vcx.cx, |root, cx| {
+            root.detail
+                .as_ref()
+                .unwrap()
+                .update(cx, |wc, cx| wc.toggle_stage(cx));
+        });
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("enter"); // confirm discard
+        vcx.run_until_parked();
+
+        // The file flipped untracked → tracked while the dialog was open.
+        // The confirm must derive from the LIVE state (tracked → restore
+        // from index), never the snapshot (untracked → delete the file).
+        assert!(
+            repo.join("u.txt").exists(),
+            "a file that became tracked mid-dialog must not be deleted"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("u.txt")).unwrap(),
+            "brand new",
+            "discard restores the index copy for a tracked file"
         );
     }
 

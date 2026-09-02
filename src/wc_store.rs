@@ -33,6 +33,10 @@ pub struct WorkingCopyStore {
     /// Consumed by the app shell: one successful mutation → one home-list
     /// refresh.
     mutated: bool,
+    /// The current `message` is the transient "Busy" hint (set by a
+    /// mutating entry point that was swallowed while busy). Completions
+    /// clear it so the hint never outlives the operation.
+    busy_hint: bool,
     /// Guards status/numstat snapshot loads. Bumped by refresh and by
     /// mutations (a mutation invalidates any in-flight snapshot), but NOT
     /// by detail loads — changing the selected file must never cancel a
@@ -55,6 +59,7 @@ impl WorkingCopyStore {
             busy: false,
             message: None,
             mutated: false,
+            busy_hint: false,
             generation: 0,
             detail_generation: 0,
         });
@@ -139,6 +144,10 @@ impl WorkingCopyStore {
                 store.busy = false;
                 match result {
                     Ok(wc) => {
+                        if store.busy_hint {
+                            store.busy_hint = false;
+                            store.message = None;
+                        }
                         // Resolve the keep-path against the NEW snapshot
                         // (path → entry index → row index) so a vanished
                         // file simply falls back to the first row instead
@@ -244,6 +253,9 @@ impl WorkingCopyStore {
     /// rows. Conflicts: staging marks them resolved.
     pub fn toggle_stage(&mut self, cx: &mut Context<Self>) {
         if self.busy {
+            self.message = Some("Busy — wait for the current operation".into());
+            self.busy_hint = true;
+            cx.notify();
             return;
         }
         let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
@@ -286,6 +298,9 @@ impl WorkingCopyStore {
 
     pub fn stage_all(&mut self, cx: &mut Context<Self>) {
         if self.busy {
+            self.message = Some("Busy — wait for the current operation".into());
+            self.busy_hint = true;
+            cx.notify();
             return;
         }
         let worktree = self.worktree.clone();
@@ -327,31 +342,37 @@ impl WorkingCopyStore {
     /// dialog is open can move the selection, and Enter must never delete a
     /// different file than the one the user confirmed.
     pub fn discard_selected(&mut self, cx: &mut Context<Self>) {
-        let Some((group, path)) = self.selected_row().map(|(g, e)| (g, e.path.clone())) else {
+        let Some((_, path)) = self.selected_row().map(|(g, e)| (g, e.path.clone())) else {
             return;
         };
-        self.discard_path(group, path, cx);
+        self.discard_path(path, cx);
     }
 
-    /// Discards a specific path by its owning group (Unstaged → restore
-    /// from index, Untracked → delete file). Other groups are refused:
-    /// their discard is either not offered or unsafe.
-    pub fn discard_path(&mut self, group: eng::Group, path: String, cx: &mut Context<Self>) {
+    /// Discards a specific path. How it is discarded is derived from the
+    /// entry's CURRENT state, not the dialog's snapshot: a refresh or
+    /// mutation landing mid-dialog can flip a file between untracked and
+    /// tracked, and the executed action must match what exists now.
+    /// Untracked → delete the file; tracked → restore from the index
+    /// (staged changes survive). Anything else is refused.
+    pub fn discard_path(&mut self, path: String, cx: &mut Context<Self>) {
         if self.busy {
+            self.message = Some("Busy — wait for the current operation".into());
+            self.busy_hint = true;
+            cx.notify();
             return;
         }
-        if matches!(group, eng::Group::Staged | eng::Group::Conflicts) {
-            return;
-        }
-        if path.ends_with('/') {
-            return; // no recursive delete in Phase 1
-        }
-        if self
+        let Some(entry) = self
             .wc
             .as_ref()
             .and_then(|wc| wc.entries.iter().find(|e| e.path == path))
-            .is_some_and(|e| e.unsupported)
-        {
+            .cloned()
+        else {
+            self.message =
+                Some("That file is no longer in the working copy — reopen the dialog".into());
+            cx.notify();
+            return;
+        };
+        if entry.unsupported {
             self.message = Some(
                 "filename contains characters git's output lost — discard this one in a terminal"
                     .into(),
@@ -359,7 +380,11 @@ impl WorkingCopyStore {
             cx.notify();
             return;
         }
+        if entry.is_dir() {
+            return; // no recursive delete in Phase 1
+        }
         let worktree = self.worktree.clone();
+        let untracked = entry.untracked;
         self.generation += 1;
         self.busy = true;
         cx.notify();
@@ -367,9 +392,10 @@ impl WorkingCopyStore {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    match group {
-                        eng::Group::Untracked => mutate::discard_untracked(&worktree, &path),
-                        _ => mutate::discard_unstaged(&worktree, &path),
+                    if untracked {
+                        mutate::discard_untracked(&worktree, &path)
+                    } else {
+                        mutate::discard_unstaged(&worktree, &path)
                     }
                 })
                 .await;
@@ -383,6 +409,7 @@ impl WorkingCopyStore {
         // Mutation completions deliberately skip the generation guard: the
         // disk effect is real whenever it lands; only snapshots are guarded.
         self.busy = false;
+        self.busy_hint = false;
         match result {
             Ok(()) => {
                 self.message = None;
@@ -405,6 +432,7 @@ impl WorkingCopyStore {
     pub fn commit_with_editor(&mut self, cx: &mut Context<Self>) {
         if self.busy {
             self.message = Some("Busy — wait for the current operation".into());
+            self.busy_hint = true;
             cx.notify();
             return;
         }
