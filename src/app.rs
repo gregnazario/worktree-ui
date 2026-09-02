@@ -1334,6 +1334,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn refresh_keeps_the_selected_surface_of_a_dual_group_file(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        // f.txt is staged ("one two") and further modified unstaged
+        // ("three FOUR"): it appears as BOTH a Staged row and an Unstaged row.
+        std::fs::write(repo.join("f.txt"), "one two\nthree\n").unwrap();
+        sh(&repo, &["git", "add", "--", "f.txt"]);
+        std::fs::write(repo.join("f.txt"), "one two\nthree FOUR\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        // Row 0 = Staged f.txt; row 1 = Unstaged f.txt. Move to the
+        // Unstaged row, then let a refresh land.
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap();
+            let (group, entry) = wc.read(cx).selected_row().unwrap();
+            assert_eq!(
+                (group, entry.path.as_str()),
+                (crate::engine::working_copy::Group::Unstaged, "f.txt"),
+                "precondition: Unstaged f.txt selected"
+            );
+            wc.update(cx, |store, cx| store.refresh(cx));
+        });
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap();
+            let (group, entry) = wc.read(cx).selected_row().unwrap();
+            assert_eq!(
+                (group, entry.path.as_str()),
+                (crate::engine::working_copy::Group::Unstaged, "f.txt"),
+                "a landing refresh must keep the Unstaged surface selected — \
+                 snapping to Staged would flip the next `s` into an unstage"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn esc_is_ignored_while_an_operation_is_in_flight(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("fixture");

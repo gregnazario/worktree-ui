@@ -208,8 +208,17 @@ mod mutate_tests {
         sh(Some(tmp.path()), &["git", "config", "user.name", "t"]);
         std::fs::write(tmp.path().join("n.txt"), "new file").unwrap();
         mutate::stage(tmp.path(), &["n.txt".to_string()]).unwrap();
+        // Worktree diverges from the index after staging: without --force
+        // git refuses to `rm --cached` a file whose staged content is not
+        // in HEAD (there IS no HEAD yet).
+        std::fs::write(tmp.path().join("n.txt"), "new file\nedited").unwrap();
         // No commit yet: `reset HEAD` would fail; unstage must still work.
         mutate::unstage(tmp.path(), &["n.txt".to_string()]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("n.txt")).unwrap(),
+            "new file\nedited",
+            "unstage never touches the worktree file"
+        );
         let wc = worktree_tool::engine::working_copy::status(tmp.path()).unwrap();
         assert!(
             wc.entries.iter().any(|e| e.path == "n.txt" && e.untracked),

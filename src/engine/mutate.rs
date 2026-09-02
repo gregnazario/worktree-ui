@@ -52,7 +52,9 @@ pub fn unstage(worktree: &Path, rel_paths: &[String]) -> Result<()> {
     if head_exists {
         for_each_chunk(worktree, &["reset", "-q", "HEAD"], rel_paths)
     } else {
-        for_each_chunk(worktree, &["rm", "--cached", "-q"], rel_paths)
+        // `--force` only overrides git's staged-changes refusal — with
+        // `--cached` the worktree file is never touched.
+        for_each_chunk(worktree, &["rm", "--cached", "-q", "--force"], rel_paths)
     }
 }
 

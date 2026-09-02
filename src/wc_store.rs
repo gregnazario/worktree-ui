@@ -157,19 +157,27 @@ impl WorkingCopyStore {
                         // when the currently selected row vanished. Both
                         // resolve against the NEW snapshot (path → entry
                         // index → row index) so stale rows are never
-                        // indexed into fresh entries.
+                        // indexed into fresh entries. A file present in
+                        // BOTH Staged and Unstaged groups resolves against
+                        // its (group, path) pair first — a refresh must not
+                        // snap an Unstaged selection onto the Staged row,
+                        // or the next `s` unstage/stages the wrong surface.
                         let rows = eng::group_rows(&wc);
-                        let resolve = |path: &str| -> Option<usize> {
-                            wc.entries
-                                .iter()
-                                .position(|e| e.path == path)
-                                .and_then(|entry| rows.iter().position(|(_, i)| *i == entry))
+                        let resolve = |group: Option<eng::Group>, path: &str| -> Option<usize> {
+                            let entry = wc.entries.iter().position(|e| e.path == path)?;
+                            match group {
+                                Some(g) => rows
+                                    .iter()
+                                    .position(|(rg, i)| *i == entry && *rg == g)
+                                    .or_else(|| rows.iter().position(|(_, i)| *i == entry)),
+                                None => rows.iter().position(|(_, i)| *i == entry),
+                            }
                         };
                         let selected = store
                             .selected_row()
-                            .map(|(_, e)| resolve(e.path.as_str()))
+                            .map(|(g, e)| resolve(Some(g), e.path.as_str()))
                             .unwrap_or(None)
-                            .or_else(|| keep_path.as_deref().and_then(resolve));
+                            .or_else(|| keep_path.as_deref().and_then(|p| resolve(None, p)));
                         store.wc = Some(wc);
                         store.selected = selected.or(if rows.is_empty() { None } else { Some(0) });
                         store.load_detail(cx);
@@ -439,7 +447,7 @@ impl WorkingCopyStore {
         self.refresh(cx);
     }
 
-    /// While an operation is in flight (`busy`), every mutating entry point
+    /// While an operation is in flight (`mutating`), every mutating entry point
     /// below early-returns: a second commit editor, or an index mutation
     /// under the pending commit, would corrupt what the user is committing.
     pub fn commit_with_editor(&mut self, cx: &mut Context<Self>) {

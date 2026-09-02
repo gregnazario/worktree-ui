@@ -61,20 +61,19 @@ pub fn author(worktree: &Path) -> (String, String) {
 }
 
 /// Pure so tests can inject env/config lookups. Returns argv (split on
-/// whitespace); the message file is appended as the last argument.
+/// whitespace); the message file is appended as the last argument. Every
+/// source passes through the same blank-value filter so an exported-empty
+/// `$VISUAL`/`$EDITOR` falls through to the platform default instead of
+/// producing an empty argv.
 pub fn resolve_editor(
     git_config_value: Option<&str>,
     getenv: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<String> {
-    let source = getenv("GIT_EDITOR")
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            git_config_value
-                .map(str::to_string)
-                .filter(|v| !v.trim().is_empty())
-        })
-        .or_else(|| getenv("VISUAL"))
-        .or_else(|| getenv("EDITOR"))
+    let usable = |v: Option<String>| v.filter(|v| !v.trim().is_empty());
+    let source = usable(getenv("GIT_EDITOR"))
+        .or_else(|| usable(git_config_value.map(str::to_string)))
+        .or_else(|| usable(getenv("VISUAL")))
+        .or_else(|| usable(getenv("EDITOR")))
         .unwrap_or_else(|| platform_default_editor().to_string());
     source.split_whitespace().map(str::to_string).collect()
 }

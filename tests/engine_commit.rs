@@ -38,7 +38,17 @@ fn resolve_editor_order_and_splitting() {
         commit::resolve_editor(None, &|k| (k == "EDITOR").then(|| "emacs".to_string())),
         vec!["emacs"]
     );
+    // Exported-empty values fall through exactly like unset ones.
+    let getenv = |k: &str| match k {
+        "VISUAL" => Some("  ".to_string()),
+        "EDITOR" => Some(String::new()),
+        _ => None,
+    };
     let expected_default = if cfg!(windows) { "notepad" } else { "vim" };
+    assert_eq!(
+        commit::resolve_editor(None, &getenv),
+        vec![expected_default]
+    );
     assert_eq!(
         commit::resolve_editor(None, &|_| None),
         vec![expected_default]
