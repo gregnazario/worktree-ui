@@ -343,6 +343,7 @@ impl RootView {
         // Don't snapshot a working copy whose refresh is still in flight:
         // the dialog would describe a state that's about to change.
         if wc.read(cx).busy {
+            wc.update(cx, |store, cx| store.busy_message(cx));
             return;
         }
         let Some((group, entry)) = wc.read(cx).selected_row().map(|(g, e)| (g, e.clone())) else {
@@ -413,6 +414,18 @@ impl RootView {
     /// Returns to the home list: refocus it and refresh, since the user may
     /// have mutated the worktree from the detail view.
     pub fn close_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A busy detail view means an operation is in flight — possibly the
+        // commit editor, which can run for minutes. Dropping the store now
+        // would orphan it: re-drilling opens a fresh, idle store while the
+        // old commit is still pending, re-opening the mutate-under-pending-
+        // commit hole the busy-gating exists to close.
+        let busy = self.detail.as_ref().is_some_and(|wc| wc.read(cx).busy);
+        if busy {
+            if let Some(wc) = &self.detail {
+                wc.update(cx, |store, cx| store.busy_message(cx));
+            }
+            return;
+        }
         // Drop the observer first: a dropped Subscription unsubscribes.
         self.detail_subscription = None;
         self.detail = None;
@@ -1177,7 +1190,7 @@ mod tests {
         view.update(&mut vcx.cx, |root, cx| {
             let wc = root.detail.as_ref().unwrap().read(cx);
             assert_eq!(wc.staged_count(), 1, "s stages the selected untracked file");
-            // `mutated` itself is consumed by the detail observer (Task 9) to
+            // `mutated` itself is consumed by the detail observer to
             // trigger the home refresh, so assert the observable effect: the
             // home list re-refreshed with fresh status data.
             let home = root.store.read(cx);
@@ -1315,6 +1328,49 @@ mod tests {
             "F-EDIT",
             "f.txt must NOT be discarded — the dialog was opened for h.txt"
         );
+    }
+
+    #[gpui::test]
+    fn esc_is_ignored_while_an_operation_is_in_flight(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "changed").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        // Simulate an in-flight operation (e.g. the commit editor session):
+        // closing the detail view now would orphan it — a re-drill opens a
+        // fresh idle store while the old commit is still pending.
+        view.update(&mut vcx.cx, |root, cx| {
+            root.detail.as_ref().unwrap().update(cx, |wc, _cx| {
+                wc.busy = true;
+            });
+        });
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().expect("busy detail must not close");
+            assert!(
+                wc.read(cx).message.as_deref() == Some("Busy — wait for the current operation"),
+                "expected the busy hint, got {:?}",
+                wc.read(cx).message
+            );
+        });
+        // Once the operation completes, esc works again.
+        view.update(&mut vcx.cx, |root, cx| {
+            root.detail.as_ref().unwrap().update(cx, |wc, _cx| {
+                wc.busy = false;
+                wc.message = None;
+            });
+        });
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert!(root.detail.is_none(), "idle detail closes normally");
+        });
     }
 
     #[gpui::test]

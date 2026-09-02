@@ -39,12 +39,21 @@ pub fn stage(worktree: &Path, rel_paths: &[String]) -> Result<()> {
     for_each_chunk(worktree, &["add"], rel_paths)
 }
 
-/// `git reset -q HEAD -- <paths>`, batched.
+/// `git reset -q HEAD -- <paths>`, batched. On an unborn HEAD (fresh repo,
+/// no commits) there is nothing for `reset HEAD` to point at, so the
+/// equivalent unstage is `git rm --cached`: the paths drop back to
+/// untracked.
 pub fn unstage(worktree: &Path, rel_paths: &[String]) -> Result<()> {
     if rel_paths.is_empty() {
         return Ok(());
     }
-    for_each_chunk(worktree, &["reset", "-q", "HEAD"], rel_paths)
+    let head_exists =
+        engine::run_trimmed(worktree, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok();
+    if head_exists {
+        for_each_chunk(worktree, &["reset", "-q", "HEAD"], rel_paths)
+    } else {
+        for_each_chunk(worktree, &["rm", "--cached", "-q"], rel_paths)
+    }
 }
 
 /// `git checkout -q -- <path>`: restore the worktree file from the index,

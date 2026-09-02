@@ -11,7 +11,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
-/// Caps rendered diff lines. Wired into the diff pane by Task 11.
+/// Caps rendered diff lines in the detail view's diff pane.
 const DIFF_RENDER_CAP: usize = 5000;
 
 /// One visible file-list row: (group, entry index, selected?, status letter
@@ -19,7 +19,7 @@ const DIFF_RENDER_CAP: usize = 5000;
 type FileRow = (Group, usize, bool, char, String, Option<(u64, u64)>);
 
 /// The full detail view: header (branch + ahead/behind + path + tabs), file
-/// list pane, diff placeholder (Task 11), footer (hints + author + message).
+/// list pane, diff pane, footer (hints + author + message).
 ///
 /// LOAD-BEARING: all three detail focus handles (`detail_focus`,
 /// `detail_list_focus`, `detail_diff_focus`) MUST be `.track_focus`ed

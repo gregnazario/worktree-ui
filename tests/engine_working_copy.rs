@@ -120,6 +120,7 @@ mod mutate_tests {
     use worktree_tool::engine::working_copy::status;
 
     use super::common;
+    use common::sh;
 
     #[test]
     fn stage_unstage_discard_round_trip() {
@@ -197,6 +198,40 @@ mod mutate_tests {
         common::fixture_repo(tmp.path());
         mutate::stage(tmp.path(), &[]).unwrap();
         mutate::unstage(tmp.path(), &[]).unwrap();
+    }
+
+    #[test]
+    fn unstage_on_unborn_head_untracks_new_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        sh(Some(tmp.path()), &["git", "init", "-q", "-b", "main"]);
+        sh(Some(tmp.path()), &["git", "config", "user.email", "t@t.t"]);
+        sh(Some(tmp.path()), &["git", "config", "user.name", "t"]);
+        std::fs::write(tmp.path().join("n.txt"), "new file").unwrap();
+        mutate::stage(tmp.path(), &["n.txt".to_string()]).unwrap();
+        // No commit yet: `reset HEAD` would fail; unstage must still work.
+        mutate::unstage(tmp.path(), &["n.txt".to_string()]).unwrap();
+        let wc = worktree_tool::engine::working_copy::status(tmp.path()).unwrap();
+        assert!(
+            wc.entries.iter().any(|e| e.path == "n.txt" && e.untracked),
+            "unstage on unborn HEAD drops the file back to untracked"
+        );
+    }
+
+    #[test]
+    fn status_overrides_show_untracked_files_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        common::fixture_repo(tmp.path());
+        std::fs::write(tmp.path().join("u.txt"), "untracked").unwrap();
+        // A user config must not silently empty the app's Untracked group.
+        sh(
+            Some(tmp.path()),
+            &["git", "config", "status.showUntrackedFiles", "no"],
+        );
+        let wc = worktree_tool::engine::working_copy::status(tmp.path()).unwrap();
+        assert!(
+            wc.entries.iter().any(|e| e.path == "u.txt" && e.untracked),
+            "status() forces --untracked-files=normal"
+        );
     }
 
     #[test]

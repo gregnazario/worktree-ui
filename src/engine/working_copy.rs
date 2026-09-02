@@ -230,6 +230,9 @@ pub fn status(worktree: &Path) -> engine::Result<WorkingCopy> {
             "--porcelain=v2",
             "-z",
             "--branch",
+            // Explicit so the user's `status.showUntrackedFiles` config
+            // can't silently empty the Untracked group.
+            "--untracked-files=normal",
         ],
     )?;
     let mut wc = parse_status_z(&raw);

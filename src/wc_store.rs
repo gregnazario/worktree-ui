@@ -251,11 +251,17 @@ impl WorkingCopyStore {
 
     /// `s` on a row: stage unstaged/untracked/conflict rows, unstage staged
     /// rows. Conflicts: staging marks them resolved.
+    /// Transient "busy" hint, shared by the mutating entry points and the
+    /// shell's guards (e.g. refusing to close the detail view mid-commit).
+    pub fn busy_message(&mut self, cx: &mut Context<Self>) {
+        self.message = Some("Busy — wait for the current operation".into());
+        self.busy_hint = true;
+        cx.notify();
+    }
+
     pub fn toggle_stage(&mut self, cx: &mut Context<Self>) {
         if self.busy {
-            self.message = Some("Busy — wait for the current operation".into());
-            self.busy_hint = true;
-            cx.notify();
+            self.busy_message(cx);
             return;
         }
         let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
@@ -298,9 +304,7 @@ impl WorkingCopyStore {
 
     pub fn stage_all(&mut self, cx: &mut Context<Self>) {
         if self.busy {
-            self.message = Some("Busy — wait for the current operation".into());
-            self.busy_hint = true;
-            cx.notify();
+            self.busy_message(cx);
             return;
         }
         let worktree = self.worktree.clone();
@@ -356,9 +360,7 @@ impl WorkingCopyStore {
     /// (staged changes survive). Anything else is refused.
     pub fn discard_path(&mut self, path: String, cx: &mut Context<Self>) {
         if self.busy {
-            self.message = Some("Busy — wait for the current operation".into());
-            self.busy_hint = true;
-            cx.notify();
+            self.busy_message(cx);
             return;
         }
         let Some(entry) = self
@@ -431,9 +433,7 @@ impl WorkingCopyStore {
     /// under the pending commit, would corrupt what the user is committing.
     pub fn commit_with_editor(&mut self, cx: &mut Context<Self>) {
         if self.busy {
-            self.message = Some("Busy — wait for the current operation".into());
-            self.busy_hint = true;
-            cx.notify();
+            self.busy_message(cx);
             return;
         }
         let Some(wc) = self.wc.clone() else { return };
