@@ -150,17 +150,26 @@ impl WorkingCopyStore {
                             store.busy_hint = false;
                             store.message = None;
                         }
-                        // Resolve the keep-path against the NEW snapshot
-                        // (path → entry index → row index) so a vanished
-                        // file simply falls back to the first row instead
-                        // of indexing stale rows into fresh entries.
+                        // Arrow keys aren't gated by `mutating`, so the user
+                        // can navigate while a refresh is in flight: the
+                        // CURRENT selection wins over the path this refresh
+                        // started with. `keep_path` is only a fallback for
+                        // when the currently selected row vanished. Both
+                        // resolve against the NEW snapshot (path → entry
+                        // index → row index) so stale rows are never
+                        // indexed into fresh entries.
                         let rows = eng::group_rows(&wc);
-                        let selected = keep_path.as_ref().and_then(|p| {
+                        let resolve = |path: &str| -> Option<usize> {
                             wc.entries
                                 .iter()
-                                .position(|e| &e.path == p)
+                                .position(|e| e.path == path)
                                 .and_then(|entry| rows.iter().position(|(_, i)| *i == entry))
-                        });
+                        };
+                        let selected = store
+                            .selected_row()
+                            .map(|(_, e)| resolve(e.path.as_str()))
+                            .unwrap_or(None)
+                            .or_else(|| keep_path.as_deref().and_then(resolve));
                         store.wc = Some(wc);
                         store.selected = selected.or(if rows.is_empty() { None } else { Some(0) });
                         store.load_detail(cx);

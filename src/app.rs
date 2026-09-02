@@ -340,8 +340,11 @@ impl RootView {
             return;
         }
         let Some(wc) = &self.detail else { return };
-        // Don't snapshot a working copy whose refresh is still in flight:
-        // the dialog would describe a state that's about to change.
+        // Block only a running MUTATION (its state is about to change).
+        // Snapshot refreshes are deliberately not covered — a refresh can
+        // complete while the dialog is open, and that's fine:
+        // `discard_path` derives the executed action from the file's live
+        // state when the confirm lands.
         if wc.read(cx).mutating {
             wc.update(cx, |store, cx| store.busy_message(cx));
             return;
