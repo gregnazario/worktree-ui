@@ -641,7 +641,13 @@ impl Render for RootView {
                 }
             }))
             .on_action(cx.listener(|this, _: &Refresh, _window, cx| {
-                this.store.update(cx, |store, cx| store.refresh(cx));
+                // Context-aware, matching the `r` key and the toolbar
+                // button: refresh whatever the user is looking at.
+                if let Some(wc) = &this.detail {
+                    wc.update(cx, |store, cx| store.refresh(cx));
+                } else {
+                    this.store.update(cx, |store, cx| store.refresh(cx));
+                }
             }))
             .on_action(cx.listener(|this, _: &Prune, _window, cx| {
                 this.store.update(cx, |store, cx| store.prune(cx));
