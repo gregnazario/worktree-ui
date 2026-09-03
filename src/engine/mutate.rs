@@ -17,16 +17,40 @@ fn literal_args(prefix: &[&str], rel_paths: &[String]) -> Vec<String> {
 
 /// Windows caps a single CreateProcess command line at ~32,767 chars and
 /// even Linux can hit ARG_MAX on monorepo-scale path lists, so path
-/// arguments are batched into bounded chunks per git invocation.
+/// arguments are batched into chunks bounded by BOTH count and accumulated
+/// length (deep monorepo paths run 150+ chars each — 200 of those is
+/// already ~32 KB). 16 KiB of arguments leaves generous headroom.
 const MAX_PATHS_PER_INVOCATION: usize = 200;
+const MAX_CHUNK_BYTES: usize = 16 * 1024;
 
 fn for_each_chunk(worktree: &Path, prefix: &[&str], rel_paths: &[String]) -> Result<()> {
-    for chunk in rel_paths.chunks(MAX_PATHS_PER_INVOCATION) {
-        let args = literal_args(prefix, chunk);
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        engine::run_trimmed(worktree, &refs)?;
+    // Chunks hold RAW paths; `run_chunk` applies the `:(literal)` wrapper
+    // (via literal_args) exactly once. The byte budget counts the wrapper
+    // (~11 chars) so the bound reflects what git actually receives.
+    let mut chunk: Vec<String> = Vec::new();
+    let mut chunk_bytes = 0usize;
+    for path in rel_paths {
+        let cost = path.len() + ":()".len() + "literal".len() + 1;
+        if !chunk.is_empty()
+            && (chunk.len() >= MAX_PATHS_PER_INVOCATION || chunk_bytes + cost > MAX_CHUNK_BYTES)
+        {
+            run_chunk(worktree, prefix, &chunk)?;
+            chunk.clear();
+            chunk_bytes = 0;
+        }
+        chunk_bytes += cost;
+        chunk.push(path.clone());
+    }
+    if !chunk.is_empty() {
+        run_chunk(worktree, prefix, &chunk)?;
     }
     Ok(())
+}
+
+fn run_chunk(worktree: &Path, prefix: &[&str], chunk: &[String]) -> Result<()> {
+    let args = literal_args(prefix, chunk);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    engine::run_trimmed(worktree, &refs).map(|_| ())
 }
 
 /// `git add -- <paths>`, batched. Also how a conflict is marked resolved.

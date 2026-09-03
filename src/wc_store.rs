@@ -268,6 +268,15 @@ impl WorkingCopyStore {
         .detach();
     }
 
+    /// Transient hint for keys pressed while the first status snapshot is
+    /// still loading — an accurate alternative to "Busy", since nothing is
+    /// actually running yet.
+    pub fn loading_message(&mut self, cx: &mut Context<Self>) {
+        self.message = Some("Loading working copy…".into());
+        self.busy_hint = true;
+        cx.notify();
+    }
+
     /// Transient "busy" hint, shared by the mutating entry points and the
     /// shell's guards (e.g. refusing to close the detail view mid-commit).
     pub fn busy_message(&mut self, cx: &mut Context<Self>) {
@@ -281,6 +290,10 @@ impl WorkingCopyStore {
     pub fn toggle_stage(&mut self, cx: &mut Context<Self>) {
         if self.mutating {
             self.busy_message(cx);
+            return;
+        }
+        if self.wc.is_none() {
+            self.loading_message(cx);
             return;
         }
         let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
@@ -328,6 +341,10 @@ impl WorkingCopyStore {
     pub fn stage_all(&mut self, cx: &mut Context<Self>) {
         if self.mutating {
             self.busy_message(cx);
+            return;
+        }
+        if self.wc.is_none() {
+            self.loading_message(cx);
             return;
         }
         let worktree = self.worktree.clone();
@@ -461,7 +478,7 @@ impl WorkingCopyStore {
         }
         let Some(wc) = self.wc.clone() else {
             // First snapshot still loading: `c` would be a silent no-op.
-            self.busy_message(cx);
+            self.loading_message(cx);
             return;
         };
         if self.staged_count() == 0 {

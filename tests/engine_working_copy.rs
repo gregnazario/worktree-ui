@@ -227,6 +227,30 @@ mod mutate_tests {
     }
 
     #[test]
+    fn stage_batches_by_count_and_byte_length() {
+        let tmp = tempfile::tempdir().unwrap();
+        common::fixture_repo(tmp.path());
+        // 600 paths of ~90 chars each: ~54 KB of arguments total, so both
+        // the 200-path count bound and the 16 KiB byte bound must trigger.
+        let mut paths: Vec<String> = Vec::new();
+        let dir = tmp
+            .path()
+            .join("deep")
+            .join("w".repeat(60))
+            .join("x".repeat(20));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..600u32 {
+            let rel = format!("deep/{}/f-{:04}-{}.txt", "w".repeat(60), i, "x".repeat(20));
+            std::fs::write(tmp.path().join(&rel), "x").unwrap();
+            paths.push(rel);
+        }
+        mutate::stage(tmp.path(), &paths).unwrap();
+        let wc = worktree_tool::engine::working_copy::status(tmp.path()).unwrap();
+        let staged = wc.entries.iter().filter(|e| e.index_status == 'A').count();
+        assert_eq!(staged, 600, "every path staged across all batches");
+    }
+
+    #[test]
     fn status_overrides_show_untracked_files_config() {
         let tmp = tempfile::tempdir().unwrap();
         common::fixture_repo(tmp.path());
