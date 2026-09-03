@@ -216,8 +216,6 @@ fn unstaging_a_pure_rename_resets_both_paths(cx: &mut gpui::TestAppContext) {
             })
             .map(|(pos, (_, i))| (pos, *i))
             .expect("staged rename row present");
-        let entry = &wc.wc.as_ref().unwrap().entries[entry_idx];
-        eprintln!("[TDEBUG] select pos={pos} entry={entry:?}"); // TEMP
         wc.select(Some(pos), cx);
     });
     cx.run_until_parked();
