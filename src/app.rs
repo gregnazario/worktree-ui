@@ -655,7 +655,7 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &OpenSelected, _window, cx| {
                 if let Some(entry) = this.store.read(cx).selected_entry() {
                     let path = entry.path.clone();
-                    terminal::open_in_terminal(&path);
+                    open_terminal(&path);
                 }
             }))
             .on_action(cx.listener(|this, _: &RemoveSelected, window, cx| {
@@ -664,6 +664,15 @@ impl Render for RootView {
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                // The search field filters the worktree list — focusing it
+                // while the detail view is open (or mid-dialog, or in the
+                // empty state where it isn't rendered) is a keyboard trap.
+                if this.dialog.is_open()
+                    || this.detail.is_some()
+                    || this.store.read(cx).repo_root.is_none()
+                {
+                    return;
+                }
                 let handle = this.search.read(cx).focus_handle.clone();
                 window.focus(&handle);
             }))

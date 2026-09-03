@@ -46,6 +46,10 @@ pub struct WorkingCopyStore {
     /// mutating entry point that was swallowed while busy). Completions
     /// clear it so the hint never outlives the operation.
     busy_hint: bool,
+    /// A notice to surface after the next mutation completes (e.g.
+    /// "Conflicts were skipped…") — survives after_mutation's message
+    /// reset, cleared once shown or on the next mutation.
+    pending_notice: Option<String>,
     /// Guards status/numstat snapshot loads. Bumped by refresh and by
     /// mutations (a mutation invalidates any in-flight snapshot), but NOT
     /// by detail loads — changing the selected file must never cancel a
@@ -73,6 +77,7 @@ impl WorkingCopyStore {
             mutated: false,
             load_failed: false,
             busy_hint: false,
+            pending_notice: None,
             generation: 0,
             detail_generation: 0,
         });
@@ -448,7 +453,8 @@ impl WorkingCopyStore {
             })
             .collect();
         if skipped_conflicts > 0 {
-            self.message = Some("Conflicts were skipped — resolve them, then stage with s".into());
+            self.pending_notice =
+                Some("Conflicts were skipped — resolve them, then stage with s".into());
         }
         if paths.is_empty() {
             if skipped_conflicts == 0 {
@@ -537,7 +543,12 @@ impl WorkingCopyStore {
         self.busy_hint = false;
         match result {
             Ok(()) => {
-                self.message = None;
+                // Surface a pending notice (e.g. skipped conflicts) instead
+                // of clearing; the mutation still counts for the home list.
+                self.message = self.pending_notice.take();
+                if self.message.is_some() {
+                    self.mutated = true;
+                }
                 self.mutated = true;
             }
             Err(e) => {
@@ -638,5 +649,18 @@ pub fn staged_summary(wc: &eng::WorkingCopy) -> String {
         names.push("…".to_string());
     }
     let plural = if count == 1 { "file" } else { "files" };
-    format!("{count} staged {plural}: {}", names.join(", "))
+    // Paths are interpolated into a comment-prefixed template line: a
+    // newline inside a name would smuggle the following template content
+    // into the committed message. Quote such names git-style instead.
+    let quoted: Vec<String> = names
+        .iter()
+        .map(|n| {
+            if n.contains('\n') || n.contains('\r') {
+                format!("{n:?}")
+            } else {
+                n.clone()
+            }
+        })
+        .collect();
+    format!("{count} staged {plural}: {}", quoted.join(", "))
 }

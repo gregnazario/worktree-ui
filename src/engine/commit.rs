@@ -145,9 +145,31 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
         })?;
     drop(file);
 
+    // git semantics: an editor spec containing `%s` gets the message file
+    // substituted at that spot (only the first `%s` per git's editor.c);
+    // otherwise the path is appended. A spec of exactly `:` succeeds
+    // without launching anything.
+    let msg_arg = msg_path.to_string_lossy().into_owned();
+    let mut spawn_argv: Vec<String> = Vec::new();
+    let mut substituted = false;
+    for a in &argv {
+        if !substituted && a.contains("%s") {
+            spawn_argv.push(a.replace("%s", &msg_arg));
+            substituted = true;
+        } else {
+            spawn_argv.push(a.clone());
+        }
+    }
+    if !substituted {
+        spawn_argv.push(msg_arg.clone());
+    }
+
     let run_result = (|| -> std::io::Result<()> {
-        let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..]).arg(&msg_path).current_dir(worktree);
+        if argv.len() == 1 && argv[0] == ":" {
+            return Ok(()); // ":" = succeed without launching
+        }
+        let mut cmd = Command::new(&spawn_argv[0]);
+        cmd.args(&spawn_argv[1..]).current_dir(worktree);
         let status = cmd.status()?;
         if status.success() {
             Ok(())

@@ -15,6 +15,36 @@ const EDITOR_OK: &str = "true";
 #[cfg(not(windows))]
 const EDITOR_FAIL: &str = "false";
 
+// git's editor semantics: a `%s` in the spec gets the message path
+// substituted (instead of appended), and `:` is a no-op success.
+#[test]
+fn editor_arg_substitution_and_colon_noop() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    common::fixture_repo(tmp.path());
+    std::fs::write(tmp.path().join("f.txt"), "changed").unwrap();
+    common::sh(Some(tmp.path()), &["git", "add", "--", "f.txt"]);
+
+    // A script whose $2 receives the substituted message path (%s is
+    // the first arg after our splitter substitutes it in-place).
+    let script = write_subst_editor_script();
+    std::env::set_var("GIT_EDITOR", &script);
+    match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt") {
+        Ok(commit::CommitOutcome::Committed) => {}
+        other => panic!("expected Committed via %s substitution, got {other:?}"),
+    }
+    let subject = common::sh_out(tmp.path(), &["git", "log", "-1", "--format=%s"]);
+    assert_eq!(subject, "substituted draft");
+
+    // `:` = succeed without launching anything → empty message → abort.
+    std::env::set_var("GIT_EDITOR", ":");
+    match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt") {
+        Ok(commit::CommitOutcome::AbortedEmpty) => {}
+        other => panic!("expected AbortedEmpty from colon editor, got {other:?}"),
+    }
+    std::env::remove_var("GIT_EDITOR");
+}
+
 #[test]
 fn resolve_editor_order_and_splitting() {
     let getenv = |k: &str| match k {
@@ -106,6 +136,31 @@ fn commit_via_editor_round_trip_and_abort() {
 
 /// Cross-platform "editor" that writes a fixed message into the file it
 /// receives as its last argument.
+/// A script (referenced with a `%s` placeholder in GIT_EDITOR) that writes
+/// a fixed message INTO the file git passes as the script's first argument.
+fn write_subst_editor_script() -> String {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let path = dir.join("ed");
+    #[cfg(unix)]
+    {
+        let script = path.with_extension("sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s' 'substituted draft' > \"$1\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        format!("{} %s", script.display())
+    }
+    #[cfg(windows)]
+    {
+        let script = path.with_extension("cmd");
+        std::fs::write(&script, "@echo substituted draft> %2\r\n").unwrap();
+        format!("cmd /c {} \"%s\"", script.display())
+    }
+}
+
 fn write_editor_script(message: &str) -> String {
     let path = tempfile::tempdir().unwrap().keep().join("ed");
     #[cfg(unix)]
