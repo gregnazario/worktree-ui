@@ -50,10 +50,10 @@ pub struct WorkingCopyStore {
     /// mutations (a mutation invalidates any in-flight snapshot), but NOT
     /// by detail loads — changing the selected file must never cancel a
     /// status refresh, or post-mutation groups go stale.
+    generation: u64,
     /// True when the FIRST status snapshot failed: the view must show the
     /// error instead of an eternal "Loading working copy…".
     pub load_failed: bool,
-    generation: u64,
     /// Guards detail (diff/preview) loads, independent of `generation` so
     /// the two load kinds can't cancel each other.
     detail_generation: u64,
@@ -393,6 +393,10 @@ impl WorkingCopyStore {
     pub fn stage_all(&mut self, cx: &mut Context<Self>) {
         if self.mutating {
             self.busy_message(cx);
+            return;
+        }
+        if self.wc.is_none() && !self.load_failed {
+            self.loading_message(cx);
             return;
         }
         if self.wc.is_none() {
