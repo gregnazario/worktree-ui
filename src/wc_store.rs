@@ -131,6 +131,13 @@ impl WorkingCopyStore {
     /// Re-runs status and reloads the selected row's detail. Keeps the
     /// selection on the same path when it still exists.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.mutating {
+            // A refresh completing mid-mutation would clear the busy hint
+            // while mutating keys stay swallowed — refuse instead; the
+            // mutation's own completion triggers the authoritative refresh.
+            self.busy_message(cx);
+            return;
+        }
         self.generation += 1;
         let gen = self.generation;
         let worktree = self.worktree.clone();
@@ -387,25 +394,18 @@ impl WorkingCopyStore {
         .detach();
     }
 
-    /// Caller shows the confirmation dialog first; this executes. The
-    /// dialog captures the path it was opened for — always discard THAT
-    /// path, never "the current selection": a refresh completing while the
-    /// dialog is open can move the selection, and Enter must never delete a
-    /// different file than the one the user confirmed.
-    pub fn discard_selected(&mut self, cx: &mut Context<Self>) {
-        let Some((_, path)) = self.selected_row().map(|(g, e)| (g, e.path.clone())) else {
-            return;
-        };
-        self.discard_path(path, cx);
-    }
-
-    /// Discards a specific path. How it is discarded is derived from the
-    /// entry's CURRENT state, not the dialog's snapshot: a refresh or
-    /// mutation landing mid-dialog can flip a file between untracked and
-    /// tracked, and the executed action must match what exists now.
-    /// Untracked → delete the file; tracked → restore from the index
-    /// (staged changes survive). Anything else is refused.
-    pub fn discard_path(&mut self, path: String, cx: &mut Context<Self>) {
+    /// Discards a specific path. `untracked_at_confirm` is what the dialog
+    /// showed the user; the executed action is only allowed when the file's
+    /// LIVE state still agrees with it. If the state flipped mid-dialog
+    /// (an external `git rm --cached` / re-add can do that), the action is
+    /// refused: a flip to untracked followed by a blind delete would
+    /// permanently destroy the only copy of the content.
+    pub fn discard_path(
+        &mut self,
+        untracked_at_confirm: bool,
+        path: String,
+        cx: &mut Context<Self>,
+    ) {
         if self.mutating {
             self.busy_message(cx);
             return;
@@ -431,6 +431,12 @@ impl WorkingCopyStore {
         }
         if entry.is_dir() {
             return; // no recursive delete in Phase 1
+        }
+        if entry.untracked != untracked_at_confirm {
+            self.message =
+                Some("That file's state changed — reopen the dialog to try again".into());
+            cx.notify();
+            return;
         }
         let worktree = self.worktree.clone();
         let untracked = entry.untracked;

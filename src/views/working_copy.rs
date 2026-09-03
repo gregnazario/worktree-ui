@@ -13,6 +13,10 @@ use gpui::{
 
 /// Caps rendered diff lines in the detail view's diff pane.
 const DIFF_RENDER_CAP: usize = 5000;
+/// Caps the interactive file-list rows: every row is a stateful element,
+/// and monorepo-scale lists would make each keystroke rebuild thousands of
+/// them. Truncated lists show a trailer pointing at the terminal.
+const FILE_ROW_RENDER_CAP: usize = 1000;
 
 /// One visible file-list row: (group, entry index, selected?, status letter
 /// for this surface, display path, +/- line counts).
@@ -229,7 +233,8 @@ fn render_file_list(
         .border_color(BORDER)
         .overflow_y_scroll();
     let wc_entity = this.detail.clone();
-    let is_empty = rows.is_empty();
+    let total = rows.len();
+    let is_empty = total == 0;
     for (pos, (group, _i, is_selected, letter, path, counts)) in rows.into_iter().enumerate() {
         if last_group != Some(group) {
             list = list.child(group_header(group.title()));
@@ -285,6 +290,18 @@ fn render_file_list(
             "Working tree clean"
         };
         list = list.child(div().p_4().text_size(px(13.)).text_color(DIM).child(text));
+    } else if total > FILE_ROW_RENDER_CAP {
+        let hidden = total - FILE_ROW_RENDER_CAP;
+        list = list.child(
+            div()
+                .px_3()
+                .py_2()
+                .text_size(px(12.))
+                .text_color(DIM)
+                .child(format!(
+                    "… {hidden} more files — narrow with / or stage from the terminal"
+                )),
+        );
     }
     list
 }

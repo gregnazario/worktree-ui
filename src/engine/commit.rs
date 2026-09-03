@@ -142,8 +142,13 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
         }
     })();
     let raw = match run_result {
-        Ok(()) => std::fs::read_to_string(&msg_path).map_err(|e| GitError {
-            message: format!("could not read commit message — re-save it as UTF-8: {e}"),
+        Ok(()) => std::fs::read_to_string(&msg_path).map_err(|e| {
+            let _ = std::fs::remove_file(&msg_path);
+            GitError {
+                message: format!(
+                    "commit message discarded — the editor saved it in a non-UTF-8 encoding: {e}"
+                ),
+            }
         })?,
         Err(e) => {
             let _ = std::fs::remove_file(&msg_path);

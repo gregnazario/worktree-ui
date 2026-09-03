@@ -134,7 +134,7 @@ fn toggle_stage_and_discard_mutate_and_flag(cx: &mut TestAppContext) {
     cx.run_until_parked();
     store.update(cx, |wc, cx| {
         assert!(matches!(wc.selected_row(), Some((Group::Untracked, _))));
-        wc.discard_selected(cx);
+        wc.discard_path(true, "u.txt".to_string(), cx);
     });
     cx.run_until_parked();
     assert!(!tmp.path().join("u.txt").exists());

@@ -227,14 +227,22 @@ impl RootView {
     }
 
     pub fn confirm_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let (Some(wc), DialogState::Discard { path, .. }) = (&self.detail, &self.dialog) {
+        if let (
+            Some(wc),
+            DialogState::Discard {
+                path, untracked, ..
+            },
+        ) = (&self.detail, &self.dialog)
+        {
             // Discard exactly the path the dialog was opened for — never
             // "the current selection", which a refresh can move while the
-            // dialog sits open. The store derives HOW from the file's
-            // current state, so a mid-dialog untracked→tracked flip can't
-            // redirect the destructive action.
+            // dialog sits open. `untracked_at_confirm` lets the store
+            // refuse the action if the file's state flipped mid-dialog
+            // (an external `git rm --cached` could turn a safe
+            // restore-from-index into a permanent delete).
+            let untracked = *untracked;
             let path = path.clone();
-            wc.update(cx, |store, cx| store.discard_path(path, cx));
+            wc.update(cx, |store, cx| store.discard_path(untracked, path, cx));
         }
         self.close_dialog(window, cx);
     }
@@ -830,7 +838,7 @@ impl Render for RootView {
                                 "detail-terminal",
                                 "Open in Terminal (t)",
                                 cx.listener(move |_, _, _window, _cx| {
-                                    terminal::open_in_terminal(&terminal_path);
+                                    open_terminal(&terminal_path);
                                 }),
                             ))
                             .child(toolbar_button(

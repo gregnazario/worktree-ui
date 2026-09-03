@@ -166,6 +166,10 @@ pub fn read_preview(worktree: &Path, rel_path: &str) -> Preview {
     let full = worktree.join(rel_path);
     match std::fs::metadata(&full) {
         Ok(m) if m.is_dir() => return Preview::Directory,
+        // Non-regular files (FIFOs, sockets, devices): opening a FIFO read
+        // -only blocks until a writer appears, hanging the background
+        // thread forever — never read them.
+        Ok(m) if !m.is_file() => return Preview::Binary,
         Err(_) => return Preview::Missing,
         Ok(_) => {}
     }
