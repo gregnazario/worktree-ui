@@ -67,19 +67,33 @@ impl Group {
 /// Parses `git status --porcelain=v2 -z --branch`. With `-z`, records are
 /// NUL-terminated and header lines are LF-terminated inside one chunk; a
 /// rename record's orig path rides in the NEXT NUL chunk. Lenient: unknown
-/// chunks are ignored.
-pub fn parse_status_z(input: &str) -> WorkingCopy {
+/// chunks are ignored. Paths that aren't valid UTF-8 decode lossily and are
+/// marked `unsupported` (a pathspec built from the mangled string would
+/// never match); names that genuinely contain U+FFFD decode exactly and
+/// stay stgable.
+pub fn parse_status_z(input: &[u8]) -> WorkingCopy {
+    /// Lossy-decode a path field, reporting whether the raw bytes were
+    /// actually invalid UTF-8 (vs. a name that legitimately contains U+FFFD).
+    fn decode_path(bytes: &[u8]) -> (String, bool) {
+        match std::str::from_utf8(bytes) {
+            Ok(s) => (s.to_string(), false),
+            Err(_) => (String::from_utf8_lossy(bytes).into_owned(), true),
+        }
+    }
+
     let mut wc = WorkingCopy {
         branch: BranchInfo::default(),
         entries: Vec::new(),
     };
     let mut expect_orig_path = false;
-    for chunk in input.split('\0') {
+    for chunk in input.split(|b| *b == 0) {
         if expect_orig_path {
             // Consume unconditionally: the orig path could theoretically
             // start with characters that look like a record.
             if let Some(last) = wc.entries.last_mut() {
-                last.orig_path = Some(chunk.to_string());
+                let (decoded, lossy) = decode_path(chunk);
+                last.orig_path = Some(decoded);
+                last.unsupported |= lossy;
             }
             expect_orig_path = false;
             continue;
@@ -87,14 +101,14 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
         if chunk.is_empty() {
             continue;
         }
-        if chunk.starts_with('#') {
-            for line in chunk.split('\n') {
-                if let Some(rest) = line.strip_prefix("# branch.head ") {
-                    wc.branch.head = rest.trim().to_string();
-                } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
-                    wc.branch.upstream = Some(rest.trim().to_string());
-                } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
-                    for part in rest.split(' ') {
+        if chunk.starts_with(b"#") {
+            for line in chunk.split(|b| *b == b'\n') {
+                if let Some(rest) = line.strip_prefix(b"# branch.head ") {
+                    wc.branch.head = text(rest).trim().to_string();
+                } else if let Some(rest) = line.strip_prefix(b"# branch.upstream ") {
+                    wc.branch.upstream = Some(text(rest).trim().to_string());
+                } else if let Some(rest) = line.strip_prefix(b"# branch.ab ") {
+                    for part in text(rest).split(' ') {
                         if let Some(n) = part.strip_prefix('+') {
                             wc.branch.ahead = n.parse().unwrap_or(0);
                         } else if let Some(n) = part.strip_prefix('-') {
@@ -105,9 +119,10 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
             }
             continue;
         }
-        if let Some(path) = chunk.strip_prefix("? ") {
+        if let Some(path) = chunk.strip_prefix(b"? ") {
+            let (decoded, lossy) = decode_path(path);
             wc.entries.push(FileEntry {
-                path: path.to_string(),
+                path: decoded,
                 orig_path: None,
                 index_status: '?',
                 wt_status: '?',
@@ -115,16 +130,18 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
                 untracked: true,
                 staged_lines: None,
                 unstaged_lines: None,
-                unsupported: false,
+                unsupported: lossy,
             });
             continue;
         }
-        if chunk.starts_with("1 ") {
-            let f: Vec<&str> = chunk.splitn(9, ' ').collect();
+        if chunk.starts_with(b"1 ") {
+            let f: Vec<&[u8]> = chunk.splitn(9, |b| *b == b' ').collect();
             if f.len() == 9 {
-                let (x, y) = xy(f[1]);
+                let xy_str = text(f[1]);
+                let (x, y) = xy(&xy_str);
+                let (path, lossy) = decode_path(f[8]);
                 wc.entries.push(FileEntry {
-                    path: f[8].to_string(),
+                    path,
                     orig_path: None,
                     index_status: x,
                     wt_status: y,
@@ -132,18 +149,21 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
                     untracked: false,
                     staged_lines: None,
                     unstaged_lines: None,
-                    unsupported: false,
+                    unsupported: lossy,
                 });
             }
             continue;
         }
-        if chunk.starts_with("2 ") {
-            let f: Vec<&str> = chunk.splitn(10, ' ').collect();
+        if chunk.starts_with(b"2 ") {
+            let f: Vec<&[u8]> = chunk.splitn(10, |b| *b == b' ').collect();
             if f.len() == 10 {
-                let (x, y) = xy(f[1]);
-                let is_rename = f[8].starts_with('R') || f[8].starts_with('C');
+                let xy_str = text(f[1]);
+                let (x, y) = xy(&xy_str);
+                let score = text(f[8]);
+                let is_rename = score.starts_with('R') || score.starts_with('C');
+                let (path, lossy) = decode_path(f[9]);
                 wc.entries.push(FileEntry {
-                    path: f[9].to_string(),
+                    path,
                     orig_path: None,
                     index_status: x,
                     wt_status: y,
@@ -151,7 +171,7 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
                     untracked: false,
                     staged_lines: None,
                     unstaged_lines: None,
-                    unsupported: false,
+                    unsupported: lossy,
                 });
                 if is_rename {
                     expect_orig_path = true;
@@ -159,19 +179,20 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
             }
             continue;
         }
-        if chunk.starts_with("u ") {
-            let f: Vec<&str> = chunk.splitn(11, ' ').collect();
+        if chunk.starts_with(b"u ") {
+            let f: Vec<&[u8]> = chunk.splitn(11, |b| *b == b' ').collect();
             if f.len() == 11 {
+                let (path, lossy) = decode_path(f[10]);
                 wc.entries.push(FileEntry {
-                    path: f[10].to_string(),
+                    path,
                     orig_path: None,
                     index_status: 'U',
                     wt_status: 'U',
-                    conflict: Some(f[1].to_string()),
+                    conflict: Some(text(f[1])),
                     untracked: false,
                     staged_lines: None,
                     unstaged_lines: None,
-                    unsupported: false,
+                    unsupported: lossy,
                 });
             }
             continue;
@@ -179,6 +200,11 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
         // "!" ignored records and anything unknown: ignore.
     }
     wc
+}
+
+/// Small lossy helper for header/ASCII-adjacent fields.
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn xy(field: &str) -> (char, char) {
@@ -226,27 +252,11 @@ pub fn status(worktree: &Path) -> engine::Result<WorkingCopy> {
             "--untracked-files=normal",
         ],
     )?;
-    // Strict UTF-8 first: a filename that legitimately contains U+FFFD
-    // survives strict decoding (and its pathspec works), so it is NOT
-    // unsupported. Only when the bytes aren't valid UTF-8 do we fall back
-    // to lossy decoding and flag the mangled entries.
-    let (raw, strict) = match String::from_utf8(raw_bytes) {
-        Ok(s) => (s, true),
-        Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), false),
-    };
-    let mut wc = parse_status_z(&raw);
-    if !strict {
-        for entry in wc.entries.iter_mut() {
-            if entry.path.contains('\u{FFFD}')
-                || entry
-                    .orig_path
-                    .as_deref()
-                    .is_some_and(|p| p.contains('\u{FFFD}'))
-            {
-                entry.unsupported = true;
-            }
-        }
-    }
+    // The parser decodes each path field individually: a name that
+    // legitimately contains U+FFFD (valid UTF-8) decodes exactly and stays
+    // stgable; only genuinely non-UTF-8 names decode lossily and get
+    // flagged unsupported.
+    let mut wc = parse_status_z(&raw_bytes);
     // Path → entry index, so numstat records merge in O(1) instead of a
     // linear scan per record (O(n·m) on large trees).
     let entry_by_path: std::collections::HashMap<String, usize> = wc
@@ -317,7 +327,7 @@ mod tests {
 
     #[test]
     fn parses_headers_records_renames_conflicts_untracked() {
-        let wc = parse_status_z(Z);
+        let wc = parse_status_z(Z.as_bytes());
         assert_eq!(wc.branch.head, "main");
         assert_eq!(wc.branch.upstream.as_deref(), Some("origin/main"));
         assert_eq!((wc.branch.ahead, wc.branch.behind), (2, 1));
@@ -340,23 +350,23 @@ mod tests {
 
     #[test]
     fn paths_with_spaces_survive_splitn() {
-        let wc = parse_status_z("1 .M N... 1 1 1 a b my file.txt\u{0}");
+        let wc = parse_status_z("1 .M N... 1 1 1 a b my file.txt\u{0}".as_bytes());
         assert_eq!(wc.entries[0].path, "my file.txt");
     }
 
     #[test]
     fn detached_head_and_empty_input() {
-        let wc = parse_status_z("# branch.head (detached)\n\u{0}");
+        let wc = parse_status_z("# branch.head (detached)\n\u{0}".as_bytes());
         assert_eq!(wc.branch.head, "(detached)");
         assert!(wc.entries.is_empty());
-        let wc = parse_status_z("");
+        let wc = parse_status_z(b"");
         assert_eq!(wc.branch.head, "");
         assert!(wc.entries.is_empty());
     }
 
     #[test]
     fn group_rows_orders_conflicts_staged_unstaged_untracked() {
-        let wc = parse_status_z(Z);
+        let wc = parse_status_z(Z.as_bytes());
         let rows = group_rows(&wc);
         let groups: Vec<Group> = rows.iter().map(|(g, _)| *g).collect();
         assert_eq!(
@@ -370,14 +380,14 @@ mod tests {
             ]
         );
         // same file staged+unstaged appears in both groups:
-        let both = parse_status_z("1 MM N... 1 1 1 a b both.txt\u{0}");
+        let both = parse_status_z("1 MM N... 1 1 1 a b both.txt\u{0}".as_bytes());
         let groups: Vec<Group> = group_rows(&both).iter().map(|(g, _)| *g).collect();
         assert_eq!(groups, vec![Group::Staged, Group::Unstaged]);
     }
 
     #[test]
     fn untracked_directory_row_is_detected() {
-        let wc = parse_status_z("? vendor/\u{0}");
+        let wc = parse_status_z("? vendor/\u{0}".as_bytes());
         assert!(wc.entries[0].is_dir());
     }
 }
