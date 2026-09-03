@@ -64,10 +64,12 @@ fn resolve_editor_order_and_splitting() {
 #[test]
 fn strip_comments_removes_comments_and_trims() {
     assert_eq!(
-        commit::strip_comments("\n# comment\nsubject\n\nbody line\n# trailing\n"),
+        commit::strip_comments('#', "\n# comment\nsubject\n\nbody line\n# trailing\n"),
         "subject\n\nbody line"
     );
-    assert_eq!(commit::strip_comments("# only comments\n"), "");
+    assert_eq!(commit::strip_comments('#', "# only comments\n"), "");
+    // `core.commentChar = ";"` users get the same treatment.
+    assert_eq!(commit::strip_comments(';', "# kept\n; dropped\n"), "# kept");
 }
 
 #[test]

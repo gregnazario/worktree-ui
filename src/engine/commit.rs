@@ -98,6 +98,13 @@ pub enum CommitOutcome {
 
 pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<CommitOutcome> {
     let config_editor = engine::run_trimmed(worktree, &["config", "--get", "core.editor"]).ok();
+    // git also honors `core.commentChar`; the "auto" mode is approximated
+    // with '#' (the common case for messages this short).
+    let comment_char = engine::run_trimmed(worktree, &["config", "--get", "core.commentChar"])
+        .ok()
+        .filter(|v| v.trim() != "auto")
+        .and_then(|v| v.trim().chars().next())
+        .unwrap_or('#');
     let argv = resolve_editor(config_editor.as_deref(), &|k| {
         std::env::var(k).ok().filter(|v| !v.trim().is_empty())
     });
@@ -129,7 +136,7 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     }
     let (mut file, msg_path) = create_msg_file()?;
     use std::io::Write as _;
-    file.write_all(template(staged_summary).as_bytes())
+    file.write_all(template(comment_char, staged_summary).as_bytes())
         .map_err(|e| {
             let _ = std::fs::remove_file(&msg_path);
             GitError {
@@ -168,7 +175,7 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
             // where it is, instead of destroying typed work.
             let draft = std::fs::read_to_string(&msg_path)
                 .ok()
-                .map(|raw| strip_comments(&raw))
+                .map(|raw| strip_comments(comment_char, &raw))
                 .filter(|m| !m.is_empty());
             let hint = match draft {
                 Some(_) => format!(
@@ -188,7 +195,7 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     };
     let _ = std::fs::remove_file(&msg_path);
 
-    let message = strip_comments(&raw);
+    let message = strip_comments(comment_char, &raw);
     if message.is_empty() {
         return Ok(CommitOutcome::AbortedEmpty);
     }
@@ -196,18 +203,22 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     Ok(CommitOutcome::Committed)
 }
 
-fn template(staged_summary: &str) -> String {
+fn template(comment_char: char, staged_summary: &str) -> String {
     format!(
-        "\n# Please enter the commit message for your changes. Lines starting\n\
-         # with '#' are ignored, and an empty message aborts the commit.\n#\n\
-         # {staged_summary}\n"
+        "\n{c} Please enter the commit message for your changes. Lines starting\n\
+         {c} with '{c}' are ignored, and an empty message aborts the commit.\n{c}\n\
+         {c} {staged_summary}\n",
+        c = comment_char
     )
 }
 
 /// Drops `#` comment lines and trims the outside whitespace. Empty result
 /// means the user aborted.
-pub fn strip_comments(raw: &str) -> String {
-    let kept: Vec<&str> = raw.lines().filter(|l| !l.starts_with('#')).collect();
+pub fn strip_comments(comment_char: char, raw: &str) -> String {
+    let kept: Vec<&str> = raw
+        .lines()
+        .filter(|l| !l.starts_with(comment_char))
+        .collect();
     kept.join("\n").trim().to_string()
 }
 
