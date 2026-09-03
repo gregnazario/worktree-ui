@@ -124,11 +124,8 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     // configured editor (even one equal to the default) is the user's own
     // choice and may well cope, and the Windows default (notepad) is a GUI
     // app that needs no terminal.
-    // IsTerminal exists on all platforms; only the unix *default* editor
-    // (vim) needs the guard — notepad is a GUI app.
-    use std::io::IsTerminal as _;
     #[cfg(not(windows))]
-    if used_default && !std::io::stdin().is_terminal() {
+    if used_default && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(GitError {
             message: format!(
                 "no terminal available for the default editor '{}' — set $GIT_EDITOR \
@@ -137,6 +134,8 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
             ),
         });
     }
+    #[cfg(windows)]
+    let _ = used_default;
     let (mut file, msg_path) = create_msg_file()?;
     use std::io::Write as _;
     file.write_all(template(comment_char, staged_summary).as_bytes())
