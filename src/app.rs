@@ -681,7 +681,12 @@ impl Render for RootView {
                             .child(div().text_size(px(11.)).text_color(DIM).child(repo_path)),
                     )
                     .child(div().flex_1())
-                    .child(self.search.clone())
+                    // The search field filters the worktree list — hidden
+                    // while a detail view is open, so it can't invisibly
+                    // filter a list the user can't see.
+                    .when(self.detail.is_none(), |toolbar| {
+                        toolbar.child(self.search.clone())
+                    })
                     .child(toolbar_button(
                         "btn-new",
                         "New (n)",
@@ -691,7 +696,13 @@ impl Render for RootView {
                         "btn-refresh",
                         "Refresh (r)",
                         cx.listener(|this, _, _window, cx| {
-                            this.store.update(cx, |store, cx| store.refresh(cx))
+                            // Context-aware, matching the `r` key: refresh
+                            // whatever the user is actually looking at.
+                            if let Some(wc) = &this.detail {
+                                wc.update(cx, |store, cx| store.refresh(cx));
+                            } else {
+                                this.store.update(cx, |store, cx| store.refresh(cx));
+                            }
                         }),
                     ))
                     .child(toolbar_button(
