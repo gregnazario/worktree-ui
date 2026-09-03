@@ -236,8 +236,19 @@ pub fn status(worktree: &Path) -> engine::Result<WorkingCopy> {
         ],
     )?;
     let mut wc = parse_status_z(&raw);
+    // Path → entry index, so numstat records merge in O(1) instead of a
+    // linear scan per record (O(n·m) on large trees).
+    let entry_by_path: std::collections::HashMap<String, usize> = wc
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.path.clone(), i))
+        .collect();
     for (args, key) in [
-        (vec!["--no-optional-locks", "diff", "--numstat", "-z"], 0),
+        (
+            vec!["--no-optional-locks", "diff", "--numstat", "-z"],
+            0usize,
+        ),
         (
             vec!["--no-optional-locks", "diff", "--cached", "--numstat", "-z"],
             1,
@@ -245,11 +256,11 @@ pub fn status(worktree: &Path) -> engine::Result<WorkingCopy> {
     ] {
         let raw = engine::run(worktree, &args)?;
         for (path, counts) in parse_numstat_z(&raw) {
-            let entry = wc.entries.iter_mut().find(|e| e.path == path);
-            match (entry, key) {
-                (Some(e), 0) => e.unstaged_lines = counts,
-                (Some(e), _) => e.staged_lines = counts,
-                _ => {}
+            if let Some(&i) = entry_by_path.get(path.as_str()) {
+                match key {
+                    0 => wc.entries[i].unstaged_lines = counts,
+                    _ => wc.entries[i].staged_lines = counts,
+                }
             }
         }
     }
