@@ -1,7 +1,10 @@
 //! Working Copy detail view rendering. Listeners attach against `RootView`
 //! (same pattern as dialogs.rs).
 
-use crate::app::{RootView, ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED, TEXT, YELLOW};
+use crate::app::{
+    open_terminal, toolbar_button, RootView, ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED,
+    TEXT, YELLOW,
+};
 use crate::engine::diff::{self, DiffLineKind};
 use crate::engine::working_copy::Group;
 use crate::wc_store::FileDetail;
@@ -165,6 +168,17 @@ pub fn render(
                 .child(tab_label("1 Working Copy", true))
                 .child(tab_label("2 History — v0.3", false))
                 .child(tab_label("3 Branches — v0.4", false))
+                .child(div().flex_1())
+                .child(toolbar_button(
+                    "detail-open-terminal",
+                    "Open in Terminal (t)",
+                    {
+                        let terminal_path = wc.read(cx).worktree.clone();
+                        move |_, _, _window| {
+                            crate::app::open_terminal(&terminal_path);
+                        }
+                    },
+                ))
                 .child(div().text_size(px(11.)).text_color(DIM).child("esc back")),
         )
         // ---- body: files | diff ----

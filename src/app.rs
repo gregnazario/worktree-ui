@@ -55,7 +55,7 @@ pub const RED: gpui::Rgba = hex_rgb(0xf38ba8);
 pub(crate) static TERMINAL_REQUESTS: std::sync::Mutex<Vec<std::path::PathBuf>> =
     std::sync::Mutex::new(Vec::new());
 
-fn open_terminal(path: &std::path::Path) {
+pub(crate) fn open_terminal(path: &std::path::Path) {
     #[cfg(test)]
     TERMINAL_REQUESTS.lock().unwrap().push(path.to_path_buf());
     #[cfg(not(test))]
@@ -131,7 +131,7 @@ fn status_badge(status: &WorktreeStatus) -> (String, gpui::Rgba) {
     }
 }
 
-fn toolbar_button(
+pub(crate) fn toolbar_button(
     id: &'static str,
     text: &str,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
