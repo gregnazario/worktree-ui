@@ -16,7 +16,9 @@ const DIFF_RENDER_CAP: usize = 5000;
 /// Caps the interactive file-list rows: every row is a stateful element,
 /// and monorepo-scale lists would make each keystroke rebuild thousands of
 /// them. Truncated lists show a trailer pointing at the terminal.
-const FILE_ROW_RENDER_CAP: usize = 1000;
+/// Kept in sync with the store's selection clamp — never select an
+/// undrawn row.
+const FILE_ROW_RENDER_CAP: usize = crate::wc_store::MAX_VISIBLE_ROWS;
 
 /// One visible file-list row: (group, entry index, selected?, status letter
 /// for this surface, display path, +/- line counts).

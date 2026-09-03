@@ -20,6 +20,11 @@ pub enum FileDetail {
     Failed(String),
 }
 
+/// Selection and rendering are clamped to this many rows: beyond it the
+/// view draws a trailer instead, and an undrawn row must never be
+/// selectable (actions on it would look like a frozen list).
+pub(crate) const MAX_VISIBLE_ROWS: usize = 1000;
+
 pub struct WorkingCopyStore {
     pub worktree: PathBuf,
     pub wc: Option<eng::WorkingCopy>,
@@ -74,6 +79,13 @@ impl WorkingCopyStore {
         entity
     }
 
+    /// Selection is clamped to the rows the view actually renders: a
+    /// selection on an undrawn row would act invisibly (the list looks
+    /// frozen while s/d target something the user cannot see).
+    pub(crate) fn selectable_len(&self) -> usize {
+        self.rows().len().min(MAX_VISIBLE_ROWS)
+    }
+
     pub fn rows(&self) -> Vec<(eng::Group, usize)> {
         self.wc.as_ref().map(eng::group_rows).unwrap_or_default()
     }
@@ -99,7 +111,7 @@ impl WorkingCopyStore {
     }
 
     pub fn select(&mut self, idx: Option<usize>, cx: &mut Context<Self>) {
-        self.selected = idx.filter(|&i| i < self.rows().len());
+        self.selected = idx.filter(|&i| i < self.selectable_len());
         if self.pane == Pane::Diff {
             self.pane = Pane::Files; // selection change returns focus target to files
         }
@@ -112,6 +124,7 @@ impl WorkingCopyStore {
         if len == 0 {
             return;
         }
+        let len = self.selectable_len();
         let next = match self.selected {
             None => 0,
             Some(s) if s + 1 >= len => s, // list-bounded: stop at the last row
@@ -125,7 +138,7 @@ impl WorkingCopyStore {
             Some(0) | None => 0,
             Some(s) => s - 1,
         };
-        self.select(Some(next.min(self.rows().len().saturating_sub(1))), cx);
+        self.select(Some(next.min(self.selectable_len().saturating_sub(1))), cx);
     }
 
     /// Re-runs status and reloads the selected row's detail. Keeps the
