@@ -212,13 +212,15 @@ impl WorkingCopyStore {
                     }
                     Err(e) => {
                         // A failed FIRST snapshot must not leave the list
-                        // rendering "Loading…" forever.
+                        // rendering "Loading…" forever. The message is
+                        // transient: the next successful refresh clears it.
                         store.load_failed = true;
                         store.message = Some(if e.is_lock_error() {
                             "another git process may be using this worktree — retry".into()
                         } else {
                             e.message
                         });
+                        store.busy_hint = true;
                     }
                 }
                 cx.notify();
