@@ -122,6 +122,9 @@ pub fn diff_unstaged(worktree: &Path, rel_path: &str) -> Result<UnifiedDiff> {
             "diff",
             "--no-color",
             "--no-ext-diff",
+            // Textconv filters would replace the real file text — the
+            // byte-exact `raw` hunks feed `git apply --cached` in Phase 1b.
+            "--no-textconv",
             "-U3",
             "--",
             &literal(rel_path),
@@ -141,6 +144,7 @@ pub fn diff_staged(worktree: &Path, rel_path: &str) -> Result<UnifiedDiff> {
             "--cached",
             "--no-color",
             "--no-ext-diff",
+            "--no-textconv",
             "-U3",
             "--",
             &literal(rel_path),

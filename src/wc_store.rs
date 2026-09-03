@@ -554,9 +554,6 @@ impl WorkingCopyStore {
                 // Surface a pending notice (e.g. skipped conflicts) instead
                 // of clearing; the mutation still counts for the home list.
                 self.message = self.pending_notice.take();
-                if self.message.is_some() {
-                    self.mutated = true;
-                }
                 self.mutated = true;
             }
             Err(e) => {

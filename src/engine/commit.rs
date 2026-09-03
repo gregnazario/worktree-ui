@@ -125,7 +125,7 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     // choice and may well cope, and the Windows default (notepad) is a GUI
     // app that needs no terminal.
     #[cfg(not(windows))]
-    if used_default && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+    if used_default && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(GitError {
             message: format!(
                 "no terminal available for the default editor '{}' — set $GIT_EDITOR \
