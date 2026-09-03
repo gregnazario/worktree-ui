@@ -252,6 +252,9 @@ impl WorkingCopyStore {
     /// conflicted rows.
     fn load_detail(&mut self, cx: &mut Context<Self>) {
         let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
+            // Cancel any in-flight load — otherwise it lands after this
+            // clear and reinstates a detail for a row that's gone.
+            self.detail_generation += 1;
             self.detail = None;
             return;
         };
@@ -410,11 +413,26 @@ impl WorkingCopyStore {
         // Lossy-decoded names can't be matched by a pathspec; including one
         // would abort the whole `git add` (a chunk may already have
         // applied), so they're skipped — the rows are visibly marked
-        // "(non-UTF-8 name — unsupported)".
+        // "(non-UTF-8 name — unsupported)". Conflicts are also skipped:
+        // they need resolution, not blind staging.
+        let mut skipped_conflicts = 0usize;
         let paths: Vec<String> = self
             .rows()
             .into_iter()
-            .filter(|(g, _)| !matches!(g, eng::Group::Staged | eng::Group::Conflicts))
+            .filter(|(g, i)| {
+                let e = &self.wc.as_ref().unwrap().entries[*i];
+                if matches!(g, eng::Group::Staged | eng::Group::Conflicts) {
+                    return false;
+                }
+                if e.unsupported {
+                    return false;
+                }
+                if matches!(g, eng::Group::Conflicts) {
+                    skipped_conflicts += 1;
+                    return false;
+                }
+                true
+            })
             .filter_map(|(_, i)| {
                 self.wc.as_ref().and_then(|wc| {
                     let e = &wc.entries[i];
@@ -423,7 +441,14 @@ impl WorkingCopyStore {
             })
             .collect();
         if paths.is_empty() {
+            if skipped_conflicts > 0 {
+                self.message = Some("Conflicts must be resolved before they can be staged".into());
+                cx.notify();
+            }
             return;
+        }
+        if skipped_conflicts > 0 {
+            self.message = Some("Conflicts were skipped — resolve them, then stage with s".into());
         }
         self.generation += 1;
         self.mutating = true;
