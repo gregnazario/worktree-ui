@@ -262,6 +262,15 @@ impl WorkingCopyStore {
         let gen = self.detail_generation;
         let worktree = self.worktree.clone();
         let path = entry.path.clone();
+        if entry.unsupported {
+            // The lossy-decoded path can never match a pathspec — don't
+            // run git on it; show why the pane is empty instead.
+            self.detail = Some(FileDetail::Failed(
+                "non-UTF-8 filename — view it in a terminal".into(),
+            ));
+            cx.notify();
+            return;
+        }
         let kind = match group {
             eng::Group::Staged => DetailKind::Staged,
             eng::Group::Unstaged => DetailKind::Unstaged,
@@ -324,7 +333,12 @@ impl WorkingCopyStore {
             return;
         }
         if self.wc.is_none() {
-            self.loading_message(cx);
+            // A FAILED first load is a permanent error, not a transient
+            // state — the list pane is already showing it; don't overwrite
+            // it with a "Loading" hint.
+            if !self.load_failed {
+                self.loading_message(cx);
+            }
             return;
         }
         let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
@@ -515,7 +529,10 @@ impl WorkingCopyStore {
         }
         let Some(wc) = self.wc.clone() else {
             // First snapshot still loading: `c` would be a silent no-op.
-            self.loading_message(cx);
+            // (A FAILED load keeps its error visible instead.)
+            if !self.load_failed {
+                self.loading_message(cx);
+            }
             return;
         };
         if self.staged_count() == 0 {
