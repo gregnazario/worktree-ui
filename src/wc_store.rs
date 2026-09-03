@@ -522,8 +522,21 @@ impl WorkingCopyStore {
             cx.notify();
             return;
         }
+        // Re-derive tracked-ness from LIVE git state, not the store's last
+        // snapshot: an external `git add`/`rm --cached` between dialog-open
+        // and confirm would otherwise flip the action (restore vs delete).
         let worktree = self.worktree.clone();
-        let untracked = entry.untracked;
+        let tracked_now =
+            !engine::run_trimmed(&worktree, &["ls-files", "--", &format!(":(literal){path}")])
+                .unwrap_or_default()
+                .is_empty();
+        let untracked = !tracked_now;
+        if untracked != entry.untracked {
+            self.message =
+                Some("That file's state changed — reopen the dialog to try again".into());
+            cx.notify();
+            return;
+        }
         self.generation += 1;
         self.mutating = true;
         cx.notify();
