@@ -50,6 +50,9 @@ pub struct WorkingCopyStore {
     /// mutations (a mutation invalidates any in-flight snapshot), but NOT
     /// by detail loads — changing the selected file must never cancel a
     /// status refresh, or post-mutation groups go stale.
+    /// True when the FIRST status snapshot failed: the view must show the
+    /// error instead of an eternal "Loading working copy…".
+    pub load_failed: bool,
     generation: u64,
     /// Guards detail (diff/preview) loads, independent of `generation` so
     /// the two load kinds can't cancel each other.
@@ -68,6 +71,7 @@ impl WorkingCopyStore {
             mutating: false,
             message: None,
             mutated: false,
+            load_failed: false,
             busy_hint: false,
             generation: 0,
             detail_generation: 0,
@@ -201,11 +205,15 @@ impl WorkingCopyStore {
                             // Clamp to the rendered cap: a selection past
                             // MAX_VISIBLE_ROWS would act on an undrawn row.
                             .filter(|&i| i < MAX_VISIBLE_ROWS);
+                        store.load_failed = false;
                         store.wc = Some(wc);
                         store.selected = selected.or(if rows.is_empty() { None } else { Some(0) });
                         store.load_detail(cx);
                     }
                     Err(e) => {
+                        // A failed FIRST snapshot must not leave the list
+                        // rendering "Loading…" forever.
+                        store.load_failed = true;
                         store.message = Some(if e.is_lock_error() {
                             "another git process may be using this worktree — retry".into()
                         } else {
@@ -543,8 +551,11 @@ impl WorkingCopyStore {
                         store.message = Some("Commit aborted — empty message".into());
                     }
                     Err(e) => {
+                        // Append (don't replace): a commit failure carries
+                        // the preserved-message path that must reach the
+                        // user even when this is also a lock error.
                         store.message = Some(if e.is_lock_error() {
-                            "another git process may be using this worktree — retry".into()
+                            format!("{e} — another git process may be using this worktree; retry")
                         } else {
                             e.message
                         })

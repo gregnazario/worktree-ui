@@ -154,9 +154,26 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
             }
         })?,
         Err(e) => {
-            let _ = std::fs::remove_file(&msg_path);
+            // The editor may have SAVED the draft before exiting non-zero
+            // (e.g. save-then-fail hooks): keep the file and tell the user
+            // where it is, instead of destroying typed work.
+            let draft = std::fs::read_to_string(&msg_path)
+                .ok()
+                .map(|raw| strip_comments(&raw))
+                .filter(|m| !m.is_empty());
+            let hint = match draft {
+                Some(_) => format!(
+                    " — your draft is preserved at {} (recommit with: git commit -F \"{}\")",
+                    msg_path.display(),
+                    msg_path.display()
+                ),
+                None => {
+                    let _ = std::fs::remove_file(&msg_path);
+                    String::new()
+                }
+            };
             return Err(GitError {
-                message: format!("could not run editor {}: {e}", argv.join(" ")),
+                message: format!("could not run editor {}{}: {e}", argv.join(" "), hint),
             });
         }
     };
