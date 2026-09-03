@@ -44,7 +44,13 @@ fn resolve_editor_order_and_splitting() {
         "EDITOR" => Some(String::new()),
         _ => None,
     };
-    let expected_default = if cfg!(windows) { "notepad" } else { "vim" };
+    let expected_default = if cfg!(windows) {
+        "notepad"
+    } else if cfg!(target_os = "freebsd") {
+        "ee"
+    } else {
+        "vim"
+    };
     assert_eq!(
         commit::resolve_editor(None, &getenv),
         vec![expected_default]
