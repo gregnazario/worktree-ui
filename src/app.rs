@@ -208,8 +208,15 @@ impl RootView {
     /// back" path must go through this — `detail_keydown` early-returns
     /// when no detail handle is focused, so refocusing the root while the
     /// detail view is open leaves every detail key dead (keyboard trap).
-    fn focus_active_surface(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+    fn focus_active_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.detail.is_some() {
+            // Keep the store's pane state in sync with the focused pane.
+            if let Some(wc) = &self.detail {
+                wc.update(cx, |store, cx| {
+                    store.pane = crate::wc_store::Pane::Files;
+                    cx.notify();
+                });
+            }
             window.focus(&self.detail_list_focus);
         } else {
             window.focus(&self.root_focus);
