@@ -124,8 +124,11 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     let (mut file, msg_path) = create_msg_file()?;
     use std::io::Write as _;
     file.write_all(template(staged_summary).as_bytes())
-        .map_err(|e| GitError {
-            message: format!("could not write commit template: {e}"),
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&msg_path);
+            GitError {
+                message: format!("could not write commit template: {e}"),
+            }
         })?;
     drop(file);
 
@@ -187,8 +190,11 @@ pub fn strip_comments(raw: &str) -> String {
 pub fn commit(worktree: &Path, message: &str) -> Result<()> {
     let (mut file, msg_path) = create_msg_file()?;
     use std::io::Write as _;
-    file.write_all(message.as_bytes()).map_err(|e| GitError {
-        message: format!("could not write commit message: {e}"),
+    file.write_all(message.as_bytes()).map_err(|e| {
+        let _ = std::fs::remove_file(&msg_path);
+        GitError {
+            message: format!("could not write commit message: {e}"),
+        }
     })?;
     drop(file);
     let msg_arg = msg_path.to_string_lossy().into_owned();

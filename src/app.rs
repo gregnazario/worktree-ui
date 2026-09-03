@@ -348,6 +348,11 @@ impl RootView {
             return;
         }
         let Some(wc) = &self.detail else { return };
+        // First snapshot still loading: there is no row to describe yet.
+        if wc.read(cx).wc.is_none() {
+            wc.update(cx, |store, cx| store.loading_message(cx));
+            return;
+        }
         // Block only a running MUTATION (its state is about to change).
         // Snapshot refreshes are deliberately not covered — a refresh can
         // complete while the dialog is open, and that's fine:

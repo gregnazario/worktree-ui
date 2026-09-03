@@ -236,6 +236,9 @@ fn render_file_list(
     let total = rows.len();
     let is_empty = total == 0;
     for (pos, (group, _i, is_selected, letter, path, counts)) in rows.into_iter().enumerate() {
+        if pos >= FILE_ROW_RENDER_CAP {
+            break; // cap the interactive elements; a trailer reports the rest
+        }
         if last_group != Some(group) {
             list = list.child(group_header(group.title()));
             last_group = Some(group);
@@ -299,7 +302,7 @@ fn render_file_list(
                 .text_size(px(12.))
                 .text_color(DIM)
                 .child(format!(
-                    "… {hidden} more files — narrow with / or stage from the terminal"
+                    "… {hidden} more files — stage them from the terminal to narrow the list"
                 )),
         );
     }
