@@ -175,7 +175,7 @@ pub fn render(
                     {
                         let terminal_path = wc.read(cx).worktree.clone();
                         move |_, _, _window| {
-                            crate::app::open_terminal(&terminal_path);
+                            open_terminal(&terminal_path);
                         }
                     },
                 ))
