@@ -484,6 +484,11 @@ impl WorkingCopyStore {
         .detach();
     }
 
+    /// Discards a specific path. `untracked_at_confirm` is what the dialog
+    /// showed the user; the executed action is only allowed when the file's
+    /// live state still agrees with it. A flip between dialog-open and
+    /// confirm (external `git add` / `rm --cached`) is refused with a
+    /// "reopen the dialog" message instead of acting on stale state.
     pub fn discard_path(
         &mut self,
         untracked_at_confirm: bool,
@@ -516,41 +521,32 @@ impl WorkingCopyStore {
         if entry.is_dir() {
             return; // no recursive delete in Phase 1
         }
+        // Refuse if the live state flipped vs. what the dialog confirmed
+        // (e.g. an external `git add`/`rm --cached` while it sat open).
         if entry.untracked != untracked_at_confirm {
             self.message =
                 Some("That file's state changed — reopen the dialog to try again".into());
             cx.notify();
             return;
         }
-        // Re-derive tracked-ness from LIVE git state, not the store's last
-        // snapshot: an external `git add`/`rm --cached` between dialog-open
-        // and confirm would otherwise flip the action (restore vs delete).
         let worktree = self.worktree.clone();
-        let tracked_now =
-            !engine::run_trimmed(&worktree, &["ls-files", "--", &format!(":(literal){path}")])
-                .unwrap_or_default()
-                .is_empty();
-        let untracked = !tracked_now;
-        if untracked != entry.untracked {
-            self.message =
-                Some("That file's state changed — reopen the dialog to try again".into());
-            cx.notify();
-            return;
-        }
         self.generation += 1;
         self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    if untracked {
-                        mutate::discard_untracked(&worktree, &path)
-                    } else {
-                        mutate::discard_unstaged(&worktree, &path)
-                    }
-                })
-                .await;
+            // Re-derive tracked-ness from LIVE git state: an external `git
+            // add`/`rm --cached` between dialog-open and confirm flips the
+            // file's class, and acting on the stale snapshot would either
+            // delete unique content or restore something unexpected.
+            let tracked_now =
+                !engine::run_trimmed(&worktree, &["ls-files", "--", &format!(":(literal){path}")])
+                    .unwrap_or_default()
+                    .is_empty();
+            let result = if tracked_now {
+                mutate::discard_unstaged(&worktree, &path)
+            } else {
+                mutate::discard_untracked(&worktree, &path)
+            };
             this.update(cx, |store, cx| store.after_mutation(result, cx))
                 .ok();
         })
