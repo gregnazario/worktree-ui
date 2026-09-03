@@ -414,24 +414,22 @@ impl WorkingCopyStore {
         // would abort the whole `git add` (a chunk may already have
         // applied), so they're skipped — the rows are visibly marked
         // "(non-UTF-8 name — unsupported)". Conflicts are also skipped:
-        // they need resolution, not blind staging.
+        // they need resolution, not blind staging — say so instead of
+        // letting `S` be a silent no-op.
         let mut skipped_conflicts = 0usize;
         let paths: Vec<String> = self
             .rows()
             .into_iter()
             .filter(|(g, i)| {
                 let e = &self.wc.as_ref().unwrap().entries[*i];
-                if matches!(g, eng::Group::Staged | eng::Group::Conflicts) {
-                    return false;
+                match g {
+                    eng::Group::Conflicts => {
+                        skipped_conflicts += 1;
+                        false
+                    }
+                    eng::Group::Staged => false,
+                    _ => !e.unsupported,
                 }
-                if e.unsupported {
-                    return false;
-                }
-                if matches!(g, eng::Group::Conflicts) {
-                    skipped_conflicts += 1;
-                    return false;
-                }
-                true
             })
             .filter_map(|(_, i)| {
                 self.wc.as_ref().and_then(|wc| {
@@ -440,15 +438,14 @@ impl WorkingCopyStore {
                 })
             })
             .collect();
+        if skipped_conflicts > 0 {
+            self.message = Some("Conflicts were skipped — resolve them, then stage with s".into());
+        }
         if paths.is_empty() {
-            if skipped_conflicts > 0 {
-                self.message = Some("Conflicts must be resolved before they can be staged".into());
+            if skipped_conflicts == 0 {
                 cx.notify();
             }
             return;
-        }
-        if skipped_conflicts > 0 {
-            self.message = Some("Conflicts were skipped — resolve them, then stage with s".into());
         }
         self.generation += 1;
         self.mutating = true;
@@ -464,12 +461,6 @@ impl WorkingCopyStore {
         .detach();
     }
 
-    /// Discards a specific path. `untracked_at_confirm` is what the dialog
-    /// showed the user; the executed action is only allowed when the file's
-    /// LIVE state still agrees with it. If the state flipped mid-dialog
-    /// (an external `git rm --cached` / re-add can do that), the action is
-    /// refused: a flip to untracked followed by a blind delete would
-    /// permanently destroy the only copy of the content.
     pub fn discard_path(
         &mut self,
         untracked_at_confirm: bool,
