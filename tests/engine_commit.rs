@@ -156,8 +156,8 @@ fn write_subst_editor_script() -> String {
     #[cfg(windows)]
     {
         let script = path.with_extension("cmd");
-        std::fs::write(&script, "@echo substituted draft> %2\r\n").unwrap();
-        format!("cmd /c {} \"%s\"", script.display())
+        std::fs::write(&script, "@echo substituted draft>%1\r\n").unwrap();
+        format!("cmd /c {} %s", script.display())
     }
 }
 
