@@ -74,9 +74,15 @@ pub fn resolve_editor(
     source.split_whitespace().map(str::to_string).collect()
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "freebsd")))]
 fn platform_default_editor() -> &'static str {
     "vim"
+}
+
+// FreeBSD's base system ships `ee`, not vim.
+#[cfg(target_os = "freebsd")]
+fn platform_default_editor() -> &'static str {
+    "ee"
 }
 
 #[cfg(windows)]
@@ -146,10 +152,13 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     })();
     let raw = match run_result {
         Ok(()) => std::fs::read_to_string(&msg_path).map_err(|e| {
-            let _ = std::fs::remove_file(&msg_path);
+            // A non-UTF-8 save still holds the user's draft: keep the file
+            // (convertible with iconv) and point at it, instead of deleting.
             GitError {
                 message: format!(
-                    "commit message discarded — the editor saved it in a non-UTF-8 encoding: {e}"
+                    "the editor saved the message in a non-UTF-8 encoding — \
+                     your draft is preserved at {}: {e}",
+                    msg_path.display()
                 ),
             }
         })?,

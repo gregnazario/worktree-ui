@@ -354,14 +354,17 @@ impl WorkingCopyStore {
         }
         let worktree = self.worktree.clone();
         // Path lists are built per DIRECTION inside the match:
-        // - Unstaging a staged RENAME must reset BOTH paths — resetting only
-        //   the new path leaves the old path's deletion staged.
+        // - Unstaging a staged RENAME (`2 R`) must reset BOTH paths —
+        //   resetting only the new path leaves the old path's deletion
+        //   staged. A staged COPY (`2 C`) is different: the source path is
+        //   an independent entry with its own staged changes, and must NOT
+        //   be reset along with the copy.
         // - STAGING must NOT include `orig_path`: on a `2 RM` record (rename
         //   staged, new path edited again) the old path no longer exists, so
-        //   `git add -- new :(literal)old` would abort the whole stage.
+        //   `git add -- new :old` would abort the whole stage.
         let unstage = matches!(group, eng::Group::Staged);
         let mut paths = vec![entry.path.clone()];
-        if unstage {
+        if unstage && entry.index_status == 'R' {
             if let Some(orig) = &entry.orig_path {
                 paths.push(orig.clone());
             }
@@ -395,12 +398,12 @@ impl WorkingCopyStore {
             self.busy_message(cx);
             return;
         }
-        if self.wc.is_none() && !self.load_failed {
-            self.loading_message(cx);
-            return;
-        }
+        // A failed first load keeps its error visible instead of a loading
+        // hint (and can never stage anyway — there is no snapshot).
         if self.wc.is_none() {
-            self.loading_message(cx);
+            if !self.load_failed {
+                self.loading_message(cx);
+            }
             return;
         }
         let worktree = self.worktree.clone();

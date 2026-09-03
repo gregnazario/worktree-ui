@@ -350,7 +350,11 @@ impl RootView {
         let Some(wc) = &self.detail else { return };
         // First snapshot still loading: there is no row to describe yet.
         if wc.read(cx).wc.is_none() {
-            wc.update(cx, |store, cx| store.loading_message(cx));
+            // A FAILED first load keeps its error visible (already rendered
+            // in the list pane) — don't overwrite it with a loading hint.
+            if !wc.read(cx).load_failed {
+                wc.update(cx, |store, cx| store.loading_message(cx));
+            }
             return;
         }
         // Block only a running MUTATION (its state is about to change).
