@@ -178,15 +178,6 @@ pub fn parse_status_z(input: &str) -> WorkingCopy {
         }
         // "!" ignored records and anything unknown: ignore.
     }
-    // from_utf8_lossy replaced undecodable filename bytes with U+FFFD: the
-    // path string no longer matches anything git can act on.
-    for entry in wc.entries.iter_mut() {
-        entry.unsupported = entry.path.contains('\u{FFFD}')
-            || entry
-                .orig_path
-                .as_deref()
-                .is_some_and(|p| p.contains('\u{FFFD}'));
-    }
     wc
 }
 
@@ -222,7 +213,7 @@ pub fn parse_numstat_z(input: &str) -> Vec<(String, Option<(u64, u64)>)> {
 /// surfaces. Read-only (`--no-optional-locks`, which git only accepts as a
 /// global option BEFORE the subcommand).
 pub fn status(worktree: &Path) -> engine::Result<WorkingCopy> {
-    let raw = engine::run(
+    let raw_bytes = engine::run_bytes(
         worktree,
         &[
             "--no-optional-locks",
@@ -235,7 +226,27 @@ pub fn status(worktree: &Path) -> engine::Result<WorkingCopy> {
             "--untracked-files=normal",
         ],
     )?;
+    // Strict UTF-8 first: a filename that legitimately contains U+FFFD
+    // survives strict decoding (and its pathspec works), so it is NOT
+    // unsupported. Only when the bytes aren't valid UTF-8 do we fall back
+    // to lossy decoding and flag the mangled entries.
+    let (raw, strict) = match String::from_utf8(raw_bytes) {
+        Ok(s) => (s, true),
+        Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), false),
+    };
     let mut wc = parse_status_z(&raw);
+    if !strict {
+        for entry in wc.entries.iter_mut() {
+            if entry.path.contains('\u{FFFD}')
+                || entry
+                    .orig_path
+                    .as_deref()
+                    .is_some_and(|p| p.contains('\u{FFFD}'))
+            {
+                entry.unsupported = true;
+            }
+        }
+    }
     // Path → entry index, so numstat records merge in O(1) instead of a
     // linear scan per record (O(n·m) on large trees).
     let entry_by_path: std::collections::HashMap<String, usize> = wc
@@ -368,18 +379,5 @@ mod tests {
     fn untracked_directory_row_is_detected() {
         let wc = parse_status_z("? vendor/\u{0}");
         assert!(wc.entries[0].is_dir());
-    }
-
-    #[test]
-    fn marks_lossy_decoded_paths_unsupported() {
-        // A filename whose bytes weren't valid UTF-8 arrives with U+FFFD
-        // replacement characters baked in.
-        let wc = parse_status_z("1 .M N... 1 1 1 a b bad\u{FFFD}name.txt\u{0}");
-        assert!(wc.entries[0].unsupported);
-        let wc =
-            parse_status_z("2 R. N... 1 1 1 a b R100 new\u{FFFD}.txt\u{0}old\u{FFFD}.txt\u{0}");
-        assert!(wc.entries[0].unsupported, "rename with lossy orig path");
-        let wc = parse_status_z("1 .M N... 1 1 1 a b ok.txt\u{0}");
-        assert!(!wc.entries[0].unsupported);
     }
 }

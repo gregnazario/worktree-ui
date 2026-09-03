@@ -65,14 +65,23 @@ pub fn author(worktree: &Path) -> (String, String) {
 pub fn resolve_editor(
     git_config_value: Option<&str>,
     getenv: &dyn Fn(&str) -> Option<String>,
-) -> Vec<String> {
+) -> (Vec<String>, bool) {
     let usable = |v: Option<String>| v.filter(|v| !v.trim().is_empty());
-    let source = usable(getenv("GIT_EDITOR"))
-        .or_else(|| usable(git_config_value.map(str::to_string)))
-        .or_else(|| usable(getenv("VISUAL")))
-        .or_else(|| usable(getenv("EDITOR")))
-        .unwrap_or_else(|| platform_default_editor().to_string());
-    source.split_whitespace().map(str::to_string).collect()
+    let (source, used_default) = usable(getenv("GIT_EDITOR"))
+        .map(|v| (v, false))
+        .or_else(|| {
+            git_config_value
+                .map(str::to_string)
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| (v, false))
+        })
+        .or_else(|| usable(getenv("VISUAL")).map(|v| (v, false)))
+        .or_else(|| usable(getenv("EDITOR")).map(|v| (v, false)))
+        .unwrap_or_else(|| (platform_default_editor().to_string(), true));
+    (
+        source.split_whitespace().map(str::to_string).collect(),
+        used_default,
+    )
 }
 
 #[cfg(all(not(windows), not(target_os = "freebsd")))]
@@ -106,29 +115,27 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
         .filter(|v| v.trim() != "auto")
         .and_then(|v| v.trim().chars().next())
         .unwrap_or('#');
-    let argv = resolve_editor(config_editor.as_deref(), &|k| {
+    let (argv, used_default) = resolve_editor(config_editor.as_deref(), &|k| {
         std::env::var(k).ok().filter(|v| !v.trim().is_empty())
     });
     // Launched from Finder/Dock the app has no TTY, and the unix *default*
     // editor (vim) cannot run without one — the failure would be opaque.
-    // Only the DEFAULT is guarded, and only on unix: the Windows default
-    // (notepad) is a GUI app that needs no terminal. A configured editor is
-    // the user's own choice and may well cope (e.g. a GUI editor).
+    // Only the platform DEFAULT on unix is guarded: an explicitly
+    // configured editor (even one equal to the default) is the user's own
+    // choice and may well cope, and the Windows default (notepad) is a GUI
+    // app that needs no terminal.
+    // IsTerminal exists on all platforms; only the unix *default* editor
+    // (vim) needs the guard — notepad is a GUI app.
+    use std::io::IsTerminal as _;
     #[cfg(not(windows))]
-    {
-        use std::io::IsTerminal as _;
-        if argv.len() == 1
-            && argv[0] == platform_default_editor()
-            && !std::io::stdin().is_terminal()
-        {
-            return Err(GitError {
-                message: format!(
-                    "no terminal available for the default editor '{}' — set $GIT_EDITOR \
-                     or run: git config --global core.editor <editor>",
-                    argv[0]
-                ),
-            });
-        }
+    if used_default && !std::io::stdin().is_terminal() {
+        return Err(GitError {
+            message: format!(
+                "no terminal available for the default editor '{}' — set $GIT_EDITOR \
+                 or run: git config --global core.editor <editor>",
+                argv[0]
+            ),
+        });
     }
     let (mut file, msg_path) = create_msg_file()?;
     use std::io::Write as _;

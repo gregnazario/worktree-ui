@@ -250,6 +250,40 @@ mod mutate_tests {
         assert_eq!(staged, 600, "every path staged across all batches");
     }
 
+    // macOS rejects non-UTF-8 filenames at the syscall level (EILSEQ);
+    // Linux and FreeBSD accept raw bytes.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn status_flags_non_utf8_names_unsupported_only_on_lossy() {
+        use std::os::unix::ffi::OsStrExt;
+        use worktree_tool::engine::working_copy::status;
+        let tmp = tempfile::tempdir().unwrap();
+        common::fixture_repo(tmp.path());
+        // A file whose NAME is not valid UTF-8 (raw bytes).
+        let bad = tmp
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"bad\xffname.txt"));
+        std::fs::write(&bad, "x").unwrap();
+
+        let wc = status(tmp.path()).unwrap();
+        assert!(
+            wc.entries.iter().any(|e| e.unsupported),
+            "lossy-decoded mangled name flagged unsupported"
+        );
+
+        // A name that legitimately contains U+FFFD (valid UTF-8) must NOT
+        // be flagged: its pathspec round-trips fine.
+        let ok = tmp.path().join("ok\u{FFFD}name.txt");
+        std::fs::write(&ok, "y").unwrap();
+        let wc = status(tmp.path()).unwrap();
+        let entry = wc
+            .entries
+            .iter()
+            .find(|e| e.path == "ok\u{FFFD}name.txt")
+            .unwrap();
+        assert!(!entry.unsupported, "valid UTF-8 name is stgable");
+    }
+
     #[test]
     fn status_overrides_show_untracked_files_config() {
         let tmp = tempfile::tempdir().unwrap();

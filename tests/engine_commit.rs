@@ -55,18 +55,21 @@ fn resolve_editor_order_and_splitting() {
     assert_eq!(
         commit::resolve_editor(Some("nano"), &|k| (k == "GIT_EDITOR")
             .then(|| "vi".to_string())),
-        vec!["vi"]
+        (vec!["vi".to_string()], false)
     );
     // then core.editor config
     assert_eq!(
         commit::resolve_editor(Some("nano"), &|_| None),
-        vec!["nano"]
+        (vec!["nano".to_string()], false)
     );
     // then VISUAL (split on whitespace), then EDITOR, then default
-    assert_eq!(commit::resolve_editor(None, &getenv), vec!["code", "-w"]);
+    assert_eq!(
+        commit::resolve_editor(None, &getenv),
+        (vec!["code".to_string(), "-w".to_string()], false)
+    );
     assert_eq!(
         commit::resolve_editor(None, &|k| (k == "EDITOR").then(|| "emacs".to_string())),
-        vec!["emacs"]
+        (vec!["emacs".to_string()], false)
     );
     // Exported-empty values fall through exactly like unset ones.
     let getenv = |k: &str| match k {
@@ -83,11 +86,7 @@ fn resolve_editor_order_and_splitting() {
     };
     assert_eq!(
         commit::resolve_editor(None, &getenv),
-        vec![expected_default]
-    );
-    assert_eq!(
-        commit::resolve_editor(None, &|_| None),
-        vec![expected_default]
+        (vec![expected_default.to_string()], true)
     );
 }
 
