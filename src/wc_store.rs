@@ -324,8 +324,15 @@ impl WorkingCopyStore {
     /// shell's guards (e.g. refusing to close the detail view mid-commit).
     pub fn busy_message(&mut self, cx: &mut Context<Self>) {
         self.message = Some("Busy — wait for the current operation".into());
-        self.busy_hint = true;
+        self.note_transient_hint();
         cx.notify();
+    }
+
+    /// Marks the current `message` as a transient hint (a later refresh
+    /// completion clears it). Shell-facing callers that set custom text
+    /// use this to keep the clear-on-refresh behavior.
+    pub fn note_transient_hint(&mut self) {
+        self.busy_hint = true;
     }
 
     /// `s` on a row: stage unstaged/untracked/conflict rows, unstage staged

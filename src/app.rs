@@ -369,12 +369,30 @@ impl RootView {
         let Some((group, entry)) = wc.read(cx).selected_row().map(|(g, e)| (g, e.clone())) else {
             return;
         };
-        let eligible = matches!(
-            group,
+        // Ineligible rows get a footer hint instead of a silent no-op: the
+        // footer advertises `d discard`, so an unexplained dead key reads
+        // as the app ignoring the keystroke.
+        let hint = match group {
+            crate::engine::working_copy::Group::Staged => Some(
+                "staged changes — press s to unstage first, then discard if needed".to_string(),
+            ),
+            crate::engine::working_copy::Group::Conflicts => {
+                Some("resolve conflicts in your editor, then press s to mark resolved".to_string())
+            }
+            _ if entry.is_dir() => Some(
+                "directories can't be discarded — stage with S, then remove the path in a terminal"
+                    .to_string(),
+            ),
             crate::engine::working_copy::Group::Unstaged
-                | crate::engine::working_copy::Group::Untracked
-        ) && !entry.is_dir();
-        if !eligible {
+            | crate::engine::working_copy::Group::Untracked => None,
+        };
+        if let Some(hint) = hint {
+            wc.update(cx, |store, cx| {
+                store.message = Some(hint);
+                // Marked as a transient hint so a landing refresh clears it.
+                store.note_transient_hint();
+                cx.notify();
+            });
             return;
         }
         self.dialog = DialogState::Discard {
@@ -1359,6 +1377,38 @@ mod tests {
             "F-EDIT",
             "f.txt must NOT be discarded — the dialog was opened for h.txt"
         );
+    }
+
+    #[gpui::test]
+    fn d_on_a_staged_row_explains_instead_of_no_op(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "changed").unwrap();
+        sh(&repo, &["git", "add", "--", "f.txt"]);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        // Row 0 = Staged f.txt: discard is not offered.
+        vcx.simulate_keystrokes("d");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            assert!(
+                matches!(root.dialog, DialogState::None),
+                "no dialog for staged rows"
+            );
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert!(
+                wc.message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("unstage first"),
+                "expected the staged-row hint, got {:?}",
+                wc.message
+            );
+        });
     }
 
     #[gpui::test]
