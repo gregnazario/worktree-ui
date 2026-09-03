@@ -106,17 +106,24 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     }
     // Launched from Finder/Dock the app has no TTY, and the unix *default*
     // editor (vim) cannot run without one — the failure would be opaque.
-    // Only the DEFAULT is guarded: a configured editor is the user's own
-    // choice and may well cope (e.g. a GUI editor).
-    use std::io::IsTerminal as _;
-    if argv.len() == 1 && argv[0] == platform_default_editor() && !std::io::stdin().is_terminal() {
-        return Err(GitError {
-            message: format!(
-                "no terminal available for the default editor '{}' — set $GIT_EDITOR \
-                 or run: git config --global core.editor <editor>",
-                argv[0]
-            ),
-        });
+    // Only the DEFAULT is guarded, and only on unix: the Windows default
+    // (notepad) is a GUI app that needs no terminal. A configured editor is
+    // the user's own choice and may well cope (e.g. a GUI editor).
+    #[cfg(not(windows))]
+    {
+        use std::io::IsTerminal as _;
+        if argv.len() == 1
+            && argv[0] == platform_default_editor()
+            && !std::io::stdin().is_terminal()
+        {
+            return Err(GitError {
+                message: format!(
+                    "no terminal available for the default editor '{}' — set $GIT_EDITOR \
+                     or run: git config --global core.editor <editor>",
+                    argv[0]
+                ),
+            });
+        }
     }
     let (mut file, msg_path) = create_msg_file()?;
     use std::io::Write as _;

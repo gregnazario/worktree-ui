@@ -459,7 +459,11 @@ impl WorkingCopyStore {
             self.busy_message(cx);
             return;
         }
-        let Some(wc) = self.wc.clone() else { return };
+        let Some(wc) = self.wc.clone() else {
+            // First snapshot still loading: `c` would be a silent no-op.
+            self.busy_message(cx);
+            return;
+        };
         if self.staged_count() == 0 {
             self.message = Some("Nothing staged — press s on files to stage them first".into());
             cx.notify();
