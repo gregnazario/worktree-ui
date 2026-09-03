@@ -4,6 +4,24 @@
 
 **Goal:** Spec: `docs/superpowers/specs/2026-08-29-tower-ward-git-client-design.md`. Build the Working Copy view: drill into any worktree to see status groups, stage/unstage/discard files, view unified diffs, and commit via `$EDITOR` — on a new `engine` module that later phases (history, branches/remotes) build on.
 
+**ERRATA (2026-09-02 — read before re-executing any task):** this plan's
+embedded code sketches are the *pre-execution drafts*. Implementation and seven
+review rounds corrected several of them, and the corrected forms live in the
+shipped code — do not re-implement from the sketches. Known superseded points:
+`--no-optional-locks` is a GLOBAL git option (before the subcommand; the
+sketches' order exits 129); `discard_unstaged` must be index-source
+(`git checkout -q -- <path>` — the sketch's round-trip test required the wrong
+HEAD-source form, which destroys staged changes); `stderr_error` must prefer
+the stderr line naming `index.lock` over the last line; the fixture `Z` needed
+an unstaged record and the staged-diff assertion expects `+two` (Add, not Del);
+`fetch_author` must not bump the shared generation; `refresh`'s keep-path
+resolves against the NEW snapshot; mutation completions deliberately skip the
+generation guard; detail loads use their own `detail_generation`; gpui 0.2.2
+requires every focusable handle to be `.track_focus`ed in the rendered tree;
+uppercase keystrokes normalize to lowercase+shift (bind `shift-s`, never `"S"`);
+and the selection is list-bounded, not group-bounded. When this file and the
+code disagree, the code (and the spec) win.
+
 **Architecture:** The git CLI stays the engine (spec decision A): a new `src/engine/` module with typed commands and `-z` porcelain parsing for status/numstat, plain single-file unified-diff parsing for diffs, and `:(literal)` pathspecs everywhere. A new `WorkingCopyStore` (generation-counter pattern, cloned from `WorktreeStore`) drives a new detail view. `ui.rs` splits into `app.rs` (shell + worktree list + key routing) and `views/working_copy.rs` (detail rendering), mirroring how `dialogs.rs` renders against `RootView`.
 
 **Tech Stack:** Rust, `gpui = "=0.2.2"` (pinned), `git` subprocess via `std::process` on GPUI background executor threads, `tempfile` (dev) for fixture repos.

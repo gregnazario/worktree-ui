@@ -295,7 +295,13 @@ impl WorkingCopyStore {
             return;
         }
         let worktree = self.worktree.clone();
-        let path = entry.path.clone();
+        // Unstaging a staged RENAME must reset BOTH paths: resetting only
+        // the new path leaves the old path's deletion staged, corrupting
+        // the index (old path gone, new path unindexed).
+        let mut paths = vec![entry.path.clone()];
+        if let Some(orig) = &entry.orig_path {
+            paths.push(orig.clone());
+        }
         // Bump to cancel in-flight snapshot loads; the mutation completion
         // below applies regardless of generation (see `after_mutation`).
         self.generation += 1;
@@ -306,10 +312,8 @@ impl WorkingCopyStore {
                 .background_executor()
                 .spawn(async move {
                     match group {
-                        eng::Group::Staged => {
-                            mutate::unstage(&worktree, std::slice::from_ref(&path))
-                        }
-                        _ => mutate::stage(&worktree, std::slice::from_ref(&path)),
+                        eng::Group::Staged => mutate::unstage(&worktree, &paths),
+                        _ => mutate::stage(&worktree, &paths),
                     }
                 })
                 .await;

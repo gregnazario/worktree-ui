@@ -102,12 +102,15 @@ pub fn render(
     let message = wc.read(cx).message.clone();
 
     let container_focus = this.detail_focus.clone();
+    // `wc` is None until the first status snapshot lands — that's
+    // "loading", not "clean".
+    let loading = wc.read(cx).wc.is_none();
     let body = div()
         .id("wc-body")
         .flex()
         .flex_1()
         .min_h_0()
-        .child(render_file_list(this, cx, rows))
+        .child(render_file_list(this, cx, rows, loading))
         .child(render_diff_pane(this, cx));
 
     div()
@@ -211,6 +214,7 @@ fn render_file_list(
     this: &mut RootView,
     cx: &mut Context<RootView>,
     rows: Vec<FileRow>,
+    loading: bool,
 ) -> impl IntoElement {
     let list_focus = this.detail_list_focus.clone();
     let mut last_group: Option<Group> = None;
@@ -272,13 +276,15 @@ fn render_file_list(
         );
     }
     if is_empty {
-        list = list.child(
-            div()
-                .p_4()
-                .text_size(px(13.))
-                .text_color(DIM)
-                .child("Working tree clean"),
-        );
+        // An empty row list means "clean" ONLY once the first status
+        // snapshot has landed — before that it means "still loading", and
+        // the two must not be conflated.
+        let text = if loading {
+            "Loading working copy…"
+        } else {
+            "Working tree clean"
+        };
+        list = list.child(div().p_4().text_size(px(13.)).text_color(DIM).child(text));
     }
     list
 }
