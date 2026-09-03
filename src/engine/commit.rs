@@ -186,7 +186,10 @@ pub fn strip_comments(raw: &str) -> String {
 }
 
 /// `git commit -q -F <file>` — `-F` avoids every quoting/length issue of
-/// `-m`. User hooks run normally.
+/// `-m`. User hooks run normally. On failure the message file is KEPT (the
+/// error names its path): git itself preserves COMMIT_EDITMSG on failed
+/// commits, and the typed message is the user's work — a rejecting
+/// pre-commit hook must not destroy it.
 pub fn commit(worktree: &Path, message: &str) -> Result<()> {
     let (mut file, msg_path) = create_msg_file()?;
     use std::io::Write as _;
@@ -199,6 +202,16 @@ pub fn commit(worktree: &Path, message: &str) -> Result<()> {
     drop(file);
     let msg_arg = msg_path.to_string_lossy().into_owned();
     let res = engine::run_trimmed(worktree, &["commit", "-q", "-F", &msg_arg]);
+    if let Err(e) = &res {
+        // Keep the file so the message survives; the error tells the user
+        // where it is.
+        return Err(GitError {
+            message: format!(
+                "{} — your commit message is preserved at {}",
+                e.message, msg_arg
+            ),
+        });
+    }
     let _ = std::fs::remove_file(&msg_path);
-    res.map(|_| ())
+    Ok(())
 }

@@ -197,7 +197,10 @@ impl WorkingCopyStore {
                             .selected_row()
                             .map(|(g, e)| resolve(Some(g), e.path.as_str()))
                             .unwrap_or(None)
-                            .or_else(|| keep_path.as_deref().and_then(|p| resolve(None, p)));
+                            .or_else(|| keep_path.as_deref().and_then(|p| resolve(None, p)))
+                            // Clamp to the rendered cap: a selection past
+                            // MAX_VISIBLE_ROWS would act on an undrawn row.
+                            .filter(|&i| i < MAX_VISIBLE_ROWS);
                         store.wc = Some(wc);
                         store.selected = selected.or(if rows.is_empty() { None } else { Some(0) });
                         store.load_detail(cx);
