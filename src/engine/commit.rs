@@ -23,22 +23,20 @@ fn create_msg_file() -> Result<(std::fs::File, PathBuf)> {
             "worktree-tool-commit-{}-{n}.msg",
             std::process::id()
         ));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                        .map_err(|e| GitError {
-                            message: format!("could not secure commit message file: {e}"),
-                        })?;
-                }
-                return Ok((file, path));
-            }
+        // The restrictive mode is set AT CREATION (not chmod'd afterwards):
+        // a post-create chmod leaves a 0644 window in which another local
+        // user can open a readable fd and read the message once written.
+        #[cfg(unix)]
+        let opts = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create_new(true).mode(0o600);
+            o
+        };
+        #[cfg(not(unix))]
+        let opts = std::fs::OpenOptions::new().write(true).create_new(true);
+        match opts.open(&path) {
+            Ok(file) => return Ok((file, path)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
                 return Err(GitError {

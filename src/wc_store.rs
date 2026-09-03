@@ -308,12 +308,18 @@ impl WorkingCopyStore {
             return;
         }
         let worktree = self.worktree.clone();
-        // Unstaging a staged RENAME must reset BOTH paths: resetting only
-        // the new path leaves the old path's deletion staged, corrupting
-        // the index (old path gone, new path unindexed).
+        // Path lists are built per DIRECTION inside the match:
+        // - Unstaging a staged RENAME must reset BOTH paths — resetting only
+        //   the new path leaves the old path's deletion staged.
+        // - STAGING must NOT include `orig_path`: on a `2 RM` record (rename
+        //   staged, new path edited again) the old path no longer exists, so
+        //   `git add -- new :(literal)old` would abort the whole stage.
+        let unstage = matches!(group, eng::Group::Staged);
         let mut paths = vec![entry.path.clone()];
-        if let Some(orig) = &entry.orig_path {
-            paths.push(orig.clone());
+        if unstage {
+            if let Some(orig) = &entry.orig_path {
+                paths.push(orig.clone());
+            }
         }
         // Bump to cancel in-flight snapshot loads; the mutation completion
         // below applies regardless of generation (see `after_mutation`).
@@ -324,9 +330,10 @@ impl WorkingCopyStore {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    match group {
-                        eng::Group::Staged => mutate::unstage(&worktree, &paths),
-                        _ => mutate::stage(&worktree, &paths),
+                    if unstage {
+                        mutate::unstage(&worktree, &paths)
+                    } else {
+                        mutate::stage(&worktree, &paths)
                     }
                 })
                 .await;

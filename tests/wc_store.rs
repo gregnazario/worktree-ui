@@ -144,6 +144,104 @@ fn toggle_stage_and_discard_mutate_and_flag(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn staging_a_modified_rename_row_stages_the_follow_up_edit(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path());
+    // Staged rename, then the new path edited again: status v2 emits a
+    // `2 RM` record (new path present in BOTH Staged and Unstaged groups).
+    sh(Some(tmp.path()), &["git", "mv", "f.txt", "renamed.txt"]);
+    std::fs::write(tmp.path().join("renamed.txt"), "moved\nedited\n").unwrap();
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    // Select the Unstaged renamed.txt row and press s.
+    store.update(&mut cx.clone(), |wc, cx| {
+        let pos = wc
+            .rows()
+            .iter()
+            .position(|(g, i)| {
+                *g == Group::Unstaged && wc.wc.as_ref().unwrap().entries[*i].path == "renamed.txt"
+            })
+            .expect("RM record has an Unstaged row");
+        wc.select(Some(pos), cx);
+    });
+    cx.run_until_parked();
+    store.update(&mut cx.clone(), |wc, cx| wc.toggle_stage(cx));
+    cx.run_until_parked();
+    store.update(&mut cx.clone(), |wc, _cx| {
+        // `s` on the Unstaged surface stages the follow-up edit without
+        // error (the bug was `git add` also targeting the rename's vanished
+        // old path, aborting the whole invocation). Git's result: the
+        // rename stays staged with the newer content — f.txt's staged
+        // deletion REMAINS, as half of the rename.
+        let renamed = wc
+            .wc
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .find(|e| e.path == "renamed.txt")
+            .expect("renamed.txt still listed");
+        assert_eq!(renamed.wt_status, '.', "follow-up edit fully staged");
+        assert!(wc.staged_count() >= 1, "g.txt edit staged");
+    });
+}
+
+#[gpui::test]
+fn unstaging_a_pure_rename_resets_both_paths(cx: &mut gpui::TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    // Minimal state with NO other changes, and f.txt committed UNMODIFIED
+    // so `git mv` yields a single `2 R` record (the fixture's staged f.txt
+    // modification makes git report D + A instead — rename detection fails
+    // once content diverges — and those are independent entries).
+    sh(Some(tmp.path()), &["git", "init", "-q", "-b", "main"]);
+    sh(Some(tmp.path()), &["git", "config", "user.email", "t@t.t"]);
+    sh(Some(tmp.path()), &["git", "config", "user.name", "t"]);
+    sh(
+        Some(tmp.path()),
+        &["git", "config", "commit.gpgsign", "false"],
+    );
+    std::fs::write(tmp.path().join("f.txt"), "one").unwrap();
+    sh(Some(tmp.path()), &["git", "add", "."]);
+    sh(Some(tmp.path()), &["git", "commit", "-qm", "init"]);
+    sh(Some(tmp.path()), &["git", "mv", "f.txt", "moved.txt"]);
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    store.update(&mut cx.clone(), |wc, cx| {
+        let (pos, entry_idx) = wc
+            .rows()
+            .iter()
+            .enumerate()
+            .find(|(_, (g, i))| {
+                *g == Group::Staged && wc.wc.as_ref().unwrap().entries[*i].path == "moved.txt"
+            })
+            .map(|(pos, (_, i))| (pos, *i))
+            .expect("staged rename row present");
+        let entry = &wc.wc.as_ref().unwrap().entries[entry_idx];
+        eprintln!("[TDEBUG] select pos={pos} entry={entry:?}"); // TEMP
+        wc.select(Some(pos), cx);
+    });
+    cx.run_until_parked();
+    store.update(&mut cx.clone(), |wc, cx| wc.toggle_stage(cx));
+    cx.run_until_parked();
+    store.update(&mut cx.clone(), |wc, _cx| {
+        let entries = &wc.wc.as_ref().unwrap().entries;
+        assert!(
+            entries.iter().all(|e| e.index_status == '.' || e.untracked),
+            "unstage resets both rename paths (no staged entries): got {:?}",
+            entries
+        );
+        assert!(
+            tmp.path().join("moved.txt").exists(),
+            "worktree file untouched by the unstage"
+        );
+        assert!(
+            entries.iter().any(|e| e.path == "moved.txt" && e.untracked),
+            "moved.txt back to untracked"
+        );
+    });
+}
+
+#[gpui::test]
 fn staged_summary_lists_files(cx: &mut TestAppContext) {
     let tmp = tempfile::tempdir().unwrap();
     fixture(tmp.path());
