@@ -56,7 +56,8 @@ pub fn author(worktree: &Path) -> (String, String) {
     (name, email)
 }
 
-/// Pure so tests can inject env/config lookups. Returns argv (split on
+/// Pure so tests can inject env/config lookups. Returns a non-empty argv
+/// (the platform default guarantees at least one element, split on
 /// whitespace); the message file is appended as the last argument. Every
 /// source passes through the same blank-value filter so an exported-empty
 /// `$VISUAL`/`$EDITOR` falls through to the platform default instead of
@@ -108,11 +109,6 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     let argv = resolve_editor(config_editor.as_deref(), &|k| {
         std::env::var(k).ok().filter(|v| !v.trim().is_empty())
     });
-    if argv.is_empty() {
-        return Err(GitError {
-            message: "no commit editor configured".into(),
-        });
-    }
     // Launched from Finder/Dock the app has no TTY, and the unix *default*
     // editor (vim) cannot run without one — the failure would be opaque.
     // Only the DEFAULT is guarded, and only on unix: the Windows default

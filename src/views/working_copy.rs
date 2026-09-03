@@ -334,9 +334,7 @@ fn render_file_list(
                 .py_2()
                 .text_size(px(12.))
                 .text_color(DIM)
-                .child(format!(
-                    "… {hidden} more files — stage them from the terminal to narrow the list"
-                )),
+                .child(format!("… {hidden} more files (S stages all of them)")),
         );
     }
     list
