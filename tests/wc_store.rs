@@ -207,14 +207,12 @@ fn unstaging_a_pure_rename_resets_both_paths(cx: &mut gpui::TestAppContext) {
     let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
     cx.run_until_parked();
     store.update(&mut cx.clone(), |wc, cx| {
-        let (pos, entry_idx) = wc
+        let pos = wc
             .rows()
             .iter()
-            .enumerate()
-            .find(|(_, (g, i))| {
+            .position(|(g, i)| {
                 *g == Group::Staged && wc.wc.as_ref().unwrap().entries[*i].path == "moved.txt"
             })
-            .map(|(pos, (_, i))| (pos, *i))
             .expect("staged rename row present");
         wc.select(Some(pos), cx);
     });
