@@ -452,17 +452,20 @@ impl WorkingCopyStore {
                 })
             })
             .collect();
+        // Conflicts need resolution, not blind staging — say so instead of
+        // letting `S` be a silent no-op.
         if skipped_conflicts > 0 {
-            // Direct message: with nothing stageable the mutation never
-            // runs, so after_mutation would never surface pending_notice.
             self.message = Some("Conflicts must be resolved before they can be staged".into());
             cx.notify();
             return;
         }
-        // Proceeding: hold the notice so it survives after_mutation's reset
-        // and shows once the (staging-only) operation completes.
-        self.pending_notice =
-            Some("Conflicts were skipped — resolve them, then stage with s".into());
+        // Proceeding with conflicts still skipped (mixed tree): hold the
+        // notice so it survives after_mutation's reset and shows once the
+        // staging completes. A conflict-free tree shows no notice.
+        if skipped_conflicts > 0 {
+            self.pending_notice =
+                Some("Conflicts were skipped — resolve them, then stage with s".into());
+        }
         self.generation += 1;
         self.mutating = true;
         cx.notify();
