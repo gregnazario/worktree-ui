@@ -539,6 +539,8 @@ impl RootView {
                 }
             }
             "d" if list_focused => self.open_discard_dialog(window, cx),
+            // The toolbar advertises "New (n)" on every surface.
+            "n" => self.open_create_dialog(window, cx),
             "c" if list_focused => {
                 if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| store.commit_with_editor(cx));

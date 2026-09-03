@@ -265,13 +265,28 @@ pub fn status(worktree: &Path) -> engine::Result<WorkingCopy> {
         .enumerate()
         .map(|(i, e)| (e.path.clone(), i))
         .collect();
+    // `--no-textconv` keeps the +N/−M badges describing the same
+    // unconverted text as the diff pane rendered next to them.
     for (args, key) in [
         (
-            vec!["--no-optional-locks", "diff", "--numstat", "-z"],
+            vec![
+                "--no-optional-locks",
+                "diff",
+                "--no-textconv",
+                "--numstat",
+                "-z",
+            ],
             0usize,
         ),
         (
-            vec!["--no-optional-locks", "diff", "--cached", "--numstat", "-z"],
+            vec![
+                "--no-optional-locks",
+                "diff",
+                "--cached",
+                "--no-textconv",
+                "--numstat",
+                "-z",
+            ],
             1,
         ),
     ] {

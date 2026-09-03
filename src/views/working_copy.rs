@@ -7,7 +7,7 @@ use crate::app::{
 };
 use crate::engine::diff::{self, DiffLineKind};
 use crate::engine::working_copy::Group;
-use crate::wc_store::FileDetail;
+use crate::wc_store::{FileDetail, Pane};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, rgba, Context, InteractiveElement, IntoElement, MouseButton, ParentElement,
@@ -196,8 +196,11 @@ pub fn render(
                 .bg(PANEL)
                 .child(
                     div().text_size(px(11.)).text_color(DIM).child(
-                        "↑↓ move · s stage/unstage · S stage all · d discard · c commit · tab pane · r refresh · t terminal · esc back"
-                            .to_string(),
+                        if wc.read(cx).pane == Pane::Diff {
+                            "tab back to files · r refresh · t terminal · esc back".to_string()
+                        } else {
+                            "↑↓ move · s stage/unstage · S stage all · d discard · c commit · tab pane · r refresh · t terminal · esc back".to_string()
+                        },
                     ),
                 )
                 .child(div().flex_1())

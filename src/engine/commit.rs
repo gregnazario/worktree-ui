@@ -183,14 +183,20 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     })();
     let raw = match run_result {
         Ok(()) => std::fs::read_to_string(&msg_path).map_err(|e| {
-            // A non-UTF-8 save still holds the user's draft: keep the file
-            // (convertible with iconv) and point at it, instead of deleting.
-            GitError {
-                message: format!(
-                    "the editor saved the message in a non-UTF-8 encoding — \
-                     your draft is preserved at {}: {e}",
-                    msg_path.display()
-                ),
+            if e.kind() == std::io::ErrorKind::InvalidData {
+                // A non-UTF-8 save still holds the user's draft: keep the
+                // file (convertible with iconv) and point at it.
+                GitError {
+                    message: format!(
+                        "the editor saved the message in a non-UTF-8 encoding — \
+                         your draft is preserved at {}: {e}",
+                        msg_path.display()
+                    ),
+                }
+            } else {
+                GitError {
+                    message: format!("could not read the commit message file: {e}"),
+                }
             }
         })?,
         Err(e) => {
