@@ -455,9 +455,11 @@ impl WorkingCopyStore {
         // Nothing stageable (clean tree, everything already staged, or a
         // conflicts-only tree): say so instead of running a no-op mutation.
         if paths.is_empty() {
-            if skipped_conflicts > 0 {
-                self.message = Some("Conflicts must be resolved before they can be staged".into());
-            }
+            self.message = Some(if skipped_conflicts > 0 {
+                "Conflicts must be resolved before they can be staged".into()
+            } else {
+                "Nothing to stage".into()
+            });
             cx.notify();
             return;
         }
@@ -558,6 +560,7 @@ impl WorkingCopyStore {
                 self.mutated = true;
             }
             Err(e) => {
+                self.pending_notice = None;
                 self.message = Some(if e.is_lock_error() {
                     "another git process may be using this worktree — retry".into()
                 } else {

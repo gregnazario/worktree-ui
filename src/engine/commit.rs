@@ -156,7 +156,7 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
     let mut substituted = false;
     for a in &argv {
         if !substituted && a.contains("%s") {
-            spawn_argv.push(a.replace("%s", &msg_arg));
+            spawn_argv.push(a.replacen("%s", &msg_arg, 1));
             substituted = true;
         } else {
             spawn_argv.push(a.clone());
