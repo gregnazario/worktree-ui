@@ -40,10 +40,15 @@ impl EditorHandle {
         self.abandon.store(true, Ordering::SeqCst);
         // Kill without reaping: the background poll loop reaps on its own
         // thread (its wait() after the flag fires is off the UI thread).
-        // A blocking wait() here could stall the UI on a wedged process;
-        // SIGKILL itself is immediate.
-        if let Some(child) = self.child.lock().unwrap().as_mut() {
-            let _ = child.kill();
+        // try_lock, never lock(): the loop holds the mutex across a
+        // wait() that can block indefinitely on an uninterruptible
+        // process — a second esc must degrade to flag-only (the loop
+        // re-checks the flag and handles the kill itself), never block
+        // the UI thread.
+        if let Ok(mut guard) = self.child.try_lock() {
+            if let Some(child) = guard.as_mut() {
+                let _ = child.kill();
+            }
         }
     }
 }
@@ -70,7 +75,14 @@ fn run_editor_process(mut cmd: Command, handle: &EditorHandle) -> EditorExit {
     *handle.child.lock().unwrap() = Some(child);
     loop {
         if handle.abandon_requested() {
-            if let Some(mut child) = handle.child.lock().unwrap().take() {
+            // Bind BEFORE `if let`: under Rust 2021 temporary scoping the
+            // MutexGuard would otherwise live across wait(), which can
+            // block indefinitely on an uninterruptible process — holding
+            // the mutex then would freeze a second esc (try_lock on the
+            // UI thread would fail forever, and a plain lock() would
+            // block it outright).
+            let child = handle.child.lock().unwrap().take();
+            if let Some(mut child) = child {
                 let _ = child.kill();
                 let _ = child.wait();
             }
@@ -86,6 +98,12 @@ fn run_editor_process(mut cmd: Command, handle: &EditorHandle) -> EditorExit {
             None => return EditorExit::Abandoned,
             Some(Ok(Some(status))) => {
                 handle.child.lock().unwrap().take();
+                // The kill can land between the flag check above and this
+                // tick: an exit observed after an abandon request IS the
+                // abandon (signal 9), not an editor failure.
+                if handle.abandon_requested() {
+                    return EditorExit::Abandoned;
+                }
                 return if status.success() {
                     EditorExit::Ok
                 } else {
