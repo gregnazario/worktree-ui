@@ -390,6 +390,9 @@ impl RootView {
                 "directories can't be discarded — stage with S, then remove the path in a terminal"
                     .to_string(),
             ),
+            _ if entry.unsupported => {
+                Some("non-UTF-8 name — discard this one in a terminal".to_string())
+            }
             crate::engine::working_copy::Group::Unstaged
             | crate::engine::working_copy::Group::Untracked => None,
         };

@@ -569,22 +569,23 @@ impl WorkingCopyStore {
                     // external `git add`/`rm --cached` between dialog-open
                     // and confirm flips the file's class, and acting on the
                     // stale snapshot would either delete unique content or
-                    // restore something unexpected.
-                    let tracked_now = !engine::run_trimmed(
+                    // restore something unexpected. A probe ERROR is also a
+                    // refusal: tracked-ness was never established, and
+                    // defaulting to "untracked" would make an `ls-files`
+                    // failure resolve into the destructive branch.
+                    let tracked_now = engine::run_trimmed(
                         &worktree,
                         &["ls-files", "--", &format!(":(literal){path}")],
                     )
-                    .unwrap_or_default()
-                    .is_empty();
-                    if tracked_now == untracked_at_confirm {
-                        // The live class contradicts what the user
-                        // confirmed — refuse; the completion refreshes so
-                        // a reopened dialog shows the flipped state.
-                        None
-                    } else if tracked_now {
-                        Some(mutate::discard_unstaged(&worktree, &path))
-                    } else {
-                        Some(mutate::discard_untracked(&worktree, &path))
+                    .ok()
+                    .map(|out| !out.is_empty());
+                    match tracked_now {
+                        // Refuse (completion refreshes so a reopened
+                        // dialog shows the flipped state).
+                        None => None,
+                        Some(t) if t == untracked_at_confirm => None,
+                        Some(true) => Some(mutate::discard_unstaged(&worktree, &path)),
+                        Some(false) => Some(mutate::discard_untracked(&worktree, &path)),
                     }
                 })
                 .await;
@@ -680,8 +681,15 @@ impl WorkingCopyStore {
                         store.message = Some("Committed".into());
                         store.mutated = true;
                     }
-                    Ok(commit::CommitOutcome::AbortedEmpty) => {
-                        store.message = Some("Commit aborted — empty message".into());
+                    Ok(commit::CommitOutcome::AbortedEmpty { draft }) => {
+                        store.message = Some(match draft {
+                            Some(p) => format!(
+                                "Commit aborted — empty message; \
+                                 your draft is preserved at {}",
+                                p.display()
+                            ),
+                            None => "Commit aborted — empty message".into(),
+                        });
                     }
                     Ok(commit::CommitOutcome::Abandoned { draft }) => {
                         store.message = Some(match draft {

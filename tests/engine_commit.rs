@@ -39,7 +39,7 @@ fn editor_arg_substitution_and_colon_noop() {
     // `:` = succeed without launching anything → empty message → abort.
     std::env::set_var("GIT_EDITOR", ":");
     match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt", None) {
-        Ok(commit::CommitOutcome::AbortedEmpty) => {}
+        Ok(commit::CommitOutcome::AbortedEmpty { draft: None }) => {}
         other => panic!("expected AbortedEmpty from colon editor, got {other:?}"),
     }
     std::env::remove_var("GIT_EDITOR");
@@ -119,17 +119,41 @@ fn commit_via_editor_round_trip_and_abort() {
     let subject = common::sh_out(tmp.path(), &["git", "log", "-1", "--format=%s"]);
     assert_eq!(subject, "committed by test");
 
-    // Empty message (editor exits 0 without writing anything) aborts.
+    // Empty message (editor exits 0 without writing anything) aborts; the
+    // file is still template-identical, so nothing is kept.
     std::env::set_var("GIT_EDITOR", EDITOR_OK);
     std::fs::write(tmp.path().join("f.txt"), "three").unwrap();
     common::sh(Some(tmp.path()), &["git", "add", "--", "f.txt"]);
     match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt", None) {
-        Ok(commit::CommitOutcome::AbortedEmpty) => {}
+        Ok(commit::CommitOutcome::AbortedEmpty { draft: None }) => {}
         other => panic!("expected AbortedEmpty, got {other:?}"),
     }
     // Editor failure surfaces as an error.
     std::env::set_var("GIT_EDITOR", EDITOR_FAIL);
     assert!(commit::commit_with_editor(tmp.path(), "1 staged file: f.txt", None).is_err());
+    std::env::remove_var("GIT_EDITOR");
+}
+
+#[test]
+fn commit_via_editor_keeps_a_fully_quoted_draft_on_abort() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    common::fixture_repo(tmp.path());
+
+    // A draft whose every line starts with the comment char strips to an
+    // empty message (abort) — but it is typed work: the raw file must be
+    // preserved and its path surfaced, not deleted.
+    let editor = write_editor_script("# typed thought, quoted");
+    std::env::set_var("GIT_EDITOR", &editor);
+    std::fs::write(tmp.path().join("f.txt"), "four").unwrap();
+    common::sh(Some(tmp.path()), &["git", "add", "--", "f.txt"]);
+    match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt", None) {
+        Ok(commit::CommitOutcome::AbortedEmpty { draft: Some(p) }) => {
+            let kept = std::fs::read_to_string(&p).unwrap();
+            assert!(kept.contains("typed thought"), "kept draft: {kept:?}");
+        }
+        other => panic!("expected AbortedEmpty with a kept draft, got {other:?}"),
+    }
     std::env::remove_var("GIT_EDITOR");
 }
 

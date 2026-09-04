@@ -193,7 +193,13 @@ fn platform_default_editor() -> &'static str {
 #[derive(Debug)]
 pub enum CommitOutcome {
     Committed,
-    AbortedEmpty,
+    /// The editor produced an empty message. `draft` points at the kept
+    /// raw file when the user changed it at all (e.g. every line quoted
+    /// with the comment char) — a file still byte-identical to the
+    /// template holds nothing typed and is dropped.
+    AbortedEmpty {
+        draft: Option<PathBuf>,
+    },
     /// The user abandoned the session: the editor was killed via
     /// `EditorHandle` before committing. `draft` points at saved,
     /// non-comment message content, kept on disk for recovery.
@@ -238,13 +244,13 @@ pub fn commit_with_editor(
     let _ = used_default;
     let (mut file, msg_path) = create_msg_file()?;
     use std::io::Write as _;
-    file.write_all(template(comment_char, staged_summary).as_bytes())
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&msg_path);
-            GitError {
-                message: format!("could not write commit template: {e}"),
-            }
-        })?;
+    let template_text = template(comment_char, staged_summary);
+    file.write_all(template_text.as_bytes()).map_err(|e| {
+        let _ = std::fs::remove_file(&msg_path);
+        GitError {
+            message: format!("could not write commit template: {e}"),
+        }
+    })?;
     drop(file);
 
     // git semantics: an editor spec containing `%s` gets the message file
@@ -322,18 +328,34 @@ pub fn commit_with_editor(
                 ),
             }
         } else {
+            // Any other read error (file deleted by the editor, transient
+            // IO failure) leaves the file — and possibly typed work — on
+            // disk: name it like every other failure path instead of
+            // leaking an unnamed 0600 temp file.
             GitError {
-                message: format!("could not read the commit message file: {e}"),
+                message: format!(
+                    "could not read the commit message file at {} — \
+                     whatever the editor saved is preserved there: {e}",
+                    msg_path.display()
+                ),
             }
         }
     })?;
 
     let message = strip_comments(comment_char, &raw);
     if message.is_empty() {
-        // Abort by empty message: the file holds only template comments —
-        // nothing user-authored to preserve.
-        let _ = std::fs::remove_file(&msg_path);
-        return Ok(CommitOutcome::AbortedEmpty);
+        // An empty stripped message can still hold typed work: a draft
+        // whose every line starts with the comment char (or whitespace)
+        // strips to nothing. Keep the raw file whenever the user changed
+        // it at all; drop a file still byte-identical to the template
+        // (opened and quit with nothing typed).
+        let draft = if raw != template_text {
+            Some(msg_path.clone())
+        } else {
+            let _ = std::fs::remove_file(&msg_path);
+            None
+        };
+        return Ok(CommitOutcome::AbortedEmpty { draft });
     }
     match commit(worktree, &message) {
         Ok(()) => {
