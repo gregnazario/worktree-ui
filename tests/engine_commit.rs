@@ -29,7 +29,7 @@ fn editor_arg_substitution_and_colon_noop() {
     // the first arg after our splitter substitutes it in-place).
     let script = write_subst_editor_script();
     std::env::set_var("GIT_EDITOR", &script);
-    match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt") {
+    match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt", None) {
         Ok(commit::CommitOutcome::Committed) => {}
         other => panic!("expected Committed via %s substitution, got {other:?}"),
     }
@@ -38,7 +38,7 @@ fn editor_arg_substitution_and_colon_noop() {
 
     // `:` = succeed without launching anything → empty message → abort.
     std::env::set_var("GIT_EDITOR", ":");
-    match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt") {
+    match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt", None) {
         Ok(commit::CommitOutcome::AbortedEmpty) => {}
         other => panic!("expected AbortedEmpty from colon editor, got {other:?}"),
     }
@@ -112,7 +112,7 @@ fn commit_via_editor_round_trip_and_abort() {
     std::env::set_var("GIT_EDITOR", &editor);
     std::fs::write(tmp.path().join("f.txt"), "two").unwrap();
     common::sh(Some(tmp.path()), &["git", "add", "--", "f.txt"]);
-    match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt") {
+    match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt", None) {
         Ok(commit::CommitOutcome::Committed) => {}
         other => panic!("expected Committed, got {other:?}"),
     }
@@ -123,13 +123,13 @@ fn commit_via_editor_round_trip_and_abort() {
     std::env::set_var("GIT_EDITOR", EDITOR_OK);
     std::fs::write(tmp.path().join("f.txt"), "three").unwrap();
     common::sh(Some(tmp.path()), &["git", "add", "--", "f.txt"]);
-    match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt") {
+    match commit::commit_with_editor(tmp.path(), "1 staged file: f.txt", None) {
         Ok(commit::CommitOutcome::AbortedEmpty) => {}
         other => panic!("expected AbortedEmpty, got {other:?}"),
     }
     // Editor failure surfaces as an error.
     std::env::set_var("GIT_EDITOR", EDITOR_FAIL);
-    assert!(commit::commit_with_editor(tmp.path(), "1 staged file: f.txt").is_err());
+    assert!(commit::commit_with_editor(tmp.path(), "1 staged file: f.txt", None).is_err());
     std::env::remove_var("GIT_EDITOR");
 }
 

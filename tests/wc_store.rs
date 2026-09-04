@@ -248,3 +248,122 @@ fn staged_summary_lists_files(cx: &mut TestAppContext) {
         assert_eq!(summary, "1 staged file: f.txt");
     });
 }
+
+#[gpui::test]
+fn discard_refuses_when_live_tracked_state_contradicts_the_dialog(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path());
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    // The dialog opened on untracked u.txt; an external `git add` flips it
+    // to tracked before confirm (the store snapshot is not refreshed, so
+    // the dialog's flag no longer describes reality).
+    store.update(cx, |wc, cx| {
+        let pos = wc
+            .rows()
+            .iter()
+            .position(|(g, i)| {
+                *g == Group::Untracked && wc.wc.as_ref().unwrap().entries[*i].path == "u.txt"
+            })
+            .expect("fixture has an untracked u.txt row");
+        wc.select(Some(pos), cx);
+    });
+    cx.run_until_parked();
+    sh(Some(tmp.path()), &["git", "add", "u.txt"]);
+    store.update(cx, |wc, cx| {
+        wc.discard_path(true, "u.txt".to_string(), cx);
+    });
+    cx.run_until_parked();
+    // Refused: the file and its content are untouched, the snapshot was
+    // refreshed to the flipped state, and the user is told to reopen the
+    // dialog — acting on either the stale snapshot or the flipped live
+    // state alone could delete or restore on wrong information.
+    assert!(tmp.path().join("u.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("u.txt")).unwrap(),
+        "new"
+    );
+    store.update(cx, |wc, _cx| {
+        assert!(!wc.take_mutated(), "a refusal is not a mutation");
+        assert!(
+            wc.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("state changed"),
+            "expected the flip refusal, got {:?}",
+            wc.message
+        );
+        let staged = wc.rows().iter().any(|(g, i)| {
+            *g == Group::Staged && wc.wc.as_ref().unwrap().entries[*i].path == "u.txt"
+        });
+        assert!(
+            staged,
+            "snapshot refreshed to the flipped state after refusal"
+        );
+    });
+}
+
+/// The escape hatch is platform-neutral (std `Child::kill`), but a killable
+/// sleeping editor is trivial to script only on unix — the cmd.exe child
+/// tree on Windows would outlive the kill and add nothing to the coverage.
+#[cfg(unix)]
+#[gpui::test]
+fn abandon_commit_kills_a_wedged_editor_and_unwinds(cx: &mut TestAppContext) {
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _env = ENV_LOCK.lock().unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path());
+    let script = tmp.path().join("slow-editor.sh");
+    std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("GIT_EDITOR", &script);
+
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    // Stage the unstaged g.txt so there is something to commit.
+    store.update(cx, |wc, cx| {
+        let pos = wc
+            .rows()
+            .iter()
+            .position(|(g, i)| {
+                *g == Group::Unstaged && wc.wc.as_ref().unwrap().entries[*i].path == "g.txt"
+            })
+            .expect("fixture has an unstaged g.txt row");
+        wc.select(Some(pos), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, cx| wc.toggle_stage(cx));
+    cx.run_until_parked();
+    store.update(cx, |wc, _cx| {
+        // Consume the stage's home-refresh flag so the abandon assertions
+        // below observe the abandon itself, not the earlier stage.
+        assert!(wc.take_mutated());
+    });
+    store.update(cx, |wc, cx| {
+        wc.commit_with_editor(cx);
+        assert!(wc.commit_editor_active(), "editor session is in flight");
+    });
+    // The "editor" is a 30s sleep — wedged from the test's perspective.
+    // Abandon it whether or not the child has spawned yet: the hatch sets a
+    // flag that the wait loop checks before and during its poll ticks.
+    store.update(cx, |wc, cx| wc.abandon_commit(cx));
+    cx.run_until_parked();
+    store.update(cx, |wc, _cx| {
+        assert!(!wc.commit_editor_active(), "session unwound");
+        assert!(
+            wc.message
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("Commit abandoned"),
+            "expected the abandoned notice, got {:?}",
+            wc.message
+        );
+        assert!(!wc.take_mutated(), "an abandoned commit is not a mutation");
+        assert_eq!(wc.staged_count(), 2, "staged set untouched by the abandon");
+    });
+    std::env::remove_var("GIT_EDITOR");
+}

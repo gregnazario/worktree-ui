@@ -463,11 +463,18 @@ impl RootView {
         // commit editor, which can run for minutes. Dropping the store now
         // would orphan it: re-drilling opens a fresh, idle store while the
         // old commit is still pending, re-opening the mutate-under-pending-
-        // commit hole the busy-gating exists to close.
+        // commit hole the busy-gating exists to close. The editor session
+        // has an escape hatch instead of a bare refusal: esc kills the
+        // editor child and unwinds the pending commit, so a wedged or
+        // forgotten editor can never keyboard-lock the view until quit.
         let busy = self.detail.as_ref().is_some_and(|wc| wc.read(cx).mutating);
         if busy {
             if let Some(wc) = &self.detail {
-                wc.update(cx, |store, cx| store.busy_message(cx));
+                if wc.read(cx).commit_editor_active() {
+                    wc.update(cx, |store, cx| store.abandon_commit(cx));
+                } else {
+                    wc.update(cx, |store, cx| store.busy_message(cx));
+                }
             }
             return;
         }
@@ -1521,7 +1528,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn discard_derives_action_from_live_state_not_dialog_snapshot(cx: &mut TestAppContext) {
+    fn discard_refuses_when_live_state_contradicts_the_dialog(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("fixture");
         std::fs::create_dir(&repo).unwrap();
@@ -1546,18 +1553,40 @@ mod tests {
         vcx.simulate_keystrokes("enter"); // confirm discard
         vcx.run_until_parked();
 
-        // The file flipped untracked → tracked while the dialog was open.
-        // The confirm must derive from the LIVE state (tracked → restore
-        // from index), never the snapshot (untracked → delete the file).
+        // The file flipped untracked → tracked while the dialog was open,
+        // which contradicts what the user confirmed. The confirm must
+        // refuse (the completion refreshes the snapshot) rather than act:
+        // acting on either state risks restoring or deleting on stale
+        // information. Either way the file — and its content — survives.
         assert!(
             repo.join("u.txt").exists(),
-            "a file that became tracked mid-dialog must not be deleted"
+            "a refused discard must not touch the file"
         );
         assert_eq!(
             std::fs::read_to_string(repo.join("u.txt")).unwrap(),
             "brand new",
-            "discard restores the index copy for a tracked file"
+            "a refused discard must not modify the file"
         );
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().expect("refusal keeps the detail open");
+            assert!(
+                wc.read(cx)
+                    .message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("state changed"),
+                "expected the flip refusal, got {:?}",
+                wc.read(cx).message
+            );
+            // The post-refusal refresh caught the mid-dialog stage: u.txt is
+            // now a Staged row, so reopening the dialog shows the new state.
+            let store = wc.read(cx);
+            let staged = store.rows().iter().any(|(g, i)| {
+                *g == crate::engine::working_copy::Group::Staged
+                    && store.wc.as_ref().unwrap().entries[*i].path == "u.txt"
+            });
+            assert!(staged, "snapshot refreshed after the refusal");
+        });
     }
 
     #[gpui::test]

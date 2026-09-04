@@ -6,9 +6,99 @@
 use crate::engine::{self, GitError, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Shared handle to the running commit editor's process. The UI keeps a
+/// clone for the length of the editor session: `request_abandon` is the
+/// escape hatch for a wedged or forgotten editor (a `subl -w` tab left
+/// open, an editor blocked on a network mount) — it kills the child so the
+/// pending commit unwinds instead of keyboard-locking the detail view
+/// until the app quits.
+#[derive(Clone, Default)]
+pub struct EditorHandle {
+    child: Arc<Mutex<Option<std::process::Child>>>,
+    abandon: Arc<AtomicBool>,
+}
+
+impl EditorHandle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True once abandon has been requested. The child may not exist yet —
+    /// the waiting side re-checks this flag on every poll tick and kills
+    /// the editor itself if it spawned after the request landed.
+    pub fn abandon_requested(&self) -> bool {
+        self.abandon.load(Ordering::SeqCst)
+    }
+
+    pub fn request_abandon(&self) {
+        self.abandon.store(true, Ordering::SeqCst);
+        // Fast path: the child is already parked in the slot — kill and reap
+        // it here (SIGKILL/TerminateProcess, so the reap is immediate).
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// What became of the launched editor process.
+enum EditorExit {
+    Ok,
+    Failed(std::io::Error),
+    /// Killed via `EditorHandle::request_abandon`.
+    Abandoned,
+}
+
+/// Spawns the editor and waits, keeping the child in the shared slot so the
+/// UI can kill it (see `EditorHandle`). The wait polls `try_wait` instead of
+/// blocking in `wait()`: the slot must stay free for `request_abandon` to
+/// take the child, and the flag must be re-checked every tick to cover an
+/// abandon request that landed before the spawn. 40ms is far below any
+/// human interaction with the editor.
+fn run_editor_process(mut cmd: Command, handle: &EditorHandle) -> EditorExit {
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return EditorExit::Failed(e),
+    };
+    *handle.child.lock().unwrap() = Some(child);
+    loop {
+        if handle.abandon_requested() {
+            if let Some(mut child) = handle.child.lock().unwrap().take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return EditorExit::Abandoned;
+        }
+        let tick = {
+            let mut guard = handle.child.lock().unwrap();
+            // The abandoner takes the child between the flag check and this
+            // lock — a None slot means it is dead either way.
+            guard.as_mut().map(|child| child.try_wait())
+        };
+        match tick {
+            None => return EditorExit::Abandoned,
+            Some(Ok(Some(status))) => {
+                handle.child.lock().unwrap().take();
+                return if status.success() {
+                    EditorExit::Ok
+                } else {
+                    EditorExit::Failed(std::io::Error::other(format!(
+                        "editor exited with {status}"
+                    )))
+                };
+            }
+            Some(Ok(None)) => {}
+            Some(Err(e)) => return EditorExit::Failed(e),
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
 
 /// Creates the commit-message file with EXCLUSIVE creation and (on unix)
 /// owner-only permissions. Both matter in the shared temp dir: `create_new`
@@ -104,9 +194,19 @@ fn platform_default_editor() -> &'static str {
 pub enum CommitOutcome {
     Committed,
     AbortedEmpty,
+    /// The user abandoned the session: the editor was killed via
+    /// `EditorHandle` before committing. `draft` points at saved,
+    /// non-comment message content, kept on disk for recovery.
+    Abandoned {
+        draft: Option<PathBuf>,
+    },
 }
 
-pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<CommitOutcome> {
+pub fn commit_with_editor(
+    worktree: &Path,
+    staged_summary: &str,
+    editor: Option<&EditorHandle>,
+) -> Result<CommitOutcome> {
     let config_editor = engine::run_trimmed(worktree, &["config", "--get", "core.editor"]).ok();
     // git also honors `core.commentChar`; the "auto" mode is approximated
     // with '#' (the common case for messages this short).
@@ -166,75 +266,108 @@ pub fn commit_with_editor(worktree: &Path, staged_summary: &str) -> Result<Commi
         spawn_argv.push(msg_arg.clone());
     }
 
-    let run_result = (|| -> std::io::Result<()> {
-        if argv.len() == 1 && argv[0] == ":" {
-            return Ok(()); // ":" = succeed without launching
-        }
+    let run_result = if argv.len() == 1 && argv[0] == ":" {
+        EditorExit::Ok // ":" = succeed without launching
+    } else {
         let mut cmd = Command::new(&spawn_argv[0]);
         cmd.args(&spawn_argv[1..]).current_dir(worktree);
-        let status = cmd.status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(format!(
-                "editor exited with {status}"
-            )))
+        match editor {
+            Some(handle) => run_editor_process(cmd, handle),
+            None => match cmd.status() {
+                Ok(status) if status.success() => EditorExit::Ok,
+                Ok(status) => EditorExit::Failed(std::io::Error::other(format!(
+                    "editor exited with {status}"
+                ))),
+                Err(e) => EditorExit::Failed(e),
+            },
         }
-    })();
-    let raw = match run_result {
-        Ok(()) => std::fs::read_to_string(&msg_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::InvalidData {
-                // A non-UTF-8 save still holds the user's draft: keep the
-                // file (convertible with iconv) and point at it.
-                GitError {
-                    message: format!(
-                        "the editor saved the message in a non-UTF-8 encoding — \
-                         your draft is preserved at {}: {e}",
-                        msg_path.display()
-                    ),
-                }
-            } else {
-                GitError {
-                    message: format!("could not read the commit message file: {e}"),
-                }
-            }
-        })?,
-        Err(e) => {
+    };
+    match run_result {
+        EditorExit::Ok => {}
+        EditorExit::Failed(e) => {
             // The editor may have SAVED the draft before exiting non-zero:
             // keep the STRIPPED message (comment lines removed) so the
             // recovery command below works verbatim, and tell the user
             // where it is instead of destroying typed work.
-            let stripped = std::fs::read_to_string(&msg_path)
-                .ok()
-                .map(|raw| strip_comments(comment_char, &raw))
-                .filter(|m| !m.is_empty());
-            let hint = match &stripped {
-                Some(m) => {
-                    let _ = std::fs::write(&msg_path, m);
+            let draft = preserve_draft(comment_char, &msg_path);
+            let hint = draft
+                .map(|p| {
                     format!(
                         " — your draft is preserved at {} (recommit with: git commit -F \"{}\")",
-                        msg_path.display(),
-                        msg_path.display()
+                        p.display(),
+                        p.display()
                     )
-                }
-                None => {
-                    let _ = std::fs::remove_file(&msg_path);
-                    String::new()
-                }
-            };
+                })
+                .unwrap_or_default();
             return Err(GitError {
                 message: format!("could not run editor {}{}: {e}", argv.join(" "), hint),
             });
         }
-    };
-    let _ = std::fs::remove_file(&msg_path);
+        EditorExit::Abandoned => {
+            return Ok(CommitOutcome::Abandoned {
+                draft: preserve_draft(comment_char, &msg_path),
+            });
+        }
+    }
+
+    let raw = std::fs::read_to_string(&msg_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            // A non-UTF-8 save still holds the user's draft: keep the
+            // file (convertible with iconv) and point at it.
+            GitError {
+                message: format!(
+                    "the editor saved the message in a non-UTF-8 encoding — \
+                     your draft is preserved at {}: {e}",
+                    msg_path.display()
+                ),
+            }
+        } else {
+            GitError {
+                message: format!("could not read the commit message file: {e}"),
+            }
+        }
+    })?;
 
     let message = strip_comments(comment_char, &raw);
     if message.is_empty() {
+        // Abort by empty message: the file holds only template comments —
+        // nothing user-authored to preserve.
+        let _ = std::fs::remove_file(&msg_path);
         return Ok(CommitOutcome::AbortedEmpty);
     }
-    commit(worktree, &message)?;
-    Ok(CommitOutcome::Committed)
+    match commit(worktree, &message) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&msg_path);
+            Ok(CommitOutcome::Committed)
+        }
+        Err(e) => {
+            // commit() kept its own message file and the error names it;
+            // this editor draft is a byte-for-byte duplicate — remove it so
+            // no stray second copy lingers in the temp dir.
+            let _ = std::fs::remove_file(&msg_path);
+            Err(e)
+        }
+    }
+}
+
+/// After an editor failure or abandon: keep saved, non-comment message
+/// content on disk (the caller surfaces its path) and drop a file that
+/// holds nothing recoverable.
+fn preserve_draft(comment_char: char, msg_path: &Path) -> Option<PathBuf> {
+    let stripped = std::fs::read_to_string(msg_path)
+        .ok()
+        .map(|raw| strip_comments(comment_char, &raw))
+        .filter(|m| !m.is_empty());
+    match stripped {
+        Some(m) => {
+            let _ = std::fs::write(msg_path, m);
+            Some(msg_path.to_path_buf())
+        }
+        None => {
+            let _ = std::fs::remove_file(msg_path);
+            None
+        }
+    }
 }
 
 fn template(comment_char: char, staged_summary: &str) -> String {

@@ -61,6 +61,11 @@ pub struct WorkingCopyStore {
     /// Guards detail (diff/preview) loads, independent of `generation` so
     /// the two load kinds can't cancel each other.
     detail_generation: u64,
+    /// Shared handle to the in-flight commit editor's process; Some only
+    /// while a commit-editor session runs. Powers the escape hatch:
+    /// `abandon_commit` kills a wedged or forgotten editor instead of
+    /// keyboard-locking the detail view until the app quits.
+    editor_handle: Option<commit::EditorHandle>,
 }
 
 impl WorkingCopyStore {
@@ -80,6 +85,7 @@ impl WorkingCopyStore {
             pending_notice: None,
             generation: 0,
             detail_generation: 0,
+            editor_handle: None,
         });
         entity.update(cx, |store, cx| {
             store.refresh(cx);
@@ -329,8 +335,35 @@ impl WorkingCopyStore {
 
     /// Transient "busy" hint, shared by the mutating entry points and the
     /// shell's guards (e.g. refusing to close the detail view mid-commit).
+    /// During a commit-editor session the hint doubles as the discoverability
+    /// for the escape hatch: esc abandons the commit.
     pub fn busy_message(&mut self, cx: &mut Context<Self>) {
-        self.message = Some("Busy — wait for the current operation".into());
+        self.message = Some(if self.editor_handle.is_some() {
+            "Busy — the commit editor is open (esc abandons the commit)".into()
+        } else {
+            "Busy — wait for the current operation".into()
+        });
+        self.note_transient_hint();
+        cx.notify();
+    }
+
+    /// True while a commit-editor session (not just any mutation) is in
+    /// flight — the state in which `esc` abandons rather than refuses.
+    pub fn commit_editor_active(&self) -> bool {
+        self.editor_handle.is_some()
+    }
+
+    /// Escape hatch for a wedged or forgotten commit editor (`subl -w` tab
+    /// left open, editor blocked on a network mount): kill the editor child;
+    /// the session's completion then lands as `Abandoned` and re-arms the
+    /// view. `mutating` stays set until that completion, so the staged index
+    /// can't be mutated between the kill and the bookkeeping.
+    pub fn abandon_commit(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = &self.editor_handle else {
+            return;
+        };
+        handle.request_abandon();
+        self.message = Some("Abandoning commit — closing the editor…".into());
         self.note_transient_hint();
         cx.notify();
     }
@@ -485,10 +518,13 @@ impl WorkingCopyStore {
     }
 
     /// Discards a specific path. `untracked_at_confirm` is what the dialog
-    /// showed the user; the executed action is only allowed when the file's
-    /// live state still agrees with it. A flip between dialog-open and
-    /// confirm (external `git add` / `rm --cached`) is refused with a
-    /// "reopen the dialog" message instead of acting on stale state.
+    /// showed the user; the executed action is derived from a LIVE
+    /// `git ls-files` probe inside the background task, and a file whose
+    /// live class contradicts what was confirmed (an external `git add` /
+    /// `rm --cached` while the dialog sat open) is refused with a "reopen
+    /// the dialog" message instead of acting on the stale snapshot — the
+    /// probe is the single source of truth for both the refusal and the
+    /// restore-vs-delete choice.
     pub fn discard_path(
         &mut self,
         untracked_at_confirm: bool,
@@ -521,34 +557,48 @@ impl WorkingCopyStore {
         if entry.is_dir() {
             return; // no recursive delete in Phase 1
         }
-        // Refuse if the live state flipped vs. what the dialog confirmed
-        // (e.g. an external `git add`/`rm --cached` while it sat open).
-        if entry.untracked != untracked_at_confirm {
-            self.message =
-                Some("That file's state changed — reopen the dialog to try again".into());
-            cx.notify();
-            return;
-        }
         let worktree = self.worktree.clone();
         self.generation += 1;
         self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            // Re-derive tracked-ness from LIVE git state: an external `git
-            // add`/`rm --cached` between dialog-open and confirm flips the
-            // file's class, and acting on the stale snapshot would either
-            // delete unique content or restore something unexpected.
-            let tracked_now =
-                !engine::run_trimmed(&worktree, &["ls-files", "--", &format!(":(literal){path}")])
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    // Re-derive tracked-ness from LIVE git state: an
+                    // external `git add`/`rm --cached` between dialog-open
+                    // and confirm flips the file's class, and acting on the
+                    // stale snapshot would either delete unique content or
+                    // restore something unexpected.
+                    let tracked_now = !engine::run_trimmed(
+                        &worktree,
+                        &["ls-files", "--", &format!(":(literal){path}")],
+                    )
                     .unwrap_or_default()
                     .is_empty();
-            let result = if tracked_now {
-                mutate::discard_unstaged(&worktree, &path)
-            } else {
-                mutate::discard_untracked(&worktree, &path)
-            };
-            this.update(cx, |store, cx| store.after_mutation(result, cx))
-                .ok();
+                    if tracked_now == untracked_at_confirm {
+                        // The live class contradicts what the user
+                        // confirmed — refuse; the completion refreshes so
+                        // a reopened dialog shows the flipped state.
+                        None
+                    } else if tracked_now {
+                        Some(mutate::discard_unstaged(&worktree, &path))
+                    } else {
+                        Some(mutate::discard_untracked(&worktree, &path))
+                    }
+                })
+                .await;
+            this.update(cx, |store, cx| match outcome {
+                Some(result) => store.after_mutation(result, cx),
+                None => {
+                    store.mutating = false;
+                    store.busy_hint = false;
+                    store.message =
+                        Some("That file's state changed — reopen the dialog to try again".into());
+                    store.refresh(cx);
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -580,6 +630,9 @@ impl WorkingCopyStore {
     /// While an operation is in flight (`mutating`), every mutating entry point
     /// below early-returns: a second commit editor, or an index mutation
     /// under the pending commit, would corrupt what the user is committing.
+    /// The one exception is the escape hatch: during an editor session `esc`
+    /// routes to `abandon_commit` (via the shell's close_detail) instead of
+    /// being swallowed.
     pub fn commit_with_editor(&mut self, cx: &mut Context<Self>) {
         if self.mutating {
             self.busy_message(cx);
@@ -600,8 +653,10 @@ impl WorkingCopyStore {
         }
         let summary = staged_summary(&wc);
         let worktree = self.worktree.clone();
+        let editor_handle = commit::EditorHandle::new();
+        self.editor_handle = Some(editor_handle.clone());
         self.mutating = true;
-        self.message = Some("Waiting for commit editor…".into());
+        self.message = Some("Waiting for commit editor — esc abandons the commit".into());
         // Bump to cancel in-flight snapshot loads; the completion below
         // applies regardless of generation (see `after_mutation`).
         self.generation += 1;
@@ -609,10 +664,13 @@ impl WorkingCopyStore {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { commit::commit_with_editor(&worktree, &summary) })
+                .spawn(async move {
+                    commit::commit_with_editor(&worktree, &summary, Some(&editor_handle))
+                })
                 .await;
             this.update(cx, |store, cx| {
                 store.mutating = false;
+                store.editor_handle = None;
                 // A hint raised mid-editor session (e.g. a swallowed `s`)
                 // must not let the follow-up refresh completion erase the
                 // commit outcome below.
@@ -624,6 +682,16 @@ impl WorkingCopyStore {
                     }
                     Ok(commit::CommitOutcome::AbortedEmpty) => {
                         store.message = Some("Commit aborted — empty message".into());
+                    }
+                    Ok(commit::CommitOutcome::Abandoned { draft }) => {
+                        store.message = Some(match draft {
+                            Some(p) => format!(
+                                "Commit abandoned — staged changes kept; \
+                                 your message draft is preserved at {}",
+                                p.display()
+                            ),
+                            None => "Commit abandoned — staged changes kept".into(),
+                        });
                     }
                     Err(e) => {
                         // Append (don't replace): a commit failure carries
