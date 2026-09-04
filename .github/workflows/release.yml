@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
+    # Workflow-only edits should not build every platform's release artifacts.
+    paths-ignore: [".github/**"]
   workflow_dispatch:
 
 concurrency:
