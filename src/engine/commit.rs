@@ -38,11 +38,12 @@ impl EditorHandle {
 
     pub fn request_abandon(&self) {
         self.abandon.store(true, Ordering::SeqCst);
-        // Fast path: the child is already parked in the slot — kill and reap
-        // it here (SIGKILL/TerminateProcess, so the reap is immediate).
-        if let Some(mut child) = self.child.lock().unwrap().take() {
+        // Kill without reaping: the background poll loop reaps on its own
+        // thread (its wait() after the flag fires is off the UI thread).
+        // A blocking wait() here could stall the UI on a wedged process;
+        // SIGKILL itself is immediate.
+        if let Some(child) = self.child.lock().unwrap().as_mut() {
             let _ = child.kill();
-            let _ = child.wait();
         }
     }
 }
@@ -357,6 +358,17 @@ pub fn commit_with_editor(
         };
         return Ok(CommitOutcome::AbortedEmpty { draft });
     }
+    // An abandon request landing after the editor exited but before the
+    // commit started aborts here. Once `git commit` itself is running, the
+    // hatch deliberately does NOT kill it: SIGKILLing git mid-commit (e.g.
+    // under a hung hook) can corrupt refs/index — worse than waiting out a
+    // wedged commit. Quitting the app remains the escape for that corner,
+    // same as Ctrl-C on a hung hook in a terminal.
+    if editor.is_some_and(|h| h.abandon_requested()) {
+        return Ok(CommitOutcome::Abandoned {
+            draft: Some(msg_path.clone()),
+        });
+    }
     match commit(worktree, &message) {
         Ok(()) => {
             let _ = std::fs::remove_file(&msg_path);
@@ -374,21 +386,27 @@ pub fn commit_with_editor(
 
 /// After an editor failure or abandon: keep saved, non-comment message
 /// content on disk (the caller surfaces its path) and drop a file that
-/// holds nothing recoverable.
+/// holds nothing recoverable. An INVALID-UTF-8 save is preserved too —
+/// the read path treats it as a recoverable draft, so the failure/abandon
+/// paths must not destroy it.
 fn preserve_draft(comment_char: char, msg_path: &Path) -> Option<PathBuf> {
-    let stripped = std::fs::read_to_string(msg_path)
-        .ok()
-        .map(|raw| strip_comments(comment_char, &raw))
-        .filter(|m| !m.is_empty());
-    match stripped {
-        Some(m) => {
-            let _ = std::fs::write(msg_path, m);
-            Some(msg_path.to_path_buf())
+    let raw = match std::fs::read_to_string(msg_path) {
+        Ok(raw) => raw,
+        // Non-UTF-8 (or otherwise undecodable) content may still hold
+        // typed work: keep the file and let the caller surface its path.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            return Some(msg_path.to_path_buf())
         }
-        None => {
-            let _ = std::fs::remove_file(msg_path);
-            None
-        }
+        // Nothing (left) on disk to preserve.
+        Err(_) => return None,
+    };
+    let stripped = strip_comments(comment_char, &raw);
+    if stripped.is_empty() {
+        let _ = std::fs::remove_file(msg_path);
+        None
+    } else {
+        let _ = std::fs::write(msg_path, stripped);
+        Some(msg_path.to_path_buf())
     }
 }
 

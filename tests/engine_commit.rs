@@ -213,3 +213,29 @@ fn write_editor_script(message: &str) -> String {
         format!("cmd /c {}", script.display())
     }
 }
+
+/// A non-UTF-8 draft is typed work too: the editor-failure path must keep
+/// the file and name it, matching the read path's treatment of non-UTF-8
+/// saves (unix only — the draft is written with raw byte escapes).
+#[cfg(unix)]
+#[test]
+fn editor_failure_preserves_a_non_utf8_draft() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    common::fixture_repo(tmp.path());
+
+    let script = tempfile::tempdir().unwrap().keep().join("bad.sh");
+    std::fs::write(&script, "#!/bin/sh\nprintf '\\377\\376' > \"$1\"\nexit 1\n").unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("GIT_EDITOR", script.display().to_string());
+
+    std::fs::write(tmp.path().join("f.txt"), "five").unwrap();
+    common::sh(Some(tmp.path()), &["git", "add", "--", "f.txt"]);
+    let err = commit::commit_with_editor(tmp.path(), "1 staged file: f.txt", None).unwrap_err();
+    assert!(
+        err.message.contains("your draft is preserved at"),
+        "non-UTF-8 draft must be preserved and named, got: {err}"
+    );
+    std::env::remove_var("GIT_EDITOR");
+}
