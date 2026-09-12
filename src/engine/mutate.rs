@@ -59,7 +59,7 @@ fn run_chunk(worktree: &Path, prefix: &[&str], chunk: &[String]) -> Result<()> {
 /// simply fails git's preimage check, which callers surface as "stage the
 /// whole file instead". Takes index.lock like every mutation, so no
 /// `--no-optional-locks` here.
-pub fn apply_cached(worktree: &Path, patch: &[u8]) -> Result<()> {
+pub fn apply_cached(worktree: &Path, patch: Vec<u8>) -> Result<()> {
     engine::run_bytes_stdin(
         worktree,
         &["apply", "--cached", "--whitespace=nowarn"],

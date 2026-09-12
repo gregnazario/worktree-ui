@@ -574,6 +574,14 @@ impl RootView {
                     wc.update(cx, |store, cx| store.hunk_next(cx));
                 }
             }
+            // Same capital-normalization as the list pane: shift+s must
+            // stay "stage all" with the diff pane focused, or a user's
+            // muscle memory silently becomes a one-hunk index mutation.
+            "s" if diff_focused && ks.modifiers.shift => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.stage_all(cx));
+                }
+            }
             "s" if diff_focused => {
                 if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| store.stage_hunk(cx));
@@ -1542,6 +1550,38 @@ mod tests {
         vcx.run_until_parked();
         view.update(&mut vcx.cx, |root, _cx| {
             assert!(root.detail.is_none(), "idle detail closes normally");
+        });
+    }
+
+    #[gpui::test]
+    fn diff_pane_shift_s_still_stages_all(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let lines: Vec<String> = (1..=12).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("h.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["git", "add", "h.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "h"]);
+        std::fs::write(repo.join("h.txt"), "changed\n").unwrap();
+        std::fs::write(repo.join("u.txt"), "brand new").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        // Muscle memory: S means stage-ALL on every surface, never a
+        // one-hunk index mutation.
+        vcx.simulate_keystrokes("shift-s");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(
+                wc.staged_count(),
+                2,
+                "shift+s staged the whole working copy from the diff pane"
+            );
         });
     }
 

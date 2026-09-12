@@ -551,3 +551,54 @@ fn stage_hunk_hints_on_ineligible_rows(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// A mode-only change (`chmod +x`) renders a header-only diff: non-binary
+/// with ZERO hunks. The cursor clamp must not underflow (regression:
+/// `n - 1` wrapped to usize::MAX / panicked in debug). Windows ignores
+/// filemode, so the fixture is unix-only.
+#[cfg(unix)]
+#[gpui::test]
+fn zero_hunk_diff_keeps_cursor_clamped_and_hints(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path());
+    std::fs::write(tmp.path().join("m.sh"), "#!/bin/sh\necho hi\n").unwrap();
+    sh(Some(tmp.path()), &["git", "add", "m.sh"]);
+    sh(Some(tmp.path()), &["git", "commit", "-qm", "m"]);
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(
+        tmp.path().join("m.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    store.update(cx, |wc, cx| {
+        let pos = wc
+            .rows()
+            .iter()
+            .position(|(g, i)| {
+                *g == Group::Unstaged && wc.wc.as_ref().unwrap().entries[*i].path == "m.sh"
+            })
+            .expect("mode-only change has an unstaged row");
+        wc.select(Some(pos), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, _cx| {
+        assert_eq!(wc.hunk_count(), Some(0), "header-only diff has no hunks");
+        assert_eq!(wc.hunk_cursor(), 0, "clamp saturates — no underflow");
+    });
+    // `s` in the diff pane explains instead of dying silently.
+    store.update(cx, |wc, cx| {
+        wc.stage_hunk(cx);
+        assert!(
+            wc.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no hunks"),
+            "expected the no-hunks hint, got {:?}",
+            wc.message
+        );
+        assert!(!wc.take_mutated(), "a hint is not a mutation");
+    });
+}

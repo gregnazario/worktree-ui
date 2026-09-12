@@ -530,10 +530,13 @@ impl WorkingCopyStore {
     }
 
     /// Index of the hovered hunk, clamped to the current detail's hunk
-    /// count (0 when there is no diff).
+    /// count (0 when there is no diff). `saturating` because a non-binary
+    /// diff can legitimately have ZERO hunks — a mode-only change or a
+    /// 100%-similarity rename renders header-only — and `n - 1` would
+    /// underflow (panic in debug, usize::MAX in release).
     pub fn hunk_cursor(&self) -> usize {
         self.hunk_count()
-            .map(|n| self.hunk_cursor.min(n - 1))
+            .map(|n| self.hunk_cursor.min(n.saturating_sub(1)))
             .unwrap_or(0)
     }
 
@@ -612,8 +615,14 @@ impl WorkingCopyStore {
                 return;
             }
         }
+        // Not-yet-loaded, failed, or header-only diffs (mode-only change,
+        // pure rename) land here: never a silent no-op — the footer
+        // advertises `s stage hunk`, so a dead key must explain itself.
         let Some(FileDetail::Diff(ud)) = self.detail.as_ref() else {
-            return; // an Unstaged row always has a diff detail once loaded
+            self.message =
+                Some("no hunks in this diff — stage the whole file with s on the file row".into());
+            cx.notify();
+            return;
         };
         if ud.binary {
             self.message = Some("binary file — stage it whole with s".into());
@@ -621,6 +630,10 @@ impl WorkingCopyStore {
             return;
         }
         let Some(hunk) = ud.hunks.get(self.hunk_cursor()) else {
+            // Zero-hunk non-binary diff (mode-only change, pure rename).
+            self.message =
+                Some("no hunks in this diff — stage the whole file with s on the file row".into());
+            cx.notify();
             return;
         };
         let mut patch = ud.header_raw.clone();
@@ -634,7 +647,7 @@ impl WorkingCopyStore {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { mutate::apply_cached(&worktree, &patch) })
+                .spawn(async move { mutate::apply_cached(&worktree, patch) })
                 .await;
             this.update(cx, |store, cx| {
                 store.after_mutation(

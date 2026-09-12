@@ -406,7 +406,7 @@ mod apply_tests {
         // the hovered hunk's byte-exact raw.
         let mut patch = ud.header_raw.clone();
         patch.extend_from_slice(&ud.hunks[0].raw);
-        mutate::apply_cached(tmp.path(), &patch).unwrap();
+        mutate::apply_cached(tmp.path(), patch).unwrap();
 
         // The index holds only the hunk-1 change…
         let staged = diff::diff_staged(tmp.path(), "h.txt").unwrap();
@@ -435,12 +435,12 @@ mod apply_tests {
         let ud = diff::diff_unstaged(tmp.path(), "h.txt").unwrap();
         let mut patch = ud.header_raw.clone();
         patch.extend_from_slice(&ud.hunks[0].raw);
-        mutate::apply_cached(tmp.path(), &patch).unwrap();
+        mutate::apply_cached(tmp.path(), patch.clone()).unwrap();
 
         // The index already contains this hunk: the preimage no longer
         // matches, and git must refuse (the UI surfaces this as "stage the
         // whole file instead") — never a silent success.
-        let err = mutate::apply_cached(tmp.path(), &patch).unwrap_err();
+        let err = mutate::apply_cached(tmp.path(), patch).unwrap_err();
         assert!(
             err.message.contains("does not apply") || err.message.contains("patch failed"),
             "expected git's apply refusal, got: {err}"
@@ -460,7 +460,7 @@ mod apply_tests {
         assert_eq!(ud.hunks.len(), 1);
         let mut patch = ud.header_raw.clone();
         patch.extend_from_slice(&ud.hunks[0].raw);
-        mutate::apply_cached(tmp.path(), &patch).unwrap();
+        mutate::apply_cached(tmp.path(), patch).unwrap();
 
         let staged = diff::diff_staged(tmp.path(), "n.txt").unwrap();
         assert_eq!(staged.hunks.len(), 1);
@@ -475,7 +475,8 @@ mod apply_tests {
         // `git hash-object` of the stdin bytes must equal the hash of a
         // file with identical content — proving stdin reaches git intact.
         let via_stdin =
-            engine::run_bytes_stdin(tmp.path(), &["hash-object", "--stdin"], b"payload").unwrap();
+            engine::run_bytes_stdin(tmp.path(), &["hash-object", "--stdin"], b"payload".to_vec())
+                .unwrap();
         let via_file = engine::run_bytes(tmp.path(), &["hash-object", "p.bin"]).unwrap();
         assert_eq!(via_stdin, via_file, "stdin bytes must reach git verbatim");
     }

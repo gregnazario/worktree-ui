@@ -51,11 +51,12 @@ pub fn run_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
     }
 }
 
-/// Like [`run_bytes`], but `input` goes to the child's stdin. Stdin is
+/// Like [`run_bytes`], but `input` goes to the child's stdin and is
+/// consumed (patches can be multi-MB — no reason to copy). Stdin is
 /// written from a helper thread: git may emit stderr (or exit) while we
-/// are still writing a large patch, and a blocked write on a full pipe
-/// must never deadlock against unread output.
-pub fn run_bytes_stdin(cwd: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+/// are still writing, and a blocked write on a full pipe must never
+/// deadlock against unread output.
+pub fn run_bytes_stdin(cwd: &Path, args: &[&str], input: Vec<u8>) -> Result<Vec<u8>> {
     use std::io::Write as _;
     let mut child = command(cwd, args)
         .stdin(Stdio::piped())
@@ -65,7 +66,6 @@ pub fn run_bytes_stdin(cwd: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8
         })?;
     {
         let mut stdin = child.stdin.take().expect("just configured piped");
-        let input = input.to_vec();
         std::thread::spawn(move || {
             let _ = stdin.write_all(&input); // EPIPE if git exited early — fine
         });
