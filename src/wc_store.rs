@@ -584,6 +584,13 @@ impl WorkingCopyStore {
         self.hunk_cursor.min(self.hunk_bound().saturating_sub(1))
     }
 
+    /// Generation of the currently-loading-or-loaded detail; the view
+    /// watches it to reset the diff pane's scroll position when the
+    /// displayed file changes.
+    pub fn detail_generation(&self) -> u64 {
+        self.detail_generation
+    }
+
     /// True when the hovered-hunk flow is fully live: the selected row is
     /// an unstaged file whose diff is the one actually loaded (not a
     /// selection change still in flight) and at least one hunk renders.
@@ -636,6 +643,11 @@ impl WorkingCopyStore {
     }
 
     pub fn hunk_next(&mut self, cx: &mut Context<Self>) {
+        // Dead on non-unstaged rows and pre-load diffs — the footer
+        // advertises no hunk keys there, and the highlight follows.
+        if !self.hunk_stageable() {
+            return;
+        }
         if self.hunk_cursor + 1 < self.hunk_bound() {
             self.hunk_cursor += 1;
             cx.notify();
@@ -643,6 +655,9 @@ impl WorkingCopyStore {
     }
 
     pub fn hunk_prev(&mut self, cx: &mut Context<Self>) {
+        if !self.hunk_stageable() {
+            return;
+        }
         if self.hunk_cursor > 0 {
             self.hunk_cursor -= 1;
             cx.notify();

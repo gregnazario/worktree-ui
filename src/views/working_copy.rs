@@ -400,6 +400,16 @@ fn render_diff_pane(
         return pane;
     };
     let store = wc.read(cx);
+    // A new detail load (selection change, refresh) invalidates the old
+    // scroll position: without this, a pane left deep-scrolled on a tall
+    // diff opens the next file equally deep-scrolled while the cursor and
+    // its highlight sit on hunk 0 off-screen — `s` would stage content the
+    // user cannot see.
+    let detail_generation = store.detail_generation();
+    if detail_generation != this.diff_scroll_generation {
+        this.diff_scroll_generation = detail_generation;
+        this.diff_scroll.set_offset(gpui::point(px(0.), px(0.)));
+    }
     let Some(detail) = &store.detail else {
         return pane.child(
             div()
@@ -415,8 +425,11 @@ fn render_diff_pane(
         ));
     }
     let transparent = rgba(0x00000000);
-    // The hunk cursor is only visible while the diff pane has focus —
-    // otherwise a stale hover would highlight a hunk the keys can't act on.
+    // The hunk cursor is only visible while the diff pane has focus AND
+    // the hovered-hunk flow is live (unstaged row, current diff loaded) —
+    // otherwise a stale hover would highlight a hunk the keys can't act
+    // on (Staged/preview rows, a selection change still loading).
+    let hunk_stageable = wc.read(cx).hunk_stageable();
     let hovered_hunk = wc.read(cx).hunk_cursor();
     match detail {
         FileDetail::Diff(ud) if ud.binary => pane.child(placeholder("Binary file — not shown")),
@@ -442,12 +455,12 @@ fn render_diff_pane(
             // pane renders (headers before the line cap) — one walk, shared
             // with the cursor/stage clamp, so they can never drift apart.
             // The per-line cap still truncates INSIDE the last hunk.
-            // Each hunk is ONE child of the scroll container, so
+            // Each hunk is ONE stateful child of the scroll container, so
             // `diff_scroll.scroll_to_item(hunk + 1)` (the file-header
             // summary is child 0) maps directly to the hovered hunk.
             for (hi, hunk) in ud.hunks.iter().enumerate().take(wc.read(cx).hunk_bound()) {
-                let hovered = diff_focused && hi == hovered_hunk;
-                let mut block = div().flex().flex_col().child(
+                let hovered = diff_focused && hunk_stageable && hi == hovered_hunk;
+                let mut block = div().id(("hunk-block", hi as u64)).flex().flex_col().child(
                     div()
                         .px_3()
                         .py_0p5()

@@ -85,6 +85,9 @@ pub struct RootView {
     /// tall diff moves the cursor to a hunk that is rendered but scrolled
     /// off-screen, and `s` stages content the user cannot see.
     pub diff_scroll: gpui::ScrollHandle,
+    /// Detail generation the diff pane last saw; a change resets
+    /// `diff_scroll` so a new file never opens deep-scrolled.
+    pub diff_scroll_generation: u64,
 }
 
 fn status_badge(status: &WorktreeStatus) -> (String, gpui::Rgba) {
@@ -173,6 +176,7 @@ impl RootView {
         let detail_list_focus = cx.focus_handle();
         let detail_diff_focus = cx.focus_handle();
         let diff_scroll = gpui::ScrollHandle::new();
+        let diff_scroll_generation = 0u64;
         window.focus(&root_focus);
         let view = cx.new(|_| Self {
             store,
@@ -187,6 +191,7 @@ impl RootView {
             detail_list_focus,
             detail_diff_focus,
             diff_scroll,
+            diff_scroll_generation,
         });
         view.update(cx, |this, cx| {
             // Typing in the search field drives the store filter; the

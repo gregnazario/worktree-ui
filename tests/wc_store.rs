@@ -685,8 +685,12 @@ fn hunk_cursor_never_leaves_the_rendered_range(cx: &mut TestAppContext) {
     assert!(!staged.binary);
     assert!(staged.hunks.len() == 1, "one hunk staged");
     assert!(staged.hunks[0].raw.windows(8).any(|w| w == b"edited 0"));
+    // The truncated hunk's content must not appear anywhere in the index.
     assert!(
-        !String::from_utf8_lossy(&staged.hunks[0].raw).contains("tail edit"),
+        !staged
+            .hunks
+            .iter()
+            .any(|h| String::from_utf8_lossy(&h.raw).contains("tail edit")),
         "the truncated hunk must not be staged"
     );
     assert!(!String::from_utf8_lossy(&staged.hunks[0].raw).contains("line 12000 edited"));
