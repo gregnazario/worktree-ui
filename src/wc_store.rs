@@ -672,7 +672,7 @@ impl WorkingCopyStore {
                 return;
             }
             eng::Group::Untracked | eng::Group::Conflicts => {
-                self.message = Some("no hunks here — stage whole files with s".into());
+                self.message = Some("no hunks here — stage whole files with S".into());
                 self.note_transient_hint();
                 cx.notify();
                 return;
@@ -703,7 +703,7 @@ impl WorkingCopyStore {
             return;
         };
         if ud.binary {
-            self.message = Some("binary file — stage it whole with s".into());
+            self.message = Some("binary file — stage it whole with S".into());
             self.note_transient_hint();
             cx.notify();
             return;

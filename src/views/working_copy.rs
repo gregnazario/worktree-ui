@@ -208,13 +208,18 @@ pub fn render(
                         if diff_focused && hunk_stageable && wc.read(cx).hunk_bound() > 0 {
                             // The position indicator doubles as the render
                             // cap's honesty marker: the cursor never leaves
-                            // the rendered range, and "n/N" shows where the
-                            // bound sits.
+                            // the rendered range, and when truncation hides
+                            // hunks the denominator says "of T" instead of
+                            // implying the bound is the whole file.
                             let bound = wc.read(cx).hunk_bound();
+                            let total = wc.read(cx).hunk_count().unwrap_or(bound);
+                            let range = if total > bound {
+                                format!("hunk {}/{} of {}", wc.read(cx).hunk_cursor() + 1, bound, total)
+                            } else {
+                                format!("hunk {}/{}", wc.read(cx).hunk_cursor() + 1, bound)
+                            };
                             format!(
-                                "hunk {}/{} · ↑↓ hunk · s stage hunk · tab back to files · r refresh · t terminal · esc back",
-                                wc.read(cx).hunk_cursor() + 1,
-                                bound
+                                "{range} · ↑↓ hunk · s stage hunk · tab back to files · r refresh · t terminal · esc back"
                             )
                         } else if diff_focused {
                             // Zero-hunk diff focused (mode-only change,
