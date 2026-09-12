@@ -24,6 +24,12 @@ pub enum FileDetail {
 /// view draws a trailer instead, and an undrawn row must never be
 /// selectable (actions on it would look like a frozen list).
 pub(crate) const MAX_VISIBLE_ROWS: usize = 1000;
+/// Upper bound on diff lines rendered in the detail pane's diff pane.
+/// Also bounds the hunk cursor: a hunk whose header the pane never
+/// renders (5000+ line diffs truncate) must not be stageable — acting on
+/// content the user cannot see is the invisible-action bug
+/// MAX_VISIBLE_ROWS fixed for rows.
+pub(crate) const DIFF_RENDER_CAP: usize = 5000;
 
 pub struct WorkingCopyStore {
     pub worktree: PathBuf,
@@ -327,7 +333,9 @@ impl WorkingCopyStore {
                 // The new diff may have fewer hunks than the one the cursor
                 // was hovering.
                 if let Some(FileDetail::Diff(ud)) = &store.detail {
-                    store.hunk_cursor = store.hunk_cursor.min(ud.hunks.len().saturating_sub(1));
+                    store.hunk_cursor = store
+                        .hunk_cursor
+                        .min(Self::hunk_render_bound(ud).saturating_sub(1));
                 }
                 cx.notify();
             })
@@ -535,9 +543,31 @@ impl WorkingCopyStore {
     /// 100%-similarity rename renders header-only — and `n - 1` would
     /// underflow (panic in debug, usize::MAX in release).
     pub fn hunk_cursor(&self) -> usize {
-        self.hunk_count()
-            .map(|n| self.hunk_cursor.min(n.saturating_sub(1)))
-            .unwrap_or(0)
+        self.hunk_cursor.min(self.hunk_bound().saturating_sub(1))
+    }
+
+    /// Hunks the diff pane can actually render (headers before the line
+    /// cap): the ceiling for the cursor and for `stage_hunk`. Zero-hunk
+    /// non-binary diffs (mode-only change, pure rename) yield 0 — the
+    /// clamp saturates rather than underflowing.
+    pub fn hunk_bound(&self) -> usize {
+        match self.detail.as_ref() {
+            Some(FileDetail::Diff(ud)) if !ud.binary => Self::hunk_render_bound(ud),
+            _ => 0,
+        }
+    }
+
+    fn hunk_render_bound(ud: &diff::UnifiedDiff) -> usize {
+        let mut rendered = 0usize;
+        let mut n = 0usize;
+        for h in &ud.hunks {
+            if rendered >= DIFF_RENDER_CAP {
+                break;
+            }
+            rendered += h.lines.len();
+            n += 1;
+        }
+        n
     }
 
     /// Number of hunks in the currently displayed diff, if any.
@@ -549,11 +579,9 @@ impl WorkingCopyStore {
     }
 
     pub fn hunk_next(&mut self, cx: &mut Context<Self>) {
-        if let Some(n) = self.hunk_count() {
-            if self.hunk_cursor + 1 < n {
-                self.hunk_cursor += 1;
-                cx.notify();
-            }
+        if self.hunk_cursor + 1 < self.hunk_bound() {
+            self.hunk_cursor += 1;
+            cx.notify();
         }
     }
 
@@ -596,9 +624,9 @@ impl WorkingCopyStore {
             cx.notify();
             return;
         }
-        if entry.is_dir() {
-            return;
-        }
+        // No is_dir early return: directory rows are Untracked, and the
+        // group match below explains whole-file staging — a dead key where
+        // the footer advertises `s stage hunk` reads as a freeze.
         match group {
             eng::Group::Unstaged => {}
             eng::Group::Staged => {

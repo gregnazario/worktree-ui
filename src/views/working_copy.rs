@@ -7,15 +7,13 @@ use crate::app::{
 };
 use crate::engine::diff::{self, DiffLineKind};
 use crate::engine::working_copy::Group;
-use crate::wc_store::{FileDetail, Pane};
+use crate::wc_store::{FileDetail, Pane, DIFF_RENDER_CAP};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, rgba, Context, InteractiveElement, IntoElement, MouseButton, ParentElement,
     SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
-/// Caps rendered diff lines in the detail view's diff pane.
-const DIFF_RENDER_CAP: usize = 5000;
 /// Caps the interactive file-list rows: every row is a stateful element,
 /// and monorepo-scale lists would make each keystroke rebuild thousands of
 /// them. Truncated lists show a trailer pointing at the terminal.
@@ -197,7 +195,19 @@ pub fn render(
                 .child(
                     div().text_size(px(11.)).text_color(DIM).child(
                         if wc.read(cx).pane == Pane::Diff {
-                            "↑↓ hunk · s stage hunk · tab back to files · r refresh · t terminal · esc back".to_string()
+                            // The position indicator doubles as the render
+                            // cap's honesty marker: the cursor never leaves
+                            // the rendered range, and "n/N" shows where the
+                            // bound sits.
+                            let bound = wc.read(cx).hunk_bound();
+                            let pos = if bound > 0 {
+                                format!("hunk {}/{} · ", wc.read(cx).hunk_cursor() + 1, bound)
+                            } else {
+                                String::new()
+                            };
+                            format!(
+                                "{pos}↑↓ hunk · s stage hunk · tab back to files · r refresh · t terminal · esc back"
+                            )
                         } else {
                             "↑↓ move · s stage/unstage · S stage all · d discard · c commit · tab pane · r refresh · t terminal · esc back".to_string()
                         },

@@ -550,6 +550,30 @@ fn stage_hunk_hints_on_ineligible_rows(cx: &mut TestAppContext) {
             wc.message
         );
     });
+    // Untracked DIRECTORY row: same whole-file hint — never a silent dead
+    // key (dirs hit the group match, not an early return).
+    std::fs::create_dir(tmp.path().join("newdir")).unwrap();
+    std::fs::write(tmp.path().join("newdir/x.txt"), "x").unwrap();
+    sh(Some(tmp.path()), &["git", "status", "--porcelain=v2"]);
+    store.update(cx, |wc, cx| {
+        wc.refresh(cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, cx| {
+        wc.select(Some(row_of(wc, "newdir/", Group::Untracked)), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, cx| {
+        wc.stage_hunk(cx);
+        assert!(
+            wc.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("whole files"),
+            "expected the whole-file hint for a dir row, got {:?}",
+            wc.message
+        );
+    });
 }
 
 /// A mode-only change (`chmod +x`) renders a header-only diff: non-binary
@@ -601,4 +625,63 @@ fn zero_hunk_diff_keeps_cursor_clamped_and_hints(cx: &mut TestAppContext) {
         );
         assert!(!wc.take_mutated(), "a hint is not a mutation");
     });
+}
+
+/// The cursor and `stage_hunk` are bounded by the RENDERED hunks: a
+/// 5000+ line diff truncates, and staging a hunk whose header the pane
+/// never drew would act on content the user cannot see (the
+/// MAX_VISIBLE_ROWS bug, diff-pane edition).
+#[gpui::test]
+fn hunk_cursor_never_leaves_the_rendered_range(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path());
+    // 12000-line file: rewriting the first 6000 lines makes hunk 1 alone
+    // exceed the 5000-line render cap; the edit at the far end is hunk 2,
+    // permanently past the cap.
+    let mut lines: Vec<String> = (1..=12000).map(|i| format!("line {i}")).collect();
+    std::fs::write(tmp.path().join("big.txt"), lines.join("\n") + "\n").unwrap();
+    sh(Some(tmp.path()), &["git", "add", "big.txt"]);
+    sh(Some(tmp.path()), &["git", "commit", "-qm", "big"]);
+    for (i, l) in lines.iter_mut().enumerate() {
+        if i < 6000 {
+            *l = format!("edited {i}");
+        }
+    }
+    lines[11999] = "line 12000 edited".into();
+    std::fs::write(tmp.path().join("big.txt"), lines.join("\n") + "\n").unwrap();
+
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    store.update(cx, |wc, cx| {
+        let pos = wc
+            .rows()
+            .iter()
+            .position(|(g, i)| {
+                *g == Group::Unstaged && wc.wc.as_ref().unwrap().entries[*i].path == "big.txt"
+            })
+            .expect("unstaged big.txt row");
+        wc.select(Some(pos), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, _cx| {
+        assert_eq!(wc.hunk_count(), Some(2), "git produced two hunks");
+        assert_eq!(wc.hunk_bound(), 1, "only hunk 1 fits under the render cap");
+    });
+    store.update(cx, |wc, cx| {
+        wc.hunk_next(cx);
+        wc.hunk_next(cx);
+        assert_eq!(
+            wc.hunk_cursor(),
+            0,
+            "cursor saturates at the rendered range"
+        );
+        wc.stage_hunk(cx);
+    });
+    cx.run_until_parked();
+    // The staged change comes from the VISIBLE hunk only.
+    let staged = worktree_tool::engine::diff::diff_staged(tmp.path(), "big.txt").unwrap();
+    assert!(!staged.binary);
+    assert!(staged.hunks.len() == 1, "one hunk staged");
+    assert!(staged.hunks[0].raw.windows(8).any(|w| w == b"edited 0"));
+    assert!(!String::from_utf8_lossy(&staged.hunks[0].raw).contains("line 12000 edited"));
 }
