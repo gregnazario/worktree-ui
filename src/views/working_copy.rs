@@ -7,7 +7,7 @@ use crate::app::{
 };
 use crate::engine::diff::{self, DiffLineKind};
 use crate::engine::working_copy::Group;
-use crate::wc_store::{FileDetail, Pane, DIFF_RENDER_CAP};
+use crate::wc_store::{FileDetail, DIFF_RENDER_CAP};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, rgba, Context, InteractiveElement, IntoElement, MouseButton, ParentElement,
@@ -42,6 +42,7 @@ pub fn render(
     let Some(wc) = this.detail.clone() else {
         return div().id("detail-view").into_any_element();
     };
+    let diff_focused = this.detail_diff_focus.is_focused(window);
     let (branch_label, arrows, path) = {
         let store = wc.read(cx);
         let branch = store
@@ -130,7 +131,7 @@ pub fn render(
             load_failed,
             load_error,
         ))
-        .child(render_diff_pane(this, window, cx));
+        .child(render_diff_pane(this, diff_focused, cx));
 
     div()
         .id("detail-view")
@@ -194,7 +195,12 @@ pub fn render(
                 .bg(PANEL)
                 .child(
                     div().text_size(px(11.)).text_color(DIM).child(
-                        if wc.read(cx).pane == Pane::Diff {
+                        // Hints must key off the same signal as key routing
+                        // (window focus), not `store.pane`: a selection made
+                        // by mouse-click flips `pane` back to Files without
+                        // moving focus, and the two would then disagree
+                        // about whether `s` stages a hunk or a file.
+                        if diff_focused {
                             // The position indicator doubles as the render
                             // cap's honesty marker: the cursor never leaves
                             // the rendered range, and "n/N" shows where the
@@ -359,7 +365,7 @@ fn render_file_list(
 /// keep dispatching.
 fn render_diff_pane(
     this: &mut RootView,
-    window: &Window,
+    diff_focused: bool,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let diff_focus = this.detail_diff_focus.clone();
@@ -398,7 +404,6 @@ fn render_diff_pane(
     let transparent = rgba(0x00000000);
     // The hunk cursor is only visible while the diff pane has focus —
     // otherwise a stale hover would highlight a hunk the keys can't act on.
-    let diff_focused = this.detail_diff_focus.is_focused(window);
     let hovered_hunk = wc.read(cx).hunk_cursor();
     match detail {
         FileDetail::Diff(ud) if ud.binary => pane.child(placeholder("Binary file — not shown")),
@@ -420,10 +425,11 @@ fn render_diff_pane(
                             .join("  ·  "),
                     ),
             );
-            for (hi, hunk) in ud.hunks.iter().enumerate() {
-                if rendered >= DIFF_RENDER_CAP {
-                    break;
-                }
+            // `hunk_bound` is the store's authority on how many hunks the
+            // pane renders (headers before the line cap) — one walk, shared
+            // with the cursor/stage clamp, so they can never drift apart.
+            // The per-line cap still truncates INSIDE the last hunk.
+            for (hi, hunk) in ud.hunks.iter().enumerate().take(wc.read(cx).hunk_bound()) {
                 let hovered = diff_focused && hi == hovered_hunk;
                 pane = pane.child(
                     div()

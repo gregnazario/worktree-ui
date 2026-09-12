@@ -739,3 +739,65 @@ fn stage_hunk_refuses_while_the_detail_lags_the_selection(cx: &mut TestAppContex
     let staged = worktree_tool::engine::diff::diff_staged(tmp.path(), "g.txt").unwrap();
     assert_eq!(staged.hunks.len(), 1, "g.txt staged whole (single hunk)");
 }
+
+/// Same file, OTHER surface: selecting the Staged row loads the staged
+/// diff; switching to the same path's Unstaged row in the detail-lag
+/// window must still refuse — a (path, kind) match is required, or the
+/// staged diff's hunks would be applied against the unstaged row's
+/// expectations (pure insertions would duplicate in the index).
+#[gpui::test]
+fn stage_hunk_refuses_when_the_detail_lags_the_surface(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path());
+    two_hunk_file(tmp.path());
+    // Give h.txt BOTH surfaces: stage the two-hunk edit, then edit again.
+    sh(Some(tmp.path()), &["git", "add", "h.txt"]);
+    std::fs::write(tmp.path().join("h.txt"), "first\n\n10th\nline 12 edited\n").unwrap();
+
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    let row_of = |wc: &WorkingCopyStore, group: Group| {
+        wc.rows()
+            .iter()
+            .position(|(g, i)| *g == group && wc.wc.as_ref().unwrap().entries[*i].path == "h.txt")
+            .unwrap_or_else(|| panic!("{group:?} row for h.txt"))
+    };
+    store.update(cx, |wc, cx| {
+        wc.select(Some(row_of(wc, Group::Staged)), cx);
+    });
+    cx.run_until_parked();
+    // Switch to the same path's Unstaged row and press s in the SAME
+    // update: the staged diff is still what `detail` holds.
+    store.update(cx, |wc, cx| {
+        wc.select(Some(row_of(wc, Group::Unstaged)), cx);
+        wc.stage_hunk(cx);
+        assert!(
+            wc.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("loading"),
+            "expected the surface-lag refusal, got {:?}",
+            wc.message
+        );
+        assert!(!wc.take_mutated(), "a refusal is not a mutation");
+    });
+    cx.run_until_parked();
+    // Once the unstaged diff lands, staging works on the right surface.
+    store.update(cx, |wc, cx| {
+        wc.stage_hunk(cx);
+    });
+    cx.run_until_parked();
+    let staged = worktree_tool::engine::diff::diff_staged(tmp.path(), "h.txt").unwrap();
+    let all = staged
+        .hunks
+        .iter()
+        .map(|h| String::from_utf8_lossy(&h.raw).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        all.contains("line 12 edited"),
+        "unstaged hunk staged: {all}"
+    );
+    let unstaged = worktree_tool::engine::diff::diff_unstaged(tmp.path(), "h.txt").unwrap();
+    assert!(unstaged.hunks.is_empty(), "nothing left unstaged");
+}

@@ -77,13 +77,17 @@ pub struct WorkingCopyStore {
     /// hunk the diff shrinks and the cursor naturally points at the next
     /// one. Reset to 0 on selection change.
     hunk_cursor: usize,
-    /// The file `detail` currently describes. Selection changes kick off an
-    /// async detail load, and until it lands `detail` still holds the
-    /// PREVIOUS file's diff — `stage_hunk` must refuse when the two
-    /// disagree, or it would build its patch from file A while the
-    /// eligibility checks passed for file B (git's preimage check cannot
-    /// catch pure-insertion hunks, which would be silently duplicated).
-    detail_path: Option<String>,
+    /// What `detail` currently describes: (path, kind). Selection changes
+    /// kick off an async detail load, and until it lands `detail` still
+    /// holds the PREVIOUS selection's diff — `stage_hunk` must refuse when
+    /// the two disagree, or it would build its patch from stale/wrong
+    /// content: another FILE (git's preimage check cannot catch
+    /// pure-insertion hunks, which would be silently duplicated) or the
+    /// same file's OTHER surface (its staged diff applied against the
+    /// unstaged row's expectations). Post-mutation, the guard deliberately
+    /// still passes — the cursor has advanced past the staged hunk, so the
+    /// remaining hunks of the pre-mutation diff preimage cleanly.
+    detail_of: Option<(String, DetailKind)>,
 }
 
 impl WorkingCopyStore {
@@ -105,7 +109,7 @@ impl WorkingCopyStore {
             detail_generation: 0,
             editor_handle: None,
             hunk_cursor: 0,
-            detail_path: None,
+            detail_of: None,
         });
         entity.update(cx, |store, cx| {
             store.refresh(cx);
@@ -290,7 +294,7 @@ impl WorkingCopyStore {
             // clear and reinstates a detail for a row that's gone.
             self.detail_generation += 1;
             self.detail = None;
-            self.detail_path = None;
+            self.detail_of = None;
             return;
         };
         // Detail loads use their own counter: a selection change must cancel
@@ -306,7 +310,7 @@ impl WorkingCopyStore {
             self.detail = Some(FileDetail::Failed(
                 "non-UTF-8 filename — view it in a terminal".into(),
             ));
-            self.detail_path = Some(entry.path.clone());
+            self.detail_of = Some((entry.path.clone(), DetailKind::Preview));
             cx.notify();
             return;
         }
@@ -341,7 +345,7 @@ impl WorkingCopyStore {
                     Ok(d) => d,
                     Err(e) => FileDetail::Failed(e.message),
                 });
-                store.detail_path = Some(loaded_path);
+                store.detail_of = Some((loaded_path, kind));
                 // The new diff may have fewer hunks than the one the cursor
                 // was hovering.
                 if let Some(FileDetail::Diff(ud)) = &store.detail {
@@ -660,11 +664,13 @@ impl WorkingCopyStore {
         }
         // The detail lags the selection: `select()` only STARTS an async
         // load, and until it lands `self.detail` still describes the
-        // PREVIOUS file. Building the patch from it would stage file A's
-        // hunk under file B's passed checks (git's preimage net cannot
-        // catch pure-insertion hunks — they'd be silently duplicated), so
-        // a mismatch refuses until the new diff arrives.
-        if self.detail_path.as_deref() != Some(entry.path.as_str()) {
+        // PREVIOUS selection — possibly another file, or the same file's
+        // OTHER surface (its staged diff). Building the patch from either
+        // would stage unverified content (git's preimage net cannot catch
+        // pure-insertion hunks — they'd be silently duplicated), so a
+        // mismatch refuses until the new diff arrives.
+        let wanted_kind = DetailKind::Unstaged;
+        if self.detail_of.as_ref() != Some(&(entry.path.clone(), wanted_kind)) {
             self.message = Some("diff is loading — try again".into());
             self.note_transient_hint();
             cx.notify();
@@ -923,6 +929,7 @@ impl WorkingCopyStore {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum DetailKind {
     Staged,
     Unstaged,
