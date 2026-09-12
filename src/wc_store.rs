@@ -77,6 +77,13 @@ pub struct WorkingCopyStore {
     /// hunk the diff shrinks and the cursor naturally points at the next
     /// one. Reset to 0 on selection change.
     hunk_cursor: usize,
+    /// The file `detail` currently describes. Selection changes kick off an
+    /// async detail load, and until it lands `detail` still holds the
+    /// PREVIOUS file's diff — `stage_hunk` must refuse when the two
+    /// disagree, or it would build its patch from file A while the
+    /// eligibility checks passed for file B (git's preimage check cannot
+    /// catch pure-insertion hunks, which would be silently duplicated).
+    detail_path: Option<String>,
 }
 
 impl WorkingCopyStore {
@@ -98,6 +105,7 @@ impl WorkingCopyStore {
             detail_generation: 0,
             editor_handle: None,
             hunk_cursor: 0,
+            detail_path: None,
         });
         entity.update(cx, |store, cx| {
             store.refresh(cx);
@@ -282,6 +290,7 @@ impl WorkingCopyStore {
             // clear and reinstates a detail for a row that's gone.
             self.detail_generation += 1;
             self.detail = None;
+            self.detail_path = None;
             return;
         };
         // Detail loads use their own counter: a selection change must cancel
@@ -297,6 +306,7 @@ impl WorkingCopyStore {
             self.detail = Some(FileDetail::Failed(
                 "non-UTF-8 filename — view it in a terminal".into(),
             ));
+            self.detail_path = Some(entry.path.clone());
             cx.notify();
             return;
         }
@@ -305,6 +315,7 @@ impl WorkingCopyStore {
             eng::Group::Unstaged => DetailKind::Unstaged,
             eng::Group::Conflicts | eng::Group::Untracked => DetailKind::Preview,
         };
+        let loaded_path = path.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -330,6 +341,7 @@ impl WorkingCopyStore {
                     Ok(d) => d,
                     Err(e) => FileDetail::Failed(e.message),
                 });
+                store.detail_path = Some(loaded_path);
                 // The new diff may have fewer hunks than the one the cursor
                 // was hovering.
                 if let Some(FileDetail::Diff(ud)) = &store.detail {
@@ -621,6 +633,7 @@ impl WorkingCopyStore {
                 "filename contains characters git's output lost — stage this one in a terminal"
                     .into(),
             );
+            self.note_transient_hint();
             cx.notify();
             return;
         }
@@ -634,14 +647,28 @@ impl WorkingCopyStore {
                     "hunk staging applies to unstaged changes — select the file's unstaged row"
                         .into(),
                 );
+                self.note_transient_hint();
                 cx.notify();
                 return;
             }
             eng::Group::Untracked | eng::Group::Conflicts => {
                 self.message = Some("no hunks here — stage whole files with s".into());
+                self.note_transient_hint();
                 cx.notify();
                 return;
             }
+        }
+        // The detail lags the selection: `select()` only STARTS an async
+        // load, and until it lands `self.detail` still describes the
+        // PREVIOUS file. Building the patch from it would stage file A's
+        // hunk under file B's passed checks (git's preimage net cannot
+        // catch pure-insertion hunks — they'd be silently duplicated), so
+        // a mismatch refuses until the new diff arrives.
+        if self.detail_path.as_deref() != Some(entry.path.as_str()) {
+            self.message = Some("diff is loading — try again".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
         }
         // Not-yet-loaded, failed, or header-only diffs (mode-only change,
         // pure rename) land here: never a silent no-op — the footer
@@ -649,11 +676,13 @@ impl WorkingCopyStore {
         let Some(FileDetail::Diff(ud)) = self.detail.as_ref() else {
             self.message =
                 Some("no hunks in this diff — stage the whole file with s on the file row".into());
+            self.note_transient_hint();
             cx.notify();
             return;
         };
         if ud.binary {
             self.message = Some("binary file — stage it whole with s".into());
+            self.note_transient_hint();
             cx.notify();
             return;
         }
@@ -661,6 +690,7 @@ impl WorkingCopyStore {
             // Zero-hunk non-binary diff (mode-only change, pure rename).
             self.message =
                 Some("no hunks in this diff — stage the whole file with s on the file row".into());
+            self.note_transient_hint();
             cx.notify();
             return;
         };

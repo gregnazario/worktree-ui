@@ -685,3 +685,57 @@ fn hunk_cursor_never_leaves_the_rendered_range(cx: &mut TestAppContext) {
     assert!(staged.hunks[0].raw.windows(8).any(|w| w == b"edited 0"));
     assert!(!String::from_utf8_lossy(&staged.hunks[0].raw).contains("line 12000 edited"));
 }
+
+/// The detail lags the selection: between `select()` and the async detail
+/// load landing, `detail` still describes the PREVIOUS file. Staging in
+/// that window would apply file A's hunk under file B's passed eligibility
+/// checks — git's preimage check cannot catch pure-insertion hunks. The
+/// mismatch must refuse until the new diff arrives.
+#[gpui::test]
+fn stage_hunk_refuses_while_the_detail_lags_the_selection(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path());
+    two_hunk_file(tmp.path());
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    let row_of = |wc: &WorkingCopyStore, path: &str| {
+        wc.rows()
+            .iter()
+            .position(|(g, i)| {
+                *g == Group::Unstaged && wc.wc.as_ref().unwrap().entries[*i].path == path
+            })
+            .unwrap_or_else(|| panic!("unstaged row for {path}"))
+    };
+    store.update(cx, |wc, cx| {
+        wc.select(Some(row_of(wc, "h.txt")), cx);
+    });
+    cx.run_until_parked();
+    // Select g.txt and press s in the SAME update: h.txt's diff is still
+    // loaded, g.txt's is still in flight.
+    store.update(cx, |wc, cx| {
+        wc.select(Some(row_of(wc, "g.txt")), cx);
+        wc.stage_hunk(cx);
+        assert!(
+            wc.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("loading"),
+            "expected the detail-lag refusal, got {:?}",
+            wc.message
+        );
+        assert!(!wc.take_mutated(), "a refusal is not a mutation");
+    });
+    cx.run_until_parked();
+    // Nothing was staged for either file — no wrong-file hunk landed.
+    let staged = worktree_tool::engine::diff::diff_staged(tmp.path(), "g.txt").unwrap();
+    assert!(staged.hunks.is_empty(), "g.txt must have no staged hunks");
+    let staged_h = worktree_tool::engine::diff::diff_staged(tmp.path(), "h.txt").unwrap();
+    assert!(staged_h.hunks.is_empty(), "h.txt must have no staged hunks");
+    // Once the load lands, staging works normally.
+    store.update(cx, |wc, cx| {
+        wc.stage_hunk(cx);
+    });
+    cx.run_until_parked();
+    let staged = worktree_tool::engine::diff::diff_staged(tmp.path(), "g.txt").unwrap();
+    assert_eq!(staged.hunks.len(), 1, "g.txt staged whole (single hunk)");
+}

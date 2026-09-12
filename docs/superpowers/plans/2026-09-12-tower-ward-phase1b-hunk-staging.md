@@ -46,12 +46,19 @@ release; tag after merge.
   and must take index.lock, like every other mutation.
 - **Cursor, not selection state machine.** `hunk_cursor: usize` on the
   store, clamped at every use and re-clamped when a detail load lands;
-  reset to 0 on selection change. Hunks past the render cap stay
-  reachable (cap is a display bound, like MAX_VISIBLE_ROWS).
+  reset to 0 on selection change. The cursor AND `stage_hunk` are bounded
+  by the hunks the diff pane actually renders (`hunk_bound`): a hunk past
+  the render cap is neither navigable nor stageable — acting on content
+  the user cannot see is the invisible-action bug MAX_VISIBLE_ROWS fixed
+  for rows. The footer shows `hunk i/N` so the bound is visible.
 - **Safety mirrors `discard_path`.** Unsupported entries are refused up
-  front; the patch is cloned from the current detail at keypress time;
-  staleness is handled by git's own preimage check (failure → clean
-  error), not by a live re-probe.
+  front; the patch is cloned from the current detail at keypress time —
+  and only when `detail_path` names the selected row: a selection change
+  starts an async detail load, and until it lands `detail` still describes
+  the PREVIOUS file, which git's preimage check cannot disambiguate (a
+  pure-insertion hunk of the old file would apply silently). Diff-vs-git
+  staleness after that is handled by git's own preimage check (failure →
+  clean error), not by a live re-probe.
 
 ## Tasks
 
