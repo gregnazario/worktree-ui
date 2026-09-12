@@ -34,6 +34,10 @@ pub struct UnifiedDiff {
     /// Everything before the first hunk: `diff --git`, index, `---/+++`,
     /// rename/mode lines (lossy-decoded for display).
     pub header: String,
+    /// Byte-exact header — hunk staging reconstructs `git apply` patches
+    /// as `header_raw` plus selected hunks' `raw`, so it must survive
+    /// paths that are not valid UTF-8.
+    pub header_raw: Vec<u8>,
     pub hunks: Vec<DiffHunk>,
     pub binary: bool,
 }
@@ -104,6 +108,7 @@ pub fn parse_unified_diff(input: &[u8]) -> UnifiedDiff {
         diff.hunks.push(h);
     }
     diff.header = String::from_utf8_lossy(&header).into_owned();
+    diff.header_raw = header;
     diff
 }
 

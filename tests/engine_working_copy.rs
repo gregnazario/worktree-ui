@@ -363,3 +363,120 @@ mod status_tests {
         assert_eq!(parsed[1], ("bin.bin".to_string(), None));
     }
 }
+
+mod apply_tests {
+    use super::common::{fixture_repo, sh};
+    use std::path::Path;
+    use worktree_tool::engine::{self, diff, mutate};
+
+    /// A committed 12-line file edited on line 1 and line 10 — the two
+    /// edits are far enough apart that `git diff -U3` yields two hunks.
+    fn two_hunk_repo(dir: &Path) -> Vec<String> {
+        fixture_repo(dir);
+        let lines: Vec<String> = (1..=12).map(|i| format!("line {i}")).collect();
+        std::fs::write(dir.join("h.txt"), lines.join("\n") + "\n").unwrap();
+        sh(Some(dir), &["git", "add", "h.txt"]);
+        sh(Some(dir), &["git", "commit", "-qm", "h"]);
+        let mut edited = lines.clone();
+        edited[0] = "line 1 edited".into();
+        edited[9] = "line 10 edited".into();
+        std::fs::write(dir.join("h.txt"), edited.join("\n") + "\n").unwrap();
+        lines
+    }
+
+    #[test]
+    fn parse_preserves_header_bytes_verbatim() {
+        let input: &[u8] =
+            b"diff --git a/h.txt b/h.txt\nindex 11aa..22bb 100644\n--- a/h.txt\n+++ b/h.txt\n@@ -1 +1 @@\n-a\n+b\n";
+        let ud = diff::parse_unified_diff(input);
+        let first_hunk = input.iter().position(|b| *b == b'@').unwrap();
+        assert_eq!(ud.header_raw, &input[..first_hunk]);
+        assert_eq!(ud.hunks.len(), 1);
+    }
+
+    #[test]
+    fn apply_cached_stages_only_the_selected_hunk() {
+        let tmp = tempfile::tempdir().unwrap();
+        two_hunk_repo(tmp.path());
+
+        let ud = diff::diff_unstaged(tmp.path(), "h.txt").unwrap();
+        assert_eq!(ud.hunks.len(), 2, "edits on lines 1 and 10 make two hunks");
+
+        // Reconstruct the patch exactly as the app will: header bytes plus
+        // the hovered hunk's byte-exact raw.
+        let mut patch = ud.header_raw.clone();
+        patch.extend_from_slice(&ud.hunks[0].raw);
+        mutate::apply_cached(tmp.path(), &patch).unwrap();
+
+        // The index holds only the hunk-1 change…
+        let staged = diff::diff_staged(tmp.path(), "h.txt").unwrap();
+        assert_eq!(staged.hunks.len(), 1);
+        assert!(staged.hunks[0]
+            .raw
+            .windows(13)
+            .any(|w| w == b"line 1 edited"));
+        // …the remaining change is still unstaged…
+        let unstaged = diff::diff_unstaged(tmp.path(), "h.txt").unwrap();
+        assert_eq!(unstaged.hunks.len(), 1);
+        assert!(unstaged.hunks[0]
+            .raw
+            .windows(14)
+            .any(|w| w == b"line 10 edited"));
+        // …and the worktree file is untouched by `apply --cached`.
+        let on_disk = std::fs::read_to_string(tmp.path().join("h.txt")).unwrap();
+        assert!(on_disk.contains("line 1 edited"));
+        assert!(on_disk.contains("line 10 edited"));
+    }
+
+    #[test]
+    fn stale_patch_fails_cleanly_with_git_stderr() {
+        let tmp = tempfile::tempdir().unwrap();
+        two_hunk_repo(tmp.path());
+        let ud = diff::diff_unstaged(tmp.path(), "h.txt").unwrap();
+        let mut patch = ud.header_raw.clone();
+        patch.extend_from_slice(&ud.hunks[0].raw);
+        mutate::apply_cached(tmp.path(), &patch).unwrap();
+
+        // The index already contains this hunk: the preimage no longer
+        // matches, and git must refuse (the UI surfaces this as "stage the
+        // whole file instead") — never a silent success.
+        let err = mutate::apply_cached(tmp.path(), &patch).unwrap_err();
+        assert!(
+            err.message.contains("does not apply") || err.message.contains("patch failed"),
+            "expected git's apply refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_cached_handles_no_trailing_newline() {
+        let tmp = tempfile::tempdir().unwrap();
+        fixture_repo(tmp.path());
+        std::fs::write(tmp.path().join("n.txt"), "one").unwrap();
+        sh(Some(tmp.path()), &["git", "add", "n.txt"]);
+        sh(Some(tmp.path()), &["git", "commit", "-qm", "n"]);
+        std::fs::write(tmp.path().join("n.txt"), "one!").unwrap();
+
+        let ud = diff::diff_unstaged(tmp.path(), "n.txt").unwrap();
+        assert_eq!(ud.hunks.len(), 1);
+        let mut patch = ud.header_raw.clone();
+        patch.extend_from_slice(&ud.hunks[0].raw);
+        mutate::apply_cached(tmp.path(), &patch).unwrap();
+
+        let staged = diff::diff_staged(tmp.path(), "n.txt").unwrap();
+        assert_eq!(staged.hunks.len(), 1);
+        assert!(staged.hunks[0].raw.windows(4).any(|w| w == b"one!"));
+    }
+
+    #[test]
+    fn run_bytes_stdin_feeds_the_child_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        fixture_repo(tmp.path());
+        std::fs::write(tmp.path().join("p.bin"), b"payload").unwrap();
+        // `git hash-object` of the stdin bytes must equal the hash of a
+        // file with identical content — proving stdin reaches git intact.
+        let via_stdin =
+            engine::run_bytes_stdin(tmp.path(), &["hash-object", "--stdin"], b"payload").unwrap();
+        let via_file = engine::run_bytes(tmp.path(), &["hash-object", "p.bin"]).unwrap();
+        assert_eq!(via_stdin, via_file, "stdin bytes must reach git verbatim");
+    }
+}

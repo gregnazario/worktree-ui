@@ -367,3 +367,187 @@ fn abandon_commit_kills_a_wedged_editor_and_unwinds(cx: &mut TestAppContext) {
     });
     std::env::remove_var("GIT_EDITOR");
 }
+
+/// A committed 12-line file edited on lines 1 and 10 → two unstaged hunks.
+fn two_hunk_file(dir: &std::path::Path) {
+    let lines: Vec<String> = (1..=12).map(|i| format!("line {i}")).collect();
+    std::fs::write(dir.join("h.txt"), lines.join("\n") + "\n").unwrap();
+    sh(Some(dir), &["git", "add", "h.txt"]);
+    sh(Some(dir), &["git", "commit", "-qm", "h"]);
+    let mut edited = lines.clone();
+    edited[0] = "line 1 edited".into();
+    edited[9] = "line 10 edited".into();
+    std::fs::write(dir.join("h.txt"), edited.join("\n") + "\n").unwrap();
+}
+
+#[gpui::test]
+fn stage_hunk_stages_only_the_hovered_hunk(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path());
+    two_hunk_file(tmp.path());
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    // Select the unstaged h.txt row.
+    store.update(cx, |wc, cx| {
+        let pos = wc
+            .rows()
+            .iter()
+            .position(|(g, i)| {
+                *g == Group::Unstaged && wc.wc.as_ref().unwrap().entries[*i].path == "h.txt"
+            })
+            .expect("fixture has an unstaged h.txt row");
+        wc.select(Some(pos), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, _cx| {
+        assert_eq!(wc.hunk_count(), Some(2));
+        assert_eq!(wc.hunk_cursor(), 0, "cursor starts on the first hunk");
+    });
+    // Hover the second hunk, then stage it.
+    store.update(cx, |wc, cx| wc.hunk_next(cx));
+    store.update(cx, |wc, _cx| {
+        assert_eq!(wc.hunk_cursor(), 1);
+    });
+    store.update(cx, |wc, cx| wc.stage_hunk(cx));
+    cx.run_until_parked();
+    store.update(cx, |wc, _cx| {
+        assert!(wc.take_mutated(), "staging a hunk flags the home refresh");
+        // The staged diff now holds exactly the hovered (second) hunk…
+        assert_eq!(wc.hunk_count(), Some(1), "unstaged diff shrank to one hunk");
+        assert_eq!(wc.hunk_cursor(), 0, "cursor clamped to the shrunken diff");
+    });
+    // …and git agrees: the index holds only the line-10 edit.
+    let staged = worktree_tool::engine::diff::diff_staged(tmp.path(), "h.txt").unwrap();
+    assert_eq!(staged.hunks.len(), 1);
+    assert!(staged.hunks[0]
+        .raw
+        .windows(14)
+        .any(|w| w == b"line 10 edited"));
+    // The worktree still holds both edits.
+    let on_disk = std::fs::read_to_string(tmp.path().join("h.txt")).unwrap();
+    assert!(on_disk.contains("line 1 edited"));
+    assert!(on_disk.contains("line 10 edited"));
+}
+
+#[gpui::test]
+fn hunk_cursor_resets_on_selection_change(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path());
+    two_hunk_file(tmp.path());
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    let unstaged_h = |wc: &WorkingCopyStore| {
+        wc.rows()
+            .iter()
+            .position(|(g, i)| {
+                *g == Group::Unstaged && wc.wc.as_ref().unwrap().entries[*i].path == "h.txt"
+            })
+            .expect("unstaged h.txt row")
+    };
+    store.update(cx, |wc, cx| {
+        let pos = unstaged_h(wc);
+        wc.select(Some(pos), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, cx| {
+        wc.hunk_next(cx);
+        wc.hunk_next(cx); // saturates at the last hunk
+        assert_eq!(wc.hunk_cursor(), 1, "next stops at the last hunk");
+        wc.hunk_prev(cx);
+        assert_eq!(wc.hunk_cursor(), 0);
+        wc.hunk_next(cx);
+    });
+    // Selecting a different row (then back) resets the cursor to 0.
+    store.update(cx, |wc, cx| {
+        let other = wc
+            .rows()
+            .iter()
+            .position(|(g, i)| {
+                *g == Group::Unstaged && wc.wc.as_ref().unwrap().entries[*i].path == "g.txt"
+            })
+            .expect("unstaged g.txt row");
+        wc.select(Some(other), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, cx| {
+        assert_eq!(wc.hunk_cursor(), 0, "selection change resets the cursor");
+        let back = unstaged_h(wc);
+        wc.select(Some(back), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, _cx| {
+        assert_eq!(wc.hunk_cursor(), 0);
+    });
+}
+
+#[gpui::test]
+fn stage_hunk_hints_on_ineligible_rows(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path());
+    two_hunk_file(tmp.path());
+    // A modified binary file: unstaged row whose diff is binary. (Committed
+    // BEFORE staging g.txt — a later commit would sweep the staged edit.)
+    std::fs::write(tmp.path().join("b.bin"), [0u8, 1, 2, 3]).unwrap();
+    sh(Some(tmp.path()), &["git", "add", "b.bin"]);
+    sh(Some(tmp.path()), &["git", "commit", "-qm", "b"]);
+    std::fs::write(tmp.path().join("b.bin"), [0u8, 1, 2, 4]).unwrap();
+    // two_hunk_file's commit swept the fixture's staged f.txt, so stage a
+    // fresh edit LAST to keep a Staged row.
+    std::fs::write(tmp.path().join("g.txt"), "staged edit").unwrap();
+    sh(Some(tmp.path()), &["git", "add", "g.txt"]);
+
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    let row_of = |wc: &WorkingCopyStore, path: &str, group: Group| {
+        wc.rows()
+            .iter()
+            .position(|(g, i)| *g == group && wc.wc.as_ref().unwrap().entries[*i].path == path)
+            .unwrap_or_else(|| panic!("{group:?} row for {path}"))
+    };
+    // Staged row: hunk staging only speaks unstaged.
+    store.update(cx, |wc, cx| {
+        wc.select(Some(row_of(wc, "g.txt", Group::Staged)), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, cx| {
+        wc.stage_hunk(cx);
+        assert!(
+            wc.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("unstaged"),
+            "expected the staged-row hint, got {:?}",
+            wc.message
+        );
+    });
+    // Binary diff: whole-file only.
+    store.update(cx, |wc, cx| {
+        wc.select(Some(row_of(wc, "b.bin", Group::Unstaged)), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, cx| {
+        wc.stage_hunk(cx);
+        assert!(
+            wc.message.as_deref().unwrap_or_default().contains("binary"),
+            "expected the binary hint, got {:?}",
+            wc.message
+        );
+        assert!(!wc.take_mutated(), "a hint is not a mutation");
+    });
+    // Untracked row: no hunks, file-level only.
+    store.update(cx, |wc, cx| {
+        wc.select(Some(row_of(wc, "u.txt", Group::Untracked)), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, cx| {
+        wc.stage_hunk(cx);
+        assert!(
+            wc.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("whole files"),
+            "expected the whole-file hint, got {:?}",
+            wc.message
+        );
+    });
+}

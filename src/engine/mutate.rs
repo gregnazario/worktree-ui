@@ -53,6 +53,21 @@ fn run_chunk(worktree: &Path, prefix: &[&str], chunk: &[String]) -> Result<()> {
     engine::run_trimmed(worktree, &refs).map(|_| ())
 }
 
+/// Applies a reconstructed patch — the diff's byte-exact header plus the
+/// selected hunks' `raw` — to the index only. The worktree is never
+/// touched: a stale patch (the index moved since the diff was shown)
+/// simply fails git's preimage check, which callers surface as "stage the
+/// whole file instead". Takes index.lock like every mutation, so no
+/// `--no-optional-locks` here.
+pub fn apply_cached(worktree: &Path, patch: &[u8]) -> Result<()> {
+    engine::run_bytes_stdin(
+        worktree,
+        &["apply", "--cached", "--whitespace=nowarn"],
+        patch,
+    )
+    .map(|_| ())
+}
+
 /// `git add -- <paths>`, batched. Also how a conflict is marked resolved.
 /// An empty slice is a no-op (callers use this for "stage all" with nothing
 /// left).

@@ -66,6 +66,11 @@ pub struct WorkingCopyStore {
     /// `abandon_commit` kills a wedged or forgotten editor instead of
     /// keyboard-locking the detail view until the app quits.
     editor_handle: Option<commit::EditorHandle>,
+    /// Hovered hunk in the diff pane (Phase 1b). A bare index, clamped at
+    /// every use and re-clamped when a detail load lands — after staging a
+    /// hunk the diff shrinks and the cursor naturally points at the next
+    /// one. Reset to 0 on selection change.
+    hunk_cursor: usize,
 }
 
 impl WorkingCopyStore {
@@ -86,6 +91,7 @@ impl WorkingCopyStore {
             generation: 0,
             detail_generation: 0,
             editor_handle: None,
+            hunk_cursor: 0,
         });
         entity.update(cx, |store, cx| {
             store.refresh(cx);
@@ -130,6 +136,7 @@ impl WorkingCopyStore {
         if self.pane == Pane::Diff {
             self.pane = Pane::Files; // selection change returns focus target to files
         }
+        self.hunk_cursor = 0; // a new file's diff starts at its first hunk
         self.load_detail(cx);
         cx.notify();
     }
@@ -317,6 +324,11 @@ impl WorkingCopyStore {
                     Ok(d) => d,
                     Err(e) => FileDetail::Failed(e.message),
                 });
+                // The new diff may have fewer hunks than the one the cursor
+                // was hovering.
+                if let Some(FileDetail::Diff(ud)) = &store.detail {
+                    store.hunk_cursor = store.hunk_cursor.min(ud.hunks.len().saturating_sub(1));
+                }
                 cx.notify();
             })
             .ok();
@@ -513,6 +525,126 @@ impl WorkingCopyStore {
                 .await;
             this.update(cx, |store, cx| store.after_mutation(result, cx))
                 .ok();
+        })
+        .detach();
+    }
+
+    /// Index of the hovered hunk, clamped to the current detail's hunk
+    /// count (0 when there is no diff).
+    pub fn hunk_cursor(&self) -> usize {
+        self.hunk_count()
+            .map(|n| self.hunk_cursor.min(n - 1))
+            .unwrap_or(0)
+    }
+
+    /// Number of hunks in the currently displayed diff, if any.
+    pub fn hunk_count(&self) -> Option<usize> {
+        match self.detail.as_ref() {
+            Some(FileDetail::Diff(ud)) if !ud.binary => Some(ud.hunks.len()),
+            _ => None,
+        }
+    }
+
+    pub fn hunk_next(&mut self, cx: &mut Context<Self>) {
+        if let Some(n) = self.hunk_count() {
+            if self.hunk_cursor + 1 < n {
+                self.hunk_cursor += 1;
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn hunk_prev(&mut self, cx: &mut Context<Self>) {
+        if self.hunk_cursor > 0 {
+            self.hunk_cursor -= 1;
+            cx.notify();
+        }
+    }
+
+    /// `s` with the diff pane focused: stages the hovered hunk. The patch —
+    /// the diff's byte-exact header plus the hovered hunk's `raw` — is
+    /// cloned from the current detail at keypress time and fed to
+    /// `git apply --cached`. A stale patch (the index moved since the diff
+    /// was rendered) fails git's preimage check cleanly: the index and
+    /// worktree are untouched, and the error suggests staging the whole
+    /// file. Binary, untracked, conflict, and non-UTF-8-named rows are
+    /// file-level only.
+    pub fn stage_hunk(&mut self, cx: &mut Context<Self>) {
+        if self.mutating {
+            self.busy_message(cx);
+            return;
+        }
+        if self.wc.is_none() {
+            // A FAILED first load keeps its error visible instead of a
+            // loading hint.
+            if !self.load_failed {
+                self.loading_message(cx);
+            }
+            return;
+        }
+        let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
+            return;
+        };
+        if entry.unsupported {
+            self.message = Some(
+                "filename contains characters git's output lost — stage this one in a terminal"
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        if entry.is_dir() {
+            return;
+        }
+        match group {
+            eng::Group::Unstaged => {}
+            eng::Group::Staged => {
+                self.message = Some(
+                    "hunk staging applies to unstaged changes — select the file's unstaged row"
+                        .into(),
+                );
+                cx.notify();
+                return;
+            }
+            eng::Group::Untracked | eng::Group::Conflicts => {
+                self.message = Some("no hunks here — stage whole files with s".into());
+                cx.notify();
+                return;
+            }
+        }
+        let Some(FileDetail::Diff(ud)) = self.detail.as_ref() else {
+            return; // an Unstaged row always has a diff detail once loaded
+        };
+        if ud.binary {
+            self.message = Some("binary file — stage it whole with s".into());
+            cx.notify();
+            return;
+        }
+        let Some(hunk) = ud.hunks.get(self.hunk_cursor()) else {
+            return;
+        };
+        let mut patch = ud.header_raw.clone();
+        patch.extend_from_slice(&hunk.raw);
+        let worktree = self.worktree.clone();
+        // Bump to cancel in-flight snapshot loads; the mutation completion
+        // below applies regardless of generation (see `after_mutation`).
+        self.generation += 1;
+        self.mutating = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { mutate::apply_cached(&worktree, &patch) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.after_mutation(
+                    result.map_err(|e| engine::GitError {
+                        message: format!("{e} — stage the whole file instead (s on the file row)"),
+                    }),
+                    cx,
+                );
+            })
+            .ok();
         })
         .detach();
     }

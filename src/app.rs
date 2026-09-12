@@ -563,7 +563,22 @@ impl RootView {
                     wc.update(cx, |store, cx| store.commit_with_editor(cx));
                 }
             }
-            // Diff-pane hunk keys ("s" with diff focus) arrive in Phase 1b.
+            // ---- diff pane (hunk staging, Phase 1b) ----
+            "up" if diff_focused => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.hunk_prev(cx));
+                }
+            }
+            "down" if diff_focused => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.hunk_next(cx));
+                }
+            }
+            "s" if diff_focused => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.stage_hunk(cx));
+                }
+            }
             _ => {}
         }
     }
@@ -1528,6 +1543,61 @@ mod tests {
         view.update(&mut vcx.cx, |root, _cx| {
             assert!(root.detail.is_none(), "idle detail closes normally");
         });
+    }
+
+    #[gpui::test]
+    fn diff_pane_hunk_keys_stage_the_hovered_hunk(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        // A committed 12-line file edited on lines 1 and 10 → an unstaged
+        // row with two hunks, plus an untracked file below it.
+        let lines: Vec<String> = (1..=12).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("h.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["git", "add", "h.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "h"]);
+        let mut edited = lines.clone();
+        edited[0] = "line 1 edited".into();
+        edited[9] = "line 10 edited".into();
+        std::fs::write(repo.join("h.txt"), edited.join("\n") + "\n").unwrap();
+        std::fs::write(repo.join("u.txt"), "brand new").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        // Row 0 is the unstaged h.txt. Tab to the diff pane, hover the
+        // second hunk, stage it.
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap();
+            assert_eq!(wc.read(cx).pane, Pane::Diff);
+            assert_eq!(wc.read(cx).hunk_count(), Some(2));
+        });
+        vcx.simulate_keystrokes("down");
+        vcx.simulate_keystrokes("s");
+        vcx.run_until_parked();
+
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(wc.hunk_count(), Some(1), "unstaged diff shrank to one hunk");
+            assert_eq!(wc.hunk_cursor(), 0, "cursor clamped after the stage");
+            assert_eq!(wc.staged_count(), 1, "h.txt gained a Staged row");
+        });
+        // git agrees: the index holds only the line-10 edit; the worktree
+        // still holds both.
+        let out = std::process::Command::new("git")
+            .args(["diff", "--cached", "--no-color", "-U3", "--", "h.txt"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let staged = String::from_utf8_lossy(&out.stdout);
+        assert!(staged.contains("line 10 edited"), "staged: {staged}");
+        assert!(!staged.contains("line 1 edited"), "staged: {staged}");
+        let on_disk = std::fs::read_to_string(repo.join("h.txt")).unwrap();
+        assert!(on_disk.contains("line 1 edited"));
     }
 
     #[gpui::test]

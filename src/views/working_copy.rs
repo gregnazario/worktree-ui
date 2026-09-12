@@ -38,7 +38,7 @@ type FileRow = (Group, usize, bool, char, String, Option<(u64, u64)>);
 /// `on_key_down` and silently killing `detail_keydown` routing.
 pub fn render(
     this: &mut RootView,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let Some(wc) = this.detail.clone() else {
@@ -132,7 +132,7 @@ pub fn render(
             load_failed,
             load_error,
         ))
-        .child(render_diff_pane(this, cx));
+        .child(render_diff_pane(this, window, cx));
 
     div()
         .id("detail-view")
@@ -197,7 +197,7 @@ pub fn render(
                 .child(
                     div().text_size(px(11.)).text_color(DIM).child(
                         if wc.read(cx).pane == Pane::Diff {
-                            "tab back to files · r refresh · t terminal · esc back".to_string()
+                            "↑↓ hunk · s stage hunk · tab back to files · r refresh · t terminal · esc back".to_string()
                         } else {
                             "↑↓ move · s stage/unstage · S stage all · d discard · c commit · tab pane · r refresh · t terminal · esc back".to_string()
                         },
@@ -347,7 +347,11 @@ fn render_file_list(
 /// untracked/conflicted rows, placeholders for binary/missing/failed. Must
 /// keep tracking the diff focus handle so tab routing and `detail_keydown`
 /// keep dispatching.
-fn render_diff_pane(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoElement {
+fn render_diff_pane(
+    this: &mut RootView,
+    window: &Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
     let diff_focus = this.detail_diff_focus.clone();
     let mut pane = div()
         .id("wc-diff")
@@ -382,6 +386,10 @@ fn render_diff_pane(this: &mut RootView, cx: &mut Context<RootView>) -> impl Int
         ));
     }
     let transparent = rgba(0x00000000);
+    // The hunk cursor is only visible while the diff pane has focus —
+    // otherwise a stale hover would highlight a hunk the keys can't act on.
+    let diff_focused = this.detail_diff_focus.is_focused(window);
+    let hovered_hunk = wc.read(cx).hunk_cursor();
     match detail {
         FileDetail::Diff(ud) if ud.binary => pane.child(placeholder("Binary file — not shown")),
         FileDetail::Diff(ud) => {
@@ -402,17 +410,23 @@ fn render_diff_pane(this: &mut RootView, cx: &mut Context<RootView>) -> impl Int
                             .join("  ·  "),
                     ),
             );
-            for hunk in &ud.hunks {
+            for (hi, hunk) in ud.hunks.iter().enumerate() {
                 if rendered >= DIFF_RENDER_CAP {
                     break;
                 }
+                let hovered = diff_focused && hi == hovered_hunk;
                 pane = pane.child(
                     div()
                         .px_3()
                         .py_0p5()
                         .text_size(px(11.))
-                        .text_color(DIM)
-                        .child(hunk.header.clone()),
+                        .text_color(if hovered { ACCENT } else { DIM })
+                        .when(hovered, |h| h.bg(ROW_SELECTED))
+                        .child(if hovered {
+                            format!("▸ {}", hunk.header)
+                        } else {
+                            hunk.header.clone()
+                        }),
                 );
                 for line in &hunk.lines {
                     if rendered >= DIFF_RENDER_CAP {

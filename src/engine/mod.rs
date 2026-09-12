@@ -51,6 +51,35 @@ pub fn run_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
     }
 }
 
+/// Like [`run_bytes`], but `input` goes to the child's stdin. Stdin is
+/// written from a helper thread: git may emit stderr (or exit) while we
+/// are still writing a large patch, and a blocked write on a full pipe
+/// must never deadlock against unread output.
+pub fn run_bytes_stdin(cwd: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Write as _;
+    let mut child = command(cwd, args)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| GitError {
+            message: format!("failed to run git: {e}"),
+        })?;
+    {
+        let mut stdin = child.stdin.take().expect("just configured piped");
+        let input = input.to_vec();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input); // EPIPE if git exited early — fine
+        });
+    }
+    let output = child.wait_with_output().map_err(|e| GitError {
+        message: format!("failed to run git: {e}"),
+    })?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(stderr_error(&output.stderr))
+    }
+}
+
 pub fn run_trimmed(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(run(cwd, args)?.trim_end().to_string())
 }
