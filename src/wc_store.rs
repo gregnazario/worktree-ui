@@ -319,6 +319,15 @@ impl WorkingCopyStore {
             eng::Group::Unstaged => DetailKind::Unstaged,
             eng::Group::Conflicts | eng::Group::Untracked => DetailKind::Preview,
         };
+        // The cached diff is about to be replaced: drop the staging trust
+        // marker NOW, so an `s` landing between the refresh (`r`, or a
+        // mutation's post-completion reload) and the fresh detail refuses
+        // instead of patching from the pre-reload diff — if the index
+        // changed in that window (the usual reason to press `r`), a
+        // pure-insertion hunk with matching context would duplicate.
+        // `detail` itself stays visible: the pane keeps showing the old
+        // diff while the new one loads.
+        self.detail_of = None;
         let loaded_path = path.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -455,9 +464,15 @@ impl WorkingCopyStore {
                 paths.push(orig.clone());
             }
         }
-        // Bump to cancel in-flight snapshot loads; the mutation completion
-        // below applies regardless of generation (see `after_mutation`).
+        // Bump to cancel in-flight snapshot loads — and in-flight DETAIL
+        // loads: one that started before the apply would land after
+        // `after_mutation`'s invalidation with its generation still
+        // current, reinstating a diff computed from the pre-apply index
+        // (and re-recording a matching `detail_of`). The mutation
+        // completion below applies regardless of generation (see
+        // `after_mutation`).
         self.generation += 1;
+        self.detail_generation += 1;
         self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -540,6 +555,7 @@ impl WorkingCopyStore {
                 Some("Conflicts were skipped — resolve them, then stage with s".into());
         }
         self.generation += 1;
+        self.detail_generation += 1;
         self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -703,9 +719,15 @@ impl WorkingCopyStore {
         let mut patch = ud.header_raw.clone();
         patch.extend_from_slice(&hunk.raw);
         let worktree = self.worktree.clone();
-        // Bump to cancel in-flight snapshot loads; the mutation completion
-        // below applies regardless of generation (see `after_mutation`).
+        // Bump to cancel in-flight snapshot loads — and in-flight DETAIL
+        // loads: one that started before the apply would land after
+        // `after_mutation`'s invalidation with its generation still
+        // current, reinstating a diff computed from the pre-apply index
+        // (and re-recording a matching `detail_of`). The mutation
+        // completion below applies regardless of generation (see
+        // `after_mutation`).
         self.generation += 1;
+        self.detail_generation += 1;
         self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -768,6 +790,7 @@ impl WorkingCopyStore {
         }
         let worktree = self.worktree.clone();
         self.generation += 1;
+        self.detail_generation += 1;
         self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -878,6 +901,7 @@ impl WorkingCopyStore {
         // Bump to cancel in-flight snapshot loads; the completion below
         // applies regardless of generation (see `after_mutation`).
         self.generation += 1;
+        self.detail_generation += 1;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
