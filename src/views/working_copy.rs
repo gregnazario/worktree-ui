@@ -43,6 +43,7 @@ pub fn render(
         return div().id("detail-view").into_any_element();
     };
     let diff_focused = this.detail_diff_focus.is_focused(window);
+    let hunk_stageable = matches!(wc.read(cx).selected_row(), Some((Group::Unstaged, _)));
     let (branch_label, arrows, path) = {
         let store = wc.read(cx);
         let branch = store
@@ -199,8 +200,12 @@ pub fn render(
                         // (window focus), not `store.pane`: a selection made
                         // by mouse-click flips `pane` back to Files without
                         // moving focus, and the two would then disagree
-                        // about whether `s` stages a hunk or a file.
-                        if diff_focused && wc.read(cx).hunk_bound() > 0 {
+                        // about whether `s` stages a hunk or a file. A
+                        // zero-hunk diff (mode-only change, binary
+                        // preview, still loading) or a STAGED row's diff
+                        // advertises no `s` at all — the footer never
+                        // offers a key that would only hint.
+                        if diff_focused && hunk_stageable && wc.read(cx).hunk_bound() > 0 {
                             // The position indicator doubles as the render
                             // cap's honesty marker: the cursor never leaves
                             // the rendered range, and "n/N" shows where the
