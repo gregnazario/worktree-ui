@@ -223,14 +223,20 @@ impl WorkingCopyStore {
                         // snap an Unstaged selection onto the Staged row,
                         // or the next `s` unstage/stages the wrong surface.
                         let rows = eng::group_rows(&wc);
+                        // Match (group, path) at ROW level: a path can have
+                        // TWO entries (separate staged + unstaged `1 M`
+                        // records), and resolving the entry first always
+                        // picks the staged record — snapping an unstaged
+                        // selection onto the Staged row on every refresh.
                         let resolve = |group: Option<eng::Group>, path: &str| -> Option<usize> {
-                            let entry = wc.entries.iter().position(|e| e.path == path)?;
                             match group {
                                 Some(g) => rows
                                     .iter()
-                                    .position(|(rg, i)| *i == entry && *rg == g)
-                                    .or_else(|| rows.iter().position(|(_, i)| *i == entry)),
-                                None => rows.iter().position(|(_, i)| *i == entry),
+                                    .position(|(rg, i)| *rg == g && wc.entries[*i].path == path)
+                                    .or_else(|| {
+                                        rows.iter().position(|(_, i)| wc.entries[*i].path == path)
+                                    }),
+                                None => rows.iter().position(|(_, i)| wc.entries[*i].path == path),
                             }
                         };
                         let selected = store
@@ -606,10 +612,13 @@ impl WorkingCopyStore {
     }
 
     fn hunk_render_bound(ud: &diff::UnifiedDiff) -> usize {
+        // Only hunks that fit ENTIRELY under the cap count as rendered:
+        // a hunk whose body truncates mid-way must not be stageable, its
+        // `raw` covers lines the user never saw.
         let mut rendered = 0usize;
         let mut n = 0usize;
         for h in &ud.hunks {
-            if rendered >= DIFF_RENDER_CAP {
+            if rendered + h.lines.len() > DIFF_RENDER_CAP {
                 break;
             }
             rendered += h.lines.len();
@@ -697,7 +706,7 @@ impl WorkingCopyStore {
                 return;
             }
             eng::Group::Untracked => {
-                self.message = Some("no hunks here — stage whole files with S".into());
+                self.message = Some("no hunks here — stage it with s on the file row".into());
                 self.note_transient_hint();
                 cx.notify();
                 return;
@@ -728,13 +737,16 @@ impl WorkingCopyStore {
             return;
         };
         if ud.binary {
-            self.message = Some("binary file — stage it whole with S".into());
+            self.message = Some("binary file — stage it whole with s on the file row".into());
             self.note_transient_hint();
             cx.notify();
             return;
         }
-        let Some(hunk) = ud.hunks.get(self.hunk_cursor()) else {
-            // Zero-hunk non-binary diff (mode-only change, pure rename).
+        let cursor = self.hunk_cursor();
+        let Some(hunk) = ud.hunks.get(cursor).filter(|_| cursor < self.hunk_bound()) else {
+            // Zero-hunk non-binary diff (mode-only change, pure rename), or
+            // every hunk truncated by the render cap: nothing the pane
+            // actually shows is stageable hunk-wise.
             self.message =
                 Some("no hunks in this diff — stage the whole file with s on the file row".into());
             self.note_transient_hint();

@@ -1570,6 +1570,50 @@ mod tests {
     }
 
     #[gpui::test]
+    fn hunk_movement_scrolls_the_hovered_hunk_into_view(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        // Hunk 1 is ~800 diff lines (taller than the viewport); hunk 2 sits
+        // far below it. Both fit the render cap — only SCROLLING puts hunk
+        // 2 on screen.
+        let lines: Vec<String> = (1..=3000).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("t.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["git", "add", "t.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "t"]);
+        let mut edited = lines.clone();
+        for (i, l) in edited.iter_mut().enumerate().take(400) {
+            *l = format!("edited {i}");
+        }
+        edited[2899] = "line 2900 edited".into();
+        std::fs::write(repo.join("t.txt"), edited.join("\n") + "\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(wc.hunk_count(), Some(2));
+            assert_eq!(root.diff_scroll.offset().y, gpui::px(0.), "starts at top");
+        });
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(wc.hunk_cursor(), 1, "cursor on the second hunk");
+            // gpui scrolls DOWN by making the content offset negative.
+            assert!(
+                root.diff_scroll.offset().y < gpui::px(0.),
+                "the pane must scroll the hovered hunk into view, got {:?}",
+                root.diff_scroll.offset()
+            );
+        });
+    }
+
+    #[gpui::test]
     fn diff_pane_shift_s_still_stages_all(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("fixture");

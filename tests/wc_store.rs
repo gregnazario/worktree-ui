@@ -545,7 +545,7 @@ fn stage_hunk_hints_on_ineligible_rows(cx: &mut TestAppContext) {
             wc.message
                 .as_deref()
                 .unwrap_or_default()
-                .contains("whole files"),
+                .contains("file row"),
             "expected the whole-file hint, got {:?}",
             wc.message
         );
@@ -569,7 +569,7 @@ fn stage_hunk_hints_on_ineligible_rows(cx: &mut TestAppContext) {
             wc.message
                 .as_deref()
                 .unwrap_or_default()
-                .contains("whole files"),
+                .contains("file row"),
             "expected the whole-file hint for a dir row, got {:?}",
             wc.message
         );
@@ -635,19 +635,21 @@ fn zero_hunk_diff_keeps_cursor_clamped_and_hints(cx: &mut TestAppContext) {
 fn hunk_cursor_never_leaves_the_rendered_range(cx: &mut TestAppContext) {
     let tmp = tempfile::tempdir().unwrap();
     fixture(tmp.path());
-    // 12000-line file: rewriting the first 6000 lines makes hunk 1 alone
-    // exceed the 5000-line render cap; the edit at the far end is hunk 2,
-    // permanently past the cap.
+    // 12000-line file: rewriting the first 2000 lines makes hunk 1 (~4000
+    // diff lines) fit entirely under the 5000-line cap; the 600-line edit
+    // near the far end is hunk 2 (~1200 diff lines) — cumulatively past
+    // the cap, so the pane truncates BEFORE it.
     let mut lines: Vec<String> = (1..=12000).map(|i| format!("line {i}")).collect();
     std::fs::write(tmp.path().join("big.txt"), lines.join("\n") + "\n").unwrap();
     sh(Some(tmp.path()), &["git", "add", "big.txt"]);
     sh(Some(tmp.path()), &["git", "commit", "-qm", "big"]);
     for (i, l) in lines.iter_mut().enumerate() {
-        if i < 6000 {
+        if i < 2000 {
             *l = format!("edited {i}");
+        } else if (11000..11600).contains(&i) {
+            *l = format!("tail edit {i}");
         }
     }
-    lines[11999] = "line 12000 edited".into();
     std::fs::write(tmp.path().join("big.txt"), lines.join("\n") + "\n").unwrap();
 
     let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
@@ -665,7 +667,7 @@ fn hunk_cursor_never_leaves_the_rendered_range(cx: &mut TestAppContext) {
     cx.run_until_parked();
     store.update(cx, |wc, _cx| {
         assert_eq!(wc.hunk_count(), Some(2), "git produced two hunks");
-        assert_eq!(wc.hunk_bound(), 1, "only hunk 1 fits under the render cap");
+        assert_eq!(wc.hunk_bound(), 1, "hunk 2 exceeds the cumulative cap");
     });
     store.update(cx, |wc, cx| {
         wc.hunk_next(cx);
@@ -683,6 +685,10 @@ fn hunk_cursor_never_leaves_the_rendered_range(cx: &mut TestAppContext) {
     assert!(!staged.binary);
     assert!(staged.hunks.len() == 1, "one hunk staged");
     assert!(staged.hunks[0].raw.windows(8).any(|w| w == b"edited 0"));
+    assert!(
+        !String::from_utf8_lossy(&staged.hunks[0].raw).contains("tail edit"),
+        "the truncated hunk must not be staged"
+    );
     assert!(!String::from_utf8_lossy(&staged.hunks[0].raw).contains("line 12000 edited"));
 }
 
@@ -800,4 +806,40 @@ fn stage_hunk_refuses_when_the_detail_lags_the_surface(cx: &mut TestAppContext) 
     );
     let unstaged = worktree_tool::engine::diff::diff_unstaged(tmp.path(), "h.txt").unwrap();
     assert!(unstaged.hunks.is_empty(), "nothing left unstaged");
+}
+
+/// A file with BOTH a staged and an unstaged record (two `1 M` entries,
+/// same path) must keep an unstaged selection on its Unstaged row across a
+/// refresh. Regression: resolving the ENTRY first always picked the staged
+/// record, snapping the selection onto the Staged row after staging a hunk
+/// — which broke the stage-successive-hunks flow.
+#[gpui::test]
+fn refresh_keeps_an_unstaged_selection_on_a_dual_group_file(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path());
+    std::fs::write(tmp.path().join("f.txt"), "one changed").unwrap();
+    sh(Some(tmp.path()), &["git", "add", "f.txt"]);
+    std::fs::write(tmp.path().join("f.txt"), "one changed again").unwrap();
+
+    let store = cx.update(|cx| WorkingCopyStore::new(tmp.path().to_path_buf(), cx));
+    cx.run_until_parked();
+    let unstaged_f = |wc: &WorkingCopyStore| {
+        wc.rows()
+            .iter()
+            .position(|(g, i)| {
+                *g == Group::Unstaged && wc.wc.as_ref().unwrap().entries[*i].path == "f.txt"
+            })
+            .expect("unstaged f.txt row")
+    };
+    store.update(cx, |wc, cx| {
+        wc.select(Some(unstaged_f(wc)), cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |wc, cx| wc.refresh(cx));
+    cx.run_until_parked();
+    store.update(cx, |wc, _cx| {
+        let (group, entry) = wc.selected_row().expect("selection survived the refresh");
+        assert_eq!(group, Group::Unstaged, "selection must stay unstaged");
+        assert_eq!(entry.path, "f.txt");
+    });
 }
