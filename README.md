@@ -86,9 +86,40 @@ runs), see the [website](https://gregnazario.github.io/worktree-ui/#tutorials).
 | `/` | Focus search |
 | `r` / `cmd-r` | Refresh |
 | `up` / `down` | Move selection |
-| `enter` | Open selection in terminal |
+| `enter` | Open selected worktree's detail view |
+| `t` | Open in terminal |
 | `backspace` / `delete` | Remove selected worktree |
-| `esc` | Clear search / close dialog |
+| `esc` | Clear search / close dialog / back to worktree list |
+
+Detail view (per worktree):
+
+| Key | Action |
+| --- | --- |
+| `up` / `down` | Move file selection |
+| `tab` | Toggle file list ↔ diff pane |
+| `s` | Stage / unstage selected file |
+| `S` | Stage all remaining changes |
+| `d` | Discard selected file's changes (confirmation) |
+| `c` | Commit staged changes via your editor |
+| `t` | Open worktree in terminal |
+| `r` | Refresh working copy |
+| `esc` | Back to worktree list |
+
+## Working Copy
+
+Press `enter` on a worktree to drill into it. Changes are grouped into
+**Conflicts**, **Staged**, **Unstaged**, and **Untracked**; the diff pane
+shows the selected file's unified diff. Stage or unstage with `s` (all at
+once with `S`), and discard a file's unstaged changes or an untracked file
+with `d` — always with a confirmation. Discarding the unstaged part never
+touches staged changes.
+
+Press `c` to write a commit: the app opens your editor exactly like
+`git commit` does, resolving it in git's own order — `$GIT_EDITOR`,
+`core.editor`, `$VISUAL`, `$EDITOR`, then a platform default. Save a
+message to commit; empty the message to abort. Conflicted files show their
+raw content — resolve them in your own editor, then press `s` to mark them
+resolved.
 
 ## Settings
 

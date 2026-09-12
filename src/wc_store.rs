@@ -1,0 +1,757 @@
+//! State for one open worktree's Working Copy view. Operations spawn on the
+//! background executor with a generation counter; stale snapshot completions
+//! are dropped, while mutation completions always apply (the disk effect is
+//! real whenever it lands).
+
+use crate::engine::{self, commit, diff, mutate, working_copy as eng};
+use gpui::{App, AppContext, Context, Entity};
+use std::path::PathBuf;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pane {
+    Files,
+    Diff,
+}
+
+#[derive(Clone, Debug)]
+pub enum FileDetail {
+    Diff(diff::UnifiedDiff),
+    Preview(diff::Preview),
+    Failed(String),
+}
+
+/// Selection and rendering are clamped to this many rows: beyond it the
+/// view draws a trailer instead, and an undrawn row must never be
+/// selectable (actions on it would look like a frozen list).
+pub(crate) const MAX_VISIBLE_ROWS: usize = 1000;
+
+pub struct WorkingCopyStore {
+    pub worktree: PathBuf,
+    pub wc: Option<eng::WorkingCopy>,
+    pub detail: Option<FileDetail>,
+    /// Index into `rows()`.
+    pub selected: Option<usize>,
+    pub pane: Pane,
+    pub author: Option<(String, String)>,
+    /// A mutation (stage/unstage/discard/commit) is in flight. Blocks all
+    /// other mutating entry points, the discard dialog, and closing the
+    /// detail view — never raised by snapshot refreshes, so a refresh can
+    /// neither re-arm keys under a pending commit nor trap the user.
+    pub(crate) mutating: bool,
+    pub message: Option<String>,
+    /// Consumed by the app shell: one successful mutation → one home-list
+    /// refresh.
+    mutated: bool,
+    /// The current `message` is the transient "Busy" hint (set by a
+    /// mutating entry point that was swallowed while busy). Completions
+    /// clear it so the hint never outlives the operation.
+    busy_hint: bool,
+    /// A notice to surface after the next mutation completes (e.g.
+    /// "Conflicts were skipped…") — survives after_mutation's message
+    /// reset, cleared once shown or on the next mutation.
+    pending_notice: Option<String>,
+    /// Guards status/numstat snapshot loads. Bumped by refresh and by
+    /// mutations (a mutation invalidates any in-flight snapshot), but NOT
+    /// by detail loads — changing the selected file must never cancel a
+    /// status refresh, or post-mutation groups go stale.
+    generation: u64,
+    /// True when the FIRST status snapshot failed: the view must show the
+    /// error instead of an eternal "Loading working copy…".
+    pub load_failed: bool,
+    /// Guards detail (diff/preview) loads, independent of `generation` so
+    /// the two load kinds can't cancel each other.
+    detail_generation: u64,
+    /// Shared handle to the in-flight commit editor's process; Some only
+    /// while a commit-editor session runs. Powers the escape hatch:
+    /// `abandon_commit` kills a wedged or forgotten editor instead of
+    /// keyboard-locking the detail view until the app quits.
+    editor_handle: Option<commit::EditorHandle>,
+}
+
+impl WorkingCopyStore {
+    pub fn new(worktree: PathBuf, cx: &mut App) -> Entity<Self> {
+        let entity = cx.new(|_cx| Self {
+            worktree: worktree.clone(),
+            wc: None,
+            detail: None,
+            selected: None,
+            pane: Pane::Files,
+            author: None,
+            mutating: false,
+            message: None,
+            mutated: false,
+            load_failed: false,
+            busy_hint: false,
+            pending_notice: None,
+            generation: 0,
+            detail_generation: 0,
+            editor_handle: None,
+        });
+        entity.update(cx, |store, cx| {
+            store.refresh(cx);
+            store.fetch_author(cx);
+        });
+        entity
+    }
+
+    /// Selection is clamped to the rows the view actually renders: a
+    /// selection on an undrawn row would act invisibly (the list looks
+    /// frozen while s/d target something the user cannot see).
+    pub(crate) fn selectable_len(&self) -> usize {
+        self.rows().len().min(MAX_VISIBLE_ROWS)
+    }
+
+    pub fn rows(&self) -> Vec<(eng::Group, usize)> {
+        self.wc.as_ref().map(eng::group_rows).unwrap_or_default()
+    }
+
+    pub fn selected_row(&self) -> Option<(eng::Group, &eng::FileEntry)> {
+        let idx = self.selected?;
+        let (group, entry_idx) = *self.rows().get(idx)?;
+        Some((
+            group,
+            &self.wc.as_ref().expect("rows implies wc").entries[entry_idx],
+        ))
+    }
+
+    pub fn staged_count(&self) -> usize {
+        self.rows()
+            .iter()
+            .filter(|(g, _)| matches!(g, eng::Group::Staged))
+            .count()
+    }
+
+    pub fn take_mutated(&mut self) -> bool {
+        std::mem::take(&mut self.mutated)
+    }
+
+    pub fn select(&mut self, idx: Option<usize>, cx: &mut Context<Self>) {
+        self.selected = idx.filter(|&i| i < self.selectable_len());
+        if self.pane == Pane::Diff {
+            self.pane = Pane::Files; // selection change returns focus target to files
+        }
+        self.load_detail(cx);
+        cx.notify();
+    }
+
+    pub fn select_next(&mut self, cx: &mut Context<Self>) {
+        let len = self.rows().len();
+        if len == 0 {
+            return;
+        }
+        let len = self.selectable_len();
+        let next = match self.selected {
+            None => 0,
+            Some(s) if s + 1 >= len => s, // list-bounded: stop at the last row
+            Some(s) => s + 1,
+        };
+        self.select(Some(next), cx);
+    }
+
+    pub fn select_prev(&mut self, cx: &mut Context<Self>) {
+        let next = match self.selected {
+            Some(0) | None => 0,
+            Some(s) => s - 1,
+        };
+        self.select(Some(next.min(self.selectable_len().saturating_sub(1))), cx);
+    }
+
+    /// Re-runs status and reloads the selected row's detail. Keeps the
+    /// selection on the same path when it still exists.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.mutating {
+            // A refresh completing mid-mutation would clear the busy hint
+            // while mutating keys stay swallowed — refuse instead; the
+            // mutation's own completion triggers the authoritative refresh.
+            self.busy_message(cx);
+            return;
+        }
+        self.generation += 1;
+        let gen = self.generation;
+        let worktree = self.worktree.clone();
+        let keep_path = self.selected_row().map(|(_, e)| e.path.clone());
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { eng::status(&worktree) })
+                .await;
+            this.update(cx, |store, cx| {
+                if gen != store.generation {
+                    return;
+                }
+                match result {
+                    Ok(wc) => {
+                        if store.busy_hint {
+                            store.busy_hint = false;
+                            store.message = None;
+                        }
+                        // Arrow keys aren't gated by `mutating`, so the user
+                        // can navigate while a refresh is in flight: the
+                        // CURRENT selection wins over the path this refresh
+                        // started with. `keep_path` is only a fallback for
+                        // when the currently selected row vanished. Both
+                        // resolve against the NEW snapshot (path → entry
+                        // index → row index) so stale rows are never
+                        // indexed into fresh entries. A file present in
+                        // BOTH Staged and Unstaged groups resolves against
+                        // its (group, path) pair first — a refresh must not
+                        // snap an Unstaged selection onto the Staged row,
+                        // or the next `s` unstage/stages the wrong surface.
+                        let rows = eng::group_rows(&wc);
+                        let resolve = |group: Option<eng::Group>, path: &str| -> Option<usize> {
+                            let entry = wc.entries.iter().position(|e| e.path == path)?;
+                            match group {
+                                Some(g) => rows
+                                    .iter()
+                                    .position(|(rg, i)| *i == entry && *rg == g)
+                                    .or_else(|| rows.iter().position(|(_, i)| *i == entry)),
+                                None => rows.iter().position(|(_, i)| *i == entry),
+                            }
+                        };
+                        let selected = store
+                            .selected_row()
+                            .map(|(g, e)| resolve(Some(g), e.path.as_str()))
+                            .unwrap_or(None)
+                            .or_else(|| keep_path.as_deref().and_then(|p| resolve(None, p)))
+                            // Clamp to the rendered cap: a selection past
+                            // MAX_VISIBLE_ROWS would act on an undrawn row.
+                            .filter(|&i| i < MAX_VISIBLE_ROWS);
+                        store.load_failed = false;
+                        store.wc = Some(wc);
+                        store.selected = selected.or(if rows.is_empty() { None } else { Some(0) });
+                        store.load_detail(cx);
+                    }
+                    Err(e) => {
+                        // A failed FIRST snapshot must not leave the list
+                        // rendering "Loading…" forever. The message is
+                        // transient: the next successful refresh clears it.
+                        store.load_failed = true;
+                        store.message = Some(if e.is_lock_error() {
+                            "another git process may be using this worktree — retry".into()
+                        } else {
+                            e.message
+                        });
+                        store.busy_hint = true;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// One-shot author lookup. Deliberately does NOT touch the shared
+    /// generation: it starts alongside the initial `refresh`, and bumping
+    /// the counter here would cancel that refresh before its result lands.
+    fn fetch_author(&mut self, cx: &mut Context<Self>) {
+        let worktree = self.worktree.clone();
+        cx.spawn(async move |this, cx| {
+            let author = cx
+                .background_executor()
+                .spawn(async move { commit::author(&worktree) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.author = Some(author);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Loads the right detail view for the selected row: unified diff for
+    /// staged/unstaged rows, working-tree preview for untracked and
+    /// conflicted rows.
+    fn load_detail(&mut self, cx: &mut Context<Self>) {
+        let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
+            // Cancel any in-flight load — otherwise it lands after this
+            // clear and reinstates a detail for a row that's gone.
+            self.detail_generation += 1;
+            self.detail = None;
+            return;
+        };
+        // Detail loads use their own counter: a selection change must cancel
+        // an in-flight diff load, but must NOT cancel a status refresh that
+        // shares the other counter (and vice versa).
+        self.detail_generation += 1;
+        let gen = self.detail_generation;
+        let worktree = self.worktree.clone();
+        let path = entry.path.clone();
+        if entry.unsupported {
+            // The lossy-decoded path can never match a pathspec — don't
+            // run git on it; show why the pane is empty instead.
+            self.detail = Some(FileDetail::Failed(
+                "non-UTF-8 filename — view it in a terminal".into(),
+            ));
+            cx.notify();
+            return;
+        }
+        let kind = match group {
+            eng::Group::Staged => DetailKind::Staged,
+            eng::Group::Unstaged => DetailKind::Unstaged,
+            eng::Group::Conflicts | eng::Group::Untracked => DetailKind::Preview,
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match kind {
+                        DetailKind::Staged => {
+                            diff::diff_staged(&worktree, &path).map(FileDetail::Diff)
+                        }
+                        DetailKind::Unstaged => {
+                            diff::diff_unstaged(&worktree, &path).map(FileDetail::Diff)
+                        }
+                        DetailKind::Preview => {
+                            Ok(FileDetail::Preview(diff::read_preview(&worktree, &path)))
+                        }
+                    }
+                })
+                .await;
+            this.update(cx, |store, cx| {
+                if gen != store.detail_generation {
+                    return;
+                }
+                store.detail = Some(match result {
+                    Ok(d) => d,
+                    Err(e) => FileDetail::Failed(e.message),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Transient hint for keys pressed while the first status snapshot is
+    /// still loading — an accurate alternative to "Busy", since nothing is
+    /// actually running yet.
+    pub fn loading_message(&mut self, cx: &mut Context<Self>) {
+        self.message = Some("Loading working copy…".into());
+        self.busy_hint = true;
+        cx.notify();
+    }
+
+    /// Transient "busy" hint, shared by the mutating entry points and the
+    /// shell's guards (e.g. refusing to close the detail view mid-commit).
+    /// During a commit-editor session the hint doubles as the discoverability
+    /// for the escape hatch: esc abandons the commit.
+    pub fn busy_message(&mut self, cx: &mut Context<Self>) {
+        self.message = Some(if self.editor_handle.is_some() {
+            "Busy — the commit editor is open (esc abandons the commit)".into()
+        } else {
+            "Busy — wait for the current operation".into()
+        });
+        self.note_transient_hint();
+        cx.notify();
+    }
+
+    /// True while a commit-editor session (not just any mutation) is in
+    /// flight — the state in which `esc` abandons rather than refuses.
+    pub fn commit_editor_active(&self) -> bool {
+        self.editor_handle.is_some()
+    }
+
+    /// Escape hatch for a wedged or forgotten commit editor (`subl -w` tab
+    /// left open, editor blocked on a network mount): kill the editor child;
+    /// the session's completion then lands as `Abandoned` and re-arms the
+    /// view. `mutating` stays set until that completion, so the staged index
+    /// can't be mutated between the kill and the bookkeeping.
+    pub fn abandon_commit(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = &self.editor_handle else {
+            return;
+        };
+        handle.request_abandon();
+        self.message = Some("Abandoning commit — closing the editor…".into());
+        self.note_transient_hint();
+        cx.notify();
+    }
+
+    /// Marks the current `message` as a transient hint (a later refresh
+    /// completion clears it). Shell-facing callers that set custom text
+    /// use this to keep the clear-on-refresh behavior.
+    pub fn note_transient_hint(&mut self) {
+        self.busy_hint = true;
+    }
+
+    /// `s` on a row: stage unstaged/untracked/conflict rows, unstage staged
+    /// rows. Conflicts: staging marks them resolved.
+    pub fn toggle_stage(&mut self, cx: &mut Context<Self>) {
+        if self.mutating {
+            self.busy_message(cx);
+            return;
+        }
+        if self.wc.is_none() {
+            // A FAILED first load is a permanent error, not a transient
+            // state — the list pane is already showing it; don't overwrite
+            // it with a "Loading" hint.
+            if !self.load_failed {
+                self.loading_message(cx);
+            }
+            return;
+        }
+        let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
+            return;
+        };
+        if entry.unsupported {
+            self.message = Some(
+                "filename contains characters git's output lost — stage this one in a terminal"
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        let worktree = self.worktree.clone();
+        // Path lists are built per DIRECTION inside the match:
+        // - Unstaging a staged RENAME (`2 R`) must reset BOTH paths —
+        //   resetting only the new path leaves the old path's deletion
+        //   staged. A staged COPY (`2 C`) is different: the source path is
+        //   an independent entry with its own staged changes, and must NOT
+        //   be reset along with the copy.
+        // - STAGING must NOT include `orig_path`: on a `2 RM` record (rename
+        //   staged, new path edited again) the old path no longer exists, so
+        //   `git add -- new :old` would abort the whole stage.
+        let unstage = matches!(group, eng::Group::Staged);
+        let mut paths = vec![entry.path.clone()];
+        if unstage && entry.index_status == 'R' {
+            if let Some(orig) = &entry.orig_path {
+                paths.push(orig.clone());
+            }
+        }
+        // Bump to cancel in-flight snapshot loads; the mutation completion
+        // below applies regardless of generation (see `after_mutation`).
+        self.generation += 1;
+        self.mutating = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if unstage {
+                        mutate::unstage(&worktree, &paths)
+                    } else {
+                        mutate::stage(&worktree, &paths)
+                    }
+                })
+                .await;
+            this.update(cx, |store, cx| {
+                store.after_mutation(result, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn stage_all(&mut self, cx: &mut Context<Self>) {
+        if self.mutating {
+            self.busy_message(cx);
+            return;
+        }
+        // A failed first load keeps its error visible instead of a loading
+        // hint (and can never stage anyway — there is no snapshot).
+        if self.wc.is_none() {
+            if !self.load_failed {
+                self.loading_message(cx);
+            }
+            return;
+        }
+        let worktree = self.worktree.clone();
+        // Lossy-decoded names can't be matched by a pathspec; including one
+        // would abort the whole `git add` (a chunk may already have
+        // applied), so they're skipped — the rows are visibly marked
+        // "(non-UTF-8 name — unsupported)". Conflicts are also skipped:
+        // they need resolution, not blind staging — say so instead of
+        // letting `S` be a silent no-op.
+        let mut skipped_conflicts = 0usize;
+        let paths: Vec<String> = self
+            .rows()
+            .into_iter()
+            .filter(|(g, i)| {
+                let e = &self.wc.as_ref().unwrap().entries[*i];
+                match g {
+                    eng::Group::Conflicts => {
+                        skipped_conflicts += 1;
+                        false
+                    }
+                    eng::Group::Staged => false,
+                    _ => !e.unsupported,
+                }
+            })
+            .filter_map(|(_, i)| {
+                self.wc.as_ref().and_then(|wc| {
+                    let e = &wc.entries[i];
+                    (!e.unsupported).then(|| e.path.clone())
+                })
+            })
+            .collect();
+        // Nothing stageable (clean tree, everything already staged, or a
+        // conflicts-only tree): say so instead of running a no-op mutation.
+        if paths.is_empty() {
+            self.message = Some(if skipped_conflicts > 0 {
+                "Conflicts must be resolved before they can be staged".into()
+            } else {
+                "Nothing to stage".into()
+            });
+            cx.notify();
+            return;
+        }
+        // Proceeding with conflicts still skipped (mixed tree): hold the
+        // notice so it survives after_mutation's reset and shows once the
+        // staging completes.
+        if skipped_conflicts > 0 {
+            self.pending_notice =
+                Some("Conflicts were skipped — resolve them, then stage with s".into());
+        }
+        self.generation += 1;
+        self.mutating = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { mutate::stage(&worktree, &paths) })
+                .await;
+            this.update(cx, |store, cx| store.after_mutation(result, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Discards a specific path. `untracked_at_confirm` is what the dialog
+    /// showed the user; the executed action is derived from a LIVE
+    /// `git ls-files` probe inside the background task, and a file whose
+    /// live class contradicts what was confirmed (an external `git add` /
+    /// `rm --cached` while the dialog sat open) is refused with a "reopen
+    /// the dialog" message instead of acting on the stale snapshot — the
+    /// probe is the single source of truth for both the refusal and the
+    /// restore-vs-delete choice.
+    pub fn discard_path(
+        &mut self,
+        untracked_at_confirm: bool,
+        path: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mutating {
+            self.busy_message(cx);
+            return;
+        }
+        let Some(entry) = self
+            .wc
+            .as_ref()
+            .and_then(|wc| wc.entries.iter().find(|e| e.path == path))
+            .cloned()
+        else {
+            self.message =
+                Some("That file is no longer in the working copy — reopen the dialog".into());
+            cx.notify();
+            return;
+        };
+        if entry.unsupported {
+            self.message = Some(
+                "filename contains characters git's output lost — discard this one in a terminal"
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        if entry.is_dir() {
+            return; // no recursive delete in Phase 1
+        }
+        let worktree = self.worktree.clone();
+        self.generation += 1;
+        self.mutating = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    // Re-derive tracked-ness from LIVE git state: an
+                    // external `git add`/`rm --cached` between dialog-open
+                    // and confirm flips the file's class, and acting on the
+                    // stale snapshot would either delete unique content or
+                    // restore something unexpected. A probe ERROR is also a
+                    // refusal: tracked-ness was never established, and
+                    // defaulting to "untracked" would make an `ls-files`
+                    // failure resolve into the destructive branch.
+                    let tracked_now = engine::run_trimmed(
+                        &worktree,
+                        &["ls-files", "--", &format!(":(literal){path}")],
+                    )
+                    .ok()
+                    .map(|out| !out.is_empty());
+                    match tracked_now {
+                        // Refuse (completion refreshes so a reopened
+                        // dialog shows the flipped state).
+                        None => None,
+                        Some(t) if t == untracked_at_confirm => None,
+                        Some(true) => Some(mutate::discard_unstaged(&worktree, &path)),
+                        Some(false) => Some(mutate::discard_untracked(&worktree, &path)),
+                    }
+                })
+                .await;
+            this.update(cx, |store, cx| match outcome {
+                Some(result) => store.after_mutation(result, cx),
+                None => {
+                    store.mutating = false;
+                    store.busy_hint = false;
+                    store.message =
+                        Some("That file's state changed — reopen the dialog to try again".into());
+                    store.refresh(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn after_mutation(&mut self, result: engine::Result<()>, cx: &mut Context<Self>) {
+        // Mutation completions deliberately skip the generation guard: the
+        // disk effect is real whenever it lands; only snapshots are guarded.
+        self.mutating = false;
+        self.busy_hint = false;
+        match result {
+            Ok(()) => {
+                // Surface a pending notice (e.g. skipped conflicts) instead
+                // of clearing; the mutation still counts for the home list.
+                self.message = self.pending_notice.take();
+                self.mutated = true;
+            }
+            Err(e) => {
+                self.pending_notice = None;
+                self.message = Some(if e.is_lock_error() {
+                    "another git process may be using this worktree — retry".into()
+                } else {
+                    e.message
+                });
+            }
+        }
+        self.refresh(cx);
+    }
+
+    /// While an operation is in flight (`mutating`), every mutating entry point
+    /// below early-returns: a second commit editor, or an index mutation
+    /// under the pending commit, would corrupt what the user is committing.
+    /// The one exception is the escape hatch: during an editor session `esc`
+    /// routes to `abandon_commit` (via the shell's close_detail) instead of
+    /// being swallowed.
+    pub fn commit_with_editor(&mut self, cx: &mut Context<Self>) {
+        if self.mutating {
+            self.busy_message(cx);
+            return;
+        }
+        let Some(wc) = self.wc.clone() else {
+            // First snapshot still loading: `c` would be a silent no-op.
+            // (A FAILED load keeps its error visible instead.)
+            if !self.load_failed {
+                self.loading_message(cx);
+            }
+            return;
+        };
+        if self.staged_count() == 0 {
+            self.message = Some("Nothing staged — press s on files to stage them first".into());
+            cx.notify();
+            return;
+        }
+        let summary = staged_summary(&wc);
+        let worktree = self.worktree.clone();
+        let editor_handle = commit::EditorHandle::new();
+        self.editor_handle = Some(editor_handle.clone());
+        self.mutating = true;
+        self.message = Some("Waiting for commit editor — esc abandons the commit".into());
+        // Bump to cancel in-flight snapshot loads; the completion below
+        // applies regardless of generation (see `after_mutation`).
+        self.generation += 1;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    commit::commit_with_editor(&worktree, &summary, Some(&editor_handle))
+                })
+                .await;
+            this.update(cx, |store, cx| {
+                store.mutating = false;
+                store.editor_handle = None;
+                // A hint raised mid-editor session (e.g. a swallowed `s`)
+                // must not let the follow-up refresh completion erase the
+                // commit outcome below.
+                store.busy_hint = false;
+                match result {
+                    Ok(commit::CommitOutcome::Committed) => {
+                        store.message = Some("Committed".into());
+                        store.mutated = true;
+                    }
+                    Ok(commit::CommitOutcome::AbortedEmpty { draft }) => {
+                        store.message = Some(match draft {
+                            Some(p) => format!(
+                                "Commit aborted — empty message; \
+                                 your draft is preserved at {}",
+                                p.display()
+                            ),
+                            None => "Commit aborted — empty message".into(),
+                        });
+                    }
+                    Ok(commit::CommitOutcome::Abandoned { draft }) => {
+                        store.message = Some(match draft {
+                            Some(p) => format!(
+                                "Commit abandoned — staged changes kept; \
+                                 your message draft is preserved at {}",
+                                p.display()
+                            ),
+                            None => "Commit abandoned — staged changes kept".into(),
+                        });
+                    }
+                    Err(e) => {
+                        // Append (don't replace): a commit failure carries
+                        // the preserved-message path that must reach the
+                        // user even when this is also a lock error.
+                        store.message = Some(if e.is_lock_error() {
+                            format!("{e} — another git process may be using this worktree; retry")
+                        } else {
+                            e.message
+                        })
+                    }
+                }
+                store.refresh(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+enum DetailKind {
+    Staged,
+    Unstaged,
+    Preview,
+}
+
+/// "2 staged files: a.txt, b.txt" (names capped at 8, then "…").
+pub fn staged_summary(wc: &eng::WorkingCopy) -> String {
+    let mut names: Vec<String> = eng::group_rows(wc)
+        .into_iter()
+        .filter(|(g, _)| matches!(g, eng::Group::Staged))
+        .map(|(_, i)| wc.entries[i].path.clone())
+        .collect();
+    names.dedup();
+    let count = names.len();
+    if names.len() > 8 {
+        names.truncate(8);
+        names.push("…".to_string());
+    }
+    let plural = if count == 1 { "file" } else { "files" };
+    // Paths are interpolated into a comment-prefixed template line: a
+    // newline inside a name would smuggle the following template content
+    // into the committed message. Quote such names git-style instead.
+    let quoted: Vec<String> = names
+        .iter()
+        .map(|n| {
+            if n.contains('\n') || n.contains('\r') {
+                format!("{n:?}")
+            } else {
+                n.clone()
+            }
+        })
+        .collect();
+    format!("{count} staged {plural}: {}", quoted.join(", "))
+}

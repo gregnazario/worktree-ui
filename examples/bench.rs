@@ -126,6 +126,46 @@ fn bench_git_layer(repo: &Path, label: &str) {
     );
 }
 
+fn bench_working_copy(repo: &Path) {
+    // 2000 untracked files in one directory: exercises the untracked-dir
+    // collapse in the status parse.
+    let changes = repo.join("bench-changes");
+    std::fs::create_dir_all(&changes).unwrap();
+    for i in 0..2000u32 {
+        std::fs::write(changes.join(format!("f{i:04}.txt")), format!("content {i}")).unwrap();
+    }
+    // 200 tracked files, committed then modified: gives the single-file
+    // diff something real to chew on (untracked files never appear in
+    // `git diff`).
+    let tracked = repo.join("bench-tracked");
+    std::fs::create_dir_all(&tracked).unwrap();
+    for i in 0..200u32 {
+        std::fs::write(
+            tracked.join(format!("t{i:03}.txt")),
+            format!("original {i}"),
+        )
+        .unwrap();
+    }
+    sh(repo, &["git", "add", "--", "bench-tracked"]);
+    sh(repo, &["git", "commit", "-qm", "bench tracked files"]);
+    std::fs::write(tracked.join("t000.txt"), "original 0\nmodified line\n").unwrap();
+
+    use worktree_tool::engine::{diff, working_copy};
+    let t = Instant::now();
+    let wc = working_copy::status(repo).expect("status");
+    let status_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let t = Instant::now();
+    let d = diff::diff_unstaged(repo, "bench-tracked/t000.txt").expect("diff");
+    let diff_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let hunks: usize = d.hunks.iter().map(|h| h.lines.len()).sum();
+    println!(
+        "working copy: status = {status_ms:7.1} ms ({} entries), single-file diff = {diff_ms:5.1} ms ({} diff lines)",
+        wc.entries.len(),
+        hunks
+    );
+    assert!(hunks > 0, "bench diff must measure a real diff");
+}
+
 fn main() {
     println!("== parsers ==");
     bench_parser(10);
@@ -156,4 +196,7 @@ fn main() {
         " 50 worktrees full refresh: {:.1} ms",
         t.elapsed().as_secs_f64() * 1000.0
     );
+
+    println!("== working copy ==");
+    bench_working_copy(&repo20);
 }

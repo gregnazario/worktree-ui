@@ -1,49 +1,18 @@
+use crate::engine;
 use crate::model::{
     parse_status_porcelain_v2, parse_worktree_porcelain, WorktreeEntry, WorktreeStatus,
 };
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-#[derive(Debug)]
-pub struct GitError {
-    pub message: String,
-}
-
-impl std::fmt::Display for GitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
+pub use crate::engine::GitError;
 pub type Result<T> = std::result::Result<T, GitError>;
 
-/// Runs `git` with the given args, returning trimmed stdout. On failure the
-/// error carries git's last stderr line.
-///
-/// Blocking on purpose: these calls run on GPUI background executor threads,
-/// which keeps the UI responsive without any async-runtime plumbing.
+/// Line-oriented runner (trims trailing whitespace). `-z` callers must use
+/// `engine::run` instead, which preserves NUL records byte-exact.
 pub fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<String> {
-    let mut cmd = Command::new("git");
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    let output = cmd.output().map_err(|e| GitError {
-        message: format!("failed to run git: {e}"),
-    })?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let last = stderr.trim().lines().last().unwrap_or("git failed");
-        Err(GitError {
-            message: last.to_string(),
-        })
+    match cwd {
+        Some(dir) => engine::run_trimmed(dir, args),
+        None => engine::run_trimmed(Path::new("."), args),
     }
 }
 
