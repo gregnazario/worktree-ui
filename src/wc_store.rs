@@ -84,9 +84,9 @@ pub struct WorkingCopyStore {
     /// content: another FILE (git's preimage check cannot catch
     /// pure-insertion hunks, which would be silently duplicated) or the
     /// same file's OTHER surface (its staged diff applied against the
-    /// unstaged row's expectations). Post-mutation, the guard deliberately
-    /// still passes — the cursor has advanced past the staged hunk, so the
-    /// remaining hunks of the pre-mutation diff preimage cleanly.
+    /// unstaged row's expectations). A successful mutation clears this
+    /// (see `after_mutation`), so post-mutation `s` also waits for the
+    /// fresh diff instead of re-reading a pre-mutation one.
     detail_of: Option<(String, DetailKind)>,
 }
 
@@ -820,6 +820,14 @@ impl WorkingCopyStore {
         self.busy_hint = false;
         match result {
             Ok(()) => {
+                // The index just changed: every cached diff is stale, and
+                // `stage_hunk`'s (path, kind) guard would happily re-apply
+                // a pre-mutation hunk from it. Invalidate so the next `s`
+                // waits for the fresh post-mutation diff (the refresh below
+                // reloads it); the pane shows its loading placeholder for
+                // the sub-second reload.
+                self.detail = None;
+                self.detail_of = None;
                 // Surface a pending notice (e.g. skipped conflicts) instead
                 // of clearing; the mutation still counts for the home list.
                 self.message = self.pending_notice.take();
@@ -887,6 +895,11 @@ impl WorkingCopyStore {
                 store.busy_hint = false;
                 match result {
                     Ok(commit::CommitOutcome::Committed) => {
+                        // The index changed (staged content is now history):
+                        // cached diffs are stale until the refresh below
+                        // reloads them.
+                        store.detail = None;
+                        store.detail_of = None;
                         store.message = Some("Committed".into());
                         store.mutated = true;
                     }

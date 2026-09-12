@@ -200,20 +200,23 @@ pub fn render(
                         // by mouse-click flips `pane` back to Files without
                         // moving focus, and the two would then disagree
                         // about whether `s` stages a hunk or a file.
-                        if diff_focused {
+                        if diff_focused && wc.read(cx).hunk_bound() > 0 {
                             // The position indicator doubles as the render
                             // cap's honesty marker: the cursor never leaves
                             // the rendered range, and "n/N" shows where the
                             // bound sits.
                             let bound = wc.read(cx).hunk_bound();
-                            let pos = if bound > 0 {
-                                format!("hunk {}/{} · ", wc.read(cx).hunk_cursor() + 1, bound)
-                            } else {
-                                String::new()
-                            };
                             format!(
-                                "{pos}↑↓ hunk · s stage hunk · tab back to files · r refresh · t terminal · esc back"
+                                "hunk {}/{} · ↑↓ hunk · s stage hunk · tab back to files · r refresh · t terminal · esc back",
+                                wc.read(cx).hunk_cursor() + 1,
+                                bound
                             )
+                        } else if diff_focused {
+                            // Zero-hunk diff focused (mode-only change,
+                            // loading, failed): neither the hunk keys nor
+                            // the file-list `s` apply here — the footer
+                            // never advertises a key that would only hint.
+                            "tab back to files · r refresh · t terminal · esc back".to_string()
                         } else {
                             "↑↓ move · s stage/unstage · S stage all · d discard · c commit · tab pane · r refresh · t terminal · esc back".to_string()
                         },
