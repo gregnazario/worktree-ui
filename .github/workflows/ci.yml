@@ -20,7 +20,7 @@ jobs:
         os: [macos-15, ubuntu-24.04, windows-2025]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -44,7 +44,7 @@ jobs:
     name: freebsd-14
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
@@ -62,7 +62,7 @@ jobs:
     name: docs sanity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Local asset references exist
         run: |
           python3 - <<'PY'

@@ -198,9 +198,10 @@ cargo build --release        # first build takes a few minutes
         Your existing checkout is untouched.</p></div></div>
     <div class="step"><div class="n">4</div><div>
       <p><strong>Jump into it.</strong> Select the row and press
-        <kbd>enter</kbd> — a terminal opens with that worktree as its working
-        directory. <em>Copy Path</em> and <em>Show in Finder</em> are one
-        click away in the detail pane.</p></div></div>
+        <kbd>enter</kbd> — the detail view opens with the status of the
+        working tree and its diff. Press <kbd>t</kbd> (or the toolbar
+        button) to open a terminal with that worktree as its working
+        directory.</p></div></div>
     <div class="step"><div class="n">5</div><div>
       <p><strong>Clean up.</strong> Merged the branch? Select the worktree and
         press <kbd>backspace</kbd>. If it has uncommitted changes the dialog
@@ -232,7 +233,7 @@ terminal = "iterm"</code></pre>
       <tr><td><strong>Hotfix mid-feature</strong></td>
           <td>Press <kbd>n</kbd>, base <code>main</code>, branch <code>hotfix/crash</code>, create. You get a second checkout instantly; your feature worktree keeps its uncommitted state. Ship the fix, <kbd>backspace</kbd> the worktree, done.</td></tr>
       <tr><td><strong>Run tests on main while editing a branch</strong></td>
-          <td>Keep <code>main</code> in one worktree and your branch in another; <kbd>enter</kbd> opens each in its own terminal so long test runs and editing never fight over one checkout.</td></tr>
+          <td>Keep <code>main</code> in one worktree and your branch in another; <kbd>t</kbd> opens each in its own terminal so long test runs and editing never fight over one checkout.</td></tr>
       <tr><td><strong>Review someone's PR locally</strong></td>
           <td>Create a worktree for <code>their-branch</code> (existing-branch mode), build and run it there, remove afterwards — your checkout never moves.</td></tr>
       <tr><td><strong>Audit parallel experiments</strong></td>
@@ -246,12 +247,26 @@ terminal = "iterm"</code></pre>
       <tr><th>Key</th><th>Action</th></tr>
       <tr><td><kbd>n</kbd> / <kbd>⌘n</kbd></td><td>New worktree</td></tr>
       <tr><td><kbd>/</kbd> / <kbd>⌘f</kbd></td><td>Focus search</td></tr>
-      <tr><td><kbd>esc</kbd></td><td>Clear search / close dialog</td></tr>
+      <tr><td><kbd>esc</kbd></td><td>Clear search / close dialog / back to worktree list</td></tr>
       <tr><td><kbd>r</kbd> / <kbd>⌘r</kbd></td><td>Refresh statuses</td></tr>
       <tr><td><kbd>↑</kbd> <kbd>↓</kbd></td><td>Move selection</td></tr>
-      <tr><td><kbd>enter</kbd></td><td>Open selection in terminal</td></tr>
+      <tr><td><kbd>enter</kbd></td><td>Open selected worktree's detail view</td></tr>
+      <tr><td><kbd>t</kbd></td><td>Open in terminal</td></tr>
       <tr><td><kbd>backspace</kbd> / <kbd>delete</kbd></td><td>Remove selected worktree</td></tr>
       <tr><td><kbd>⌘q</kbd></td><td>Quit</td></tr>
+    </table>
+    <h3>Detail view (per worktree)</h3>
+    <table>
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td><kbd>↑</kbd> <kbd>↓</kbd></td><td>Move file selection</td></tr>
+      <tr><td><kbd>tab</kbd></td><td>Toggle file list ↔ diff pane</td></tr>
+      <tr><td><kbd>s</kbd></td><td>Stage / unstage selected file</td></tr>
+      <tr><td><kbd>S</kbd></td><td>Stage all remaining changes</td></tr>
+      <tr><td><kbd>d</kbd></td><td>Discard selected file's changes (confirmation)</td></tr>
+      <tr><td><kbd>c</kbd></td><td>Commit staged changes via your editor</td></tr>
+      <tr><td><kbd>t</kbd></td><td>Open worktree in terminal</td></tr>
+      <tr><td><kbd>r</kbd></td><td>Refresh</td></tr>
+      <tr><td><kbd>esc</kbd></td><td>Back to worktree list</td></tr>
     </table>
     <p style="color:var(--dim);font-size:.93rem">In text fields:
       <kbd>enter</kbd> confirms a dialog, <kbd>esc</kbd> cancels,

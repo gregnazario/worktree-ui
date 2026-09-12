@@ -2,12 +2,12 @@
 //! (not separate entities); the render helpers below take the root view
 //! directly and attach listeners against it.
 
+use crate::app::RootView;
+use crate::app::{ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED, TEXT};
 use crate::feedback;
 use crate::platform;
 use crate::terminal::{self, InstalledTerminal};
 use crate::text_field::TextField;
-use crate::ui::RootView;
-use crate::ui::{ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED, TEXT};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, rgb, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
@@ -41,6 +41,12 @@ pub enum DialogState {
         terminals: Vec<InstalledTerminal>,
         selected: Option<String>,
         saved_to: Option<String>,
+    },
+    /// Confirm before discarding one file's uncommitted changes. `untracked`
+    /// means the file itself is deleted, not just reverted.
+    Discard {
+        path: String,
+        untracked: bool,
     },
 }
 
@@ -353,6 +359,85 @@ pub fn render_remove_dialog(
                     Some(RED),
                     None,
                     cx.listener(|this, _, window, cx| this.confirm_remove(window, cx)),
+                )),
+        )
+}
+
+pub fn render_discard_dialog(
+    this: &mut RootView,
+    _window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let DialogState::Discard { path, untracked } = &this.dialog else {
+        unreachable!("discard dialog rendered without discard state")
+    };
+    let path = path.clone();
+    let untracked = *untracked;
+    let dialog_focus = this.dialog_focus.clone();
+
+    div()
+        .id("discard-dialog")
+        .track_focus(&dialog_focus)
+        .w(px(500.))
+        .p_4()
+        .rounded_lg()
+        .bg(PANEL)
+        .border_1()
+        .border_color(BORDER)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            cx.stop_propagation();
+            match event.keystroke.key.as_str() {
+                "escape" => this.close_dialog(window, cx),
+                "enter" => this.confirm_discard(window, cx),
+                _ => {}
+            }
+        }))
+        .child(
+            div()
+                .text_size(px(15.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(TEXT)
+                .child("Discard changes"),
+        )
+        .child(label(format!("Path: {path}")))
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(RED)
+                .child("This cannot be undone."),
+        )
+        .when(untracked, |card| {
+            card.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(RED)
+                    .child("The file itself will be deleted."),
+            )
+        })
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(button(
+                    "discard-cancel",
+                    "Cancel",
+                    TEXT,
+                    None,
+                    Some(BORDER),
+                    cx.listener(|this, _, window, cx| cancel(this, window, cx)),
+                ))
+                .child(button(
+                    "discard-confirm",
+                    "Discard",
+                    rgb(0x11111b),
+                    Some(RED),
+                    None,
+                    cx.listener(|this, _, window, cx| this.confirm_discard(window, cx)),
                 )),
         )
 }
