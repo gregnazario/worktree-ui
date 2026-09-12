@@ -578,6 +578,22 @@ impl WorkingCopyStore {
         self.hunk_cursor.min(self.hunk_bound().saturating_sub(1))
     }
 
+    /// True when the hovered-hunk flow is fully live: the selected row is
+    /// an unstaged file whose diff is the one actually loaded (not a
+    /// selection change still in flight) and at least one hunk renders.
+    /// The footer gates its hunk hints on this; `stage_hunk`'s guards
+    /// enforce the same conditions.
+    pub fn hunk_stageable(&self) -> bool {
+        let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
+            return false;
+        };
+        if group != eng::Group::Unstaged {
+            return false;
+        }
+        self.detail_of.as_ref() == Some(&(entry.path, DetailKind::Unstaged))
+            && self.hunk_bound() > 0
+    }
+
     /// Hunks the diff pane can actually render (headers before the line
     /// cap): the ceiling for the cursor and for `stage_hunk`. Zero-hunk
     /// non-binary diffs (mode-only change, pure rename) yield 0 — the
@@ -671,7 +687,16 @@ impl WorkingCopyStore {
                 cx.notify();
                 return;
             }
-            eng::Group::Untracked | eng::Group::Conflicts => {
+            // Conflicts get their own hint: S (stage-all) deliberately
+            // skips them, so recommending it would send the user in a loop.
+            eng::Group::Conflicts => {
+                self.message =
+                    Some("resolve conflicts in your editor, then press s to mark resolved".into());
+                self.note_transient_hint();
+                cx.notify();
+                return;
+            }
+            eng::Group::Untracked => {
                 self.message = Some("no hunks here — stage whole files with S".into());
                 self.note_transient_hint();
                 cx.notify();

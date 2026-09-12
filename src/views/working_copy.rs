@@ -43,7 +43,6 @@ pub fn render(
         return div().id("detail-view").into_any_element();
     };
     let diff_focused = this.detail_diff_focus.is_focused(window);
-    let hunk_stageable = matches!(wc.read(cx).selected_row(), Some((Group::Unstaged, _)));
     let (branch_label, arrows, path) = {
         let store = wc.read(cx);
         let branch = store
@@ -205,7 +204,7 @@ pub fn render(
                         // preview, still loading) or a STAGED row's diff
                         // advertises no `s` at all — the footer never
                         // offers a key that would only hint.
-                        if diff_focused && hunk_stageable && wc.read(cx).hunk_bound() > 0 {
+                        if diff_focused && wc.read(cx).hunk_stageable() {
                             // The position indicator doubles as the render
                             // cap's honesty marker: the cursor never leaves
                             // the rendered range, and when truncation hides
@@ -385,6 +384,7 @@ fn render_diff_pane(
     let mut pane = div()
         .id("wc-diff")
         .track_focus(&diff_focus)
+        .track_scroll(&this.diff_scroll)
         .flex_1()
         .min_w_0()
         .flex()
@@ -442,9 +442,12 @@ fn render_diff_pane(
             // pane renders (headers before the line cap) — one walk, shared
             // with the cursor/stage clamp, so they can never drift apart.
             // The per-line cap still truncates INSIDE the last hunk.
+            // Each hunk is ONE child of the scroll container, so
+            // `diff_scroll.scroll_to_item(hunk + 1)` (the file-header
+            // summary is child 0) maps directly to the hovered hunk.
             for (hi, hunk) in ud.hunks.iter().enumerate().take(wc.read(cx).hunk_bound()) {
                 let hovered = diff_focused && hi == hovered_hunk;
-                pane = pane.child(
+                let mut block = div().flex().flex_col().child(
                     div()
                         .px_3()
                         .py_0p5()
@@ -472,7 +475,7 @@ fn render_diff_pane(
                         .px_3()
                         .text_size(px(12.))
                         .when(bg != transparent, |r| r.bg(bg));
-                    pane = pane.child(
+                    block = block.child(
                         row.child(
                             div()
                                 .w(px(14.))
@@ -492,6 +495,7 @@ fn render_diff_pane(
                         ),
                     );
                 }
+                pane = pane.child(block);
             }
             if total > DIFF_RENDER_CAP {
                 pane = pane.child(placeholder(&format!(

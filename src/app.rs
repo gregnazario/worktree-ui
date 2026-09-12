@@ -80,6 +80,11 @@ pub struct RootView {
     pub detail_focus: FocusHandle,
     pub detail_list_focus: FocusHandle,
     pub detail_diff_focus: FocusHandle,
+    /// Scroll position of the diff pane. Keyboard hunk movement scrolls
+    /// the hovered hunk into view through it — without this, `down` on a
+    /// tall diff moves the cursor to a hunk that is rendered but scrolled
+    /// off-screen, and `s` stages content the user cannot see.
+    pub diff_scroll: gpui::ScrollHandle,
 }
 
 fn status_badge(status: &WorktreeStatus) -> (String, gpui::Rgba) {
@@ -167,6 +172,7 @@ impl RootView {
         let detail_focus = cx.focus_handle();
         let detail_list_focus = cx.focus_handle();
         let detail_diff_focus = cx.focus_handle();
+        let diff_scroll = gpui::ScrollHandle::new();
         window.focus(&root_focus);
         let view = cx.new(|_| Self {
             store,
@@ -180,6 +186,7 @@ impl RootView {
             detail_focus,
             detail_list_focus,
             detail_diff_focus,
+            diff_scroll,
         });
         view.update(cx, |this, cx| {
             // Typing in the search field drives the store filter; the
@@ -566,12 +573,21 @@ impl RootView {
             // ---- diff pane (hunk staging, Phase 1b) ----
             "up" if diff_focused => {
                 if let Some(wc) = &self.detail {
-                    wc.update(cx, |store, cx| store.hunk_prev(cx));
+                    let hovered = wc.update(cx, |store, cx| {
+                        store.hunk_prev(cx);
+                        store.hunk_cursor()
+                    });
+                    // +1: the file-header summary is the pane's child 0.
+                    self.diff_scroll.scroll_to_item(hovered + 1);
                 }
             }
             "down" if diff_focused => {
                 if let Some(wc) = &self.detail {
-                    wc.update(cx, |store, cx| store.hunk_next(cx));
+                    let hovered = wc.update(cx, |store, cx| {
+                        store.hunk_next(cx);
+                        store.hunk_cursor()
+                    });
+                    self.diff_scroll.scroll_to_item(hovered + 1);
                 }
             }
             // Same capital-normalization as the list pane: shift+s must
