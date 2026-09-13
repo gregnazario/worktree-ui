@@ -796,8 +796,7 @@ impl WorkingCopyStore {
             cx.notify();
             return;
         };
-        let mut patch = ud.header_raw.clone();
-        patch.extend_from_slice(&hunk.raw);
+        let patch = mutate::content_patch(&ud.header_raw, &hunk.raw);
         let pre_image = ud.index_pre_image.clone();
         let path = entry.path.clone();
         let worktree = self.worktree.clone();
@@ -822,7 +821,16 @@ impl WorkingCopyStore {
             this.update(cx, |store, cx| {
                 store.after_mutation(
                     result.map_err(|e| engine::GitError {
-                        message: format!("{e} — stage the whole file instead (s on the file row)"),
+                        // The blanket whole-file hint fits a rejected
+                        // patch; the stale-index refusal's own remedy is a
+                        // refresh — appending both would offer
+                        // contradictory advice.
+                        message: match e {
+                            mutate::ApplyError::Git(git) => {
+                                format!("{git} — stage the whole file instead (s on the file row)")
+                            }
+                            stale => stale.to_string(),
+                        },
                     }),
                     cx,
                 );

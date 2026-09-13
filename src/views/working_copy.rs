@@ -420,12 +420,15 @@ fn render_diff_pane(
     let detail_generation = store.detail_generation();
     if detail_generation != this.diff_scroll_generation {
         this.diff_scroll_generation = detail_generation;
-        let key = store.detail_key();
-        if key != this.diff_scroll_key {
-            this.diff_scroll_key = key;
-            this.diff_scroll.set_offset(gpui::point(px(0.), px(0.)));
-        } else {
-            this.diff_scroll.scroll_to_item(store.hunk_cursor() + 1);
+        // A None key (a load still in flight) must not clobber the
+        // remembered identity — only a landed, Some-key revision reacts.
+        if let Some(key) = store.detail_key() {
+            if Some(&key) != this.diff_scroll_key.as_ref() {
+                this.diff_scroll_key = Some(key);
+                this.diff_scroll.set_offset(gpui::point(px(0.), px(0.)));
+            } else {
+                this.diff_scroll.scroll_to_item(store.hunk_cursor() + 1);
+            }
         }
     }
     if matches!(store.selected_row(), Some((Group::Conflicts, _))) {

@@ -446,7 +446,7 @@ mod apply_tests {
         let err =
             mutate::apply_cached(tmp.path(), "h.txt", patch, expected.as_deref()).unwrap_err();
         assert!(
-            err.message.contains("changed since this diff was loaded"),
+            matches!(err, mutate::ApplyError::StaleIndex),
             "expected the stale-index refusal, got: {err}"
         );
     }
@@ -470,6 +470,51 @@ mod apply_tests {
         let staged = diff::diff_staged(tmp.path(), "n.txt").unwrap();
         assert_eq!(staged.hunks.len(), 1);
         assert!(staged.hunks[0].raw.windows(4).any(|w| w == b"one!"));
+    }
+
+    /// Staging a content hunk of a file whose diff ALSO carries a mode
+    /// change must not flip the index entry's mode: the mode lines are
+    /// stripped from the reconstructed patch (git add -p asks about the
+    /// mode separately; so do we — via the file-level `s`).
+    #[cfg(unix)]
+    #[test]
+    fn content_patch_strips_mode_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        fixture_repo(tmp.path());
+        let f = tmp.path().join("x.sh");
+        std::fs::write(&f, "echo hi\n").unwrap();
+        sh(Some(tmp.path()), &["git", "add", "x.sh"]);
+        sh(Some(tmp.path()), &["git", "commit", "-qm", "x"]);
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&f, "echo edited\n").unwrap();
+
+        let ud = diff::diff_unstaged(tmp.path(), "x.sh").unwrap();
+        assert!(
+            ud.header_raw.windows(9).any(|w| w == b"index 100644") || ud.header.contains("100644")
+        );
+        let patch = mutate::content_patch(&ud.header_raw, &ud.hunks[0].raw);
+        assert!(
+            !patch.windows(9).any(|w| w == b"old mode "),
+            "mode lines must be stripped: {}",
+            String::from_utf8_lossy(&patch)
+        );
+        mutate::apply_cached(
+            tmp.path(),
+            "x.sh",
+            patch,
+            ud.index_pre_image.clone().as_deref(),
+        )
+        .unwrap();
+
+        // The index entry's mode is untouched; the content hunk is staged.
+        let ls = engine::run_trimmed(tmp.path(), &["ls-files", "-s", "--", "x.sh"]);
+        assert!(
+            ls.as_ref().unwrap().starts_with("100644"),
+            "mode unchanged: {ls:?}"
+        );
+        let staged = diff::diff_staged(tmp.path(), "x.sh").unwrap();
+        assert!(staged.hunks[0].raw.windows(6).any(|w| w == b"edited"));
     }
 
     #[test]
