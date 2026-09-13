@@ -40,7 +40,7 @@ fn log_lists_commits_newest_first_with_fields() {
     let tmp = tempfile::tempdir().unwrap();
     let (init, second) = two_commit_repo(tmp.path());
 
-    let log = history::log(tmp.path(), 10).unwrap();
+    let log = history::log(tmp.path(), 0, 10).unwrap();
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].subject, "second commit");
     assert_eq!(log[1].subject, "init");
@@ -69,7 +69,7 @@ fn log_merge_has_both_parents_in_order() {
     let main = sh_out(tmp.path(), &["git", "rev-parse", "main~1"]);
     let side = sh_out(tmp.path(), &["git", "rev-parse", "side"]);
 
-    let log = history::log(tmp.path(), 10).unwrap();
+    let log = history::log(tmp.path(), 0, 10).unwrap();
     assert_eq!(log[0].subject, "merge");
     assert_eq!(log[0].parents, vec![main, side], "first parent first");
 }
@@ -78,21 +78,21 @@ fn log_merge_has_both_parents_in_order() {
 fn log_respects_max_count() {
     let tmp = tempfile::tempdir().unwrap();
     two_commit_repo(tmp.path());
-    assert_eq!(history::log(tmp.path(), 1).unwrap().len(), 1);
+    assert_eq!(history::log(tmp.path(), 0, 1).unwrap().len(), 1);
 }
 
 #[test]
 fn log_on_a_repo_without_commits_is_empty() {
     let tmp = tempfile::tempdir().unwrap();
     sh(Some(tmp.path()), &["git", "init", "-q", "-b", "main"]);
-    assert!(history::log(tmp.path(), 10).unwrap().is_empty());
+    assert!(history::log(tmp.path(), 0, 10).unwrap().is_empty());
 }
 
 #[test]
 fn lanes_linear_history_stays_on_lane_zero() {
     let tmp = tempfile::tempdir().unwrap();
     two_commit_repo(tmp.path());
-    let mut log = history::log(tmp.path(), 10).unwrap();
+    let mut log = history::log(tmp.path(), 0, 10).unwrap();
     let rows = history::assign_lanes(&mut log);
     assert!(rows.iter().all(|r| r.lane == 0), "linear: {rows:?}");
     // Row cells: a commit cell on its lane, no trailing padding.
@@ -107,7 +107,7 @@ fn lanes_open_for_a_side_branch_and_close_at_the_merge() {
     let tmp = tempfile::tempdir().unwrap();
     merge_repo(tmp.path());
 
-    let mut log = history::log(tmp.path(), 10).unwrap();
+    let mut log = history::log(tmp.path(), 0, 10).unwrap();
     let rows = history::assign_lanes(&mut log);
     // The merge and the first-parent line stay on lane 0; exactly the side
     // commit opens lane 1.
@@ -149,7 +149,7 @@ fn lanes_side_branches_reuse_lanes_after_their_merge() {
         &["git", "merge", "--no-ff", "-qm", "m2", "b"],
     );
 
-    let mut log = history::log(tmp.path(), 20).unwrap();
+    let mut log = history::log(tmp.path(), 0, 20).unwrap();
     let rows = history::assign_lanes(&mut log);
     // Branch lanes are reused after their merges close them: the max lane
     // stays small even with two side branches.
@@ -285,4 +285,29 @@ fn open_worktree_at_suffixes_collisions() {
     let second = history::open_worktree_at(tmp.path(), &init, &short).unwrap();
     assert_ne!(first, second, "collision must not clobber");
     assert!(second.is_dir());
+}
+
+#[test]
+fn commit_files_detects_renames_with_both_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture_repo(tmp.path());
+    // A PURE rename (no content edit) is detected as R100 — any content
+    // rewrite would need similarity above git's 50% threshold to count.
+    sh(Some(tmp.path()), &["git", "mv", "f.txt", "renamed.txt"]);
+    sh(Some(tmp.path()), &["git", "commit", "-qm", "renamed"]);
+    let sha = sh_out(tmp.path(), &["git", "rev-parse", "main"]);
+
+    let files = history::commit_files(tmp.path(), &sha, false).unwrap();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(files[0].letter, 'R');
+    assert_eq!(files[0].orig_path.as_deref(), Some("f.txt"), "pre-image");
+    assert_eq!(files[0].path, "renamed.txt", "post-image");
+
+    // The detail diff is queried with the POST-rename path and parses
+    // cleanly (a pure rename under a pathspec renders as an addition —
+    // git pairs rename sides only when both match the pathspec; the
+    // meaningful old → new display lives in the file chips' name-status).
+    let ud = history::commit_diff(tmp.path(), &sha, "renamed.txt").unwrap();
+    assert!(!ud.binary);
+    assert!(ud.header.contains("renamed.txt"), "{:?}", ud.header);
 }

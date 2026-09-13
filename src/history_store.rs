@@ -28,6 +28,9 @@ pub struct HistoryStore {
     pub selected_file: Option<usize>,
     /// Unified diff of the selected file, or the load error text.
     pub file_diff: Result<diff::UnifiedDiff, String>,
+    /// Error from the last commit-files load (None while empty means
+    /// "loading", Some means the pane must show the failure).
+    pub files_error: Option<String>,
     pub pane: Pane,
     /// Batch size for the next load-more.
     pub max_count: usize,
@@ -71,6 +74,7 @@ impl HistoryStore {
             selected: None,
             files: None,
             selected_file: None,
+            files_error: None,
             file_diff: Err(String::new()),
             pane: Pane::Commits,
             max_count: batch,
@@ -102,6 +106,7 @@ impl HistoryStore {
         let worktree = self.worktree.clone();
         // Fetch one extra row so truncation (more history exists) is
         // distinguishable from exhaustion.
+        let skip = 0;
         let max_count = self.max_count + 1;
         let keep_hash = self
             .selected
@@ -110,7 +115,7 @@ impl HistoryStore {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { history::log(&worktree, max_count) })
+                .spawn(async move { history::log(&worktree, skip, max_count) })
                 .await;
             this.update(cx, |store, cx| {
                 if gen != store.load_generation {
@@ -155,7 +160,11 @@ impl HistoryStore {
                         store.load_commit_files(cx);
                     }
                     Err(e) => {
-                        store.load_failed = true;
+                        // Only a failed FIRST load replaces the list with
+                        // the error pane; later failures (manual `r`,
+                        // transient lock contention) keep the working list
+                        // and surface the error in the footer.
+                        store.load_failed = !store.initial_load_done;
                         store.message = Some(if e.is_lock_error() {
                             "another git process may be using this worktree — retry".into()
                         } else {
@@ -171,12 +180,62 @@ impl HistoryStore {
         .detach();
     }
 
-    /// Loads another batch of commits (keeps selection by hash).
+    /// Loads the next batch of OLDER commits and appends it. Only the new
+    /// window is fetched (`--skip`); lanes are re-assigned over the whole
+    /// list in memory — a forward-only sweep, so already-rendered lanes
+    /// can never change. Selection is untouched.
     pub fn load_more(&mut self, cx: &mut Context<Self>) {
-        self.max_count += HISTORY_BATCH;
-        self.message = Some(format!("Loading {} commits…", self.max_count));
+        if !self.has_more {
+            self.message = Some("No older commits to load".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        self.load_generation += 1;
+        let gen = self.load_generation;
+        let worktree = self.worktree.clone();
+        let skip = self.commits.len();
+        self.message = Some(format!("Loading {} older commits…", HISTORY_BATCH));
         self.note_transient_hint();
-        self.refresh(cx);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            // Batch + 1 distinguishes truncation from exhaustion.
+            let result = cx
+                .background_executor()
+                .spawn(async move { history::log(&worktree, skip, HISTORY_BATCH + 1) })
+                .await;
+            this.update(cx, |store, cx| {
+                if gen != store.load_generation {
+                    return;
+                }
+                match result {
+                    Ok(mut fetched) => {
+                        store.load_failed = false;
+                        store.has_more = fetched.len() > HISTORY_BATCH;
+                        fetched.truncate(HISTORY_BATCH);
+                        let mut commits = std::mem::take(&mut store.commits);
+                        commits.append(&mut fetched);
+                        store.rows = history::assign_lanes(&mut commits);
+                        store.commits = commits;
+                        if store.busy_hint {
+                            store.message = None;
+                            store.busy_hint = false;
+                        }
+                    }
+                    Err(e) => {
+                        store.message = Some(if e.is_lock_error() {
+                            "another git process may be using this worktree — retry".into()
+                        } else {
+                            e.message
+                        });
+                        store.busy_hint = true;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Transient hint for keys swallowed while the log is still loading.
@@ -202,6 +261,7 @@ impl HistoryStore {
         self.selected = idx.filter(|&i| i < self.commits.len());
         self.selected_file = None;
         self.files = None;
+        self.files_error = None;
         self.file_diff = Err(String::new());
         if self.pane == Pane::Files {
             self.pane = Pane::Commits;
@@ -216,7 +276,7 @@ impl HistoryStore {
         }
         let next = match self.selected {
             None => 0,
-            Some(s) if s + 1 >= self.commits.len() => s,
+            Some(s) if s + 1 >= self.commits.len() => return, // boundary: no-op
             Some(s) => s + 1,
         };
         self.select(Some(next), cx);
@@ -227,7 +287,7 @@ impl HistoryStore {
             return;
         }
         let prev = match self.selected {
-            Some(0) | None => 0,
+            Some(0) | None => return, // boundary: no-op
             Some(s) => s - 1,
         };
         self.select(Some(prev), cx);
@@ -249,7 +309,7 @@ impl HistoryStore {
         }
         let next = match self.selected_file {
             None => 0,
-            Some(s) if s + 1 >= len => s,
+            Some(s) if s + 1 >= len => return, // boundary: no-op
             Some(s) => s + 1,
         };
         self.select_file(Some(next), cx);
@@ -257,7 +317,7 @@ impl HistoryStore {
 
     pub fn select_file_prev(&mut self, cx: &mut Context<Self>) {
         let prev = match self.selected_file {
-            Some(0) | None => 0,
+            Some(0) | None => return, // boundary: no-op
             Some(s) => s - 1,
         };
         self.select_file(Some(prev), cx);
@@ -310,12 +370,14 @@ impl HistoryStore {
                         store.load_file_diff(cx);
                     }
                     Err(e) => {
-                        store.files = None;
-                        store.message = Some(if e.is_lock_error() {
-                            "another git process may be using this worktree — retry".into()
+                        let text = if e.is_lock_error() {
+                            "another git process may be using this worktree — retry".to_string()
                         } else {
                             e.message
-                        });
+                        };
+                        store.files = None;
+                        store.files_error = Some(text.clone());
+                        store.message = Some(text);
                         store.busy_hint = true;
                     }
                 }

@@ -324,7 +324,11 @@ fn render_detail(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoEl
         return pane.into_any_element();
     };
     let store = hs.read(cx);
+    if let Some(error) = &store.files_error {
+        return pane.child(placeholder(error)).into_any_element();
+    }
     let Some(files) = &store.files else {
+        // No error and no files: the load is genuinely still in flight.
         return pane
             .child(placeholder("Loading commit…"))
             .into_any_element();

@@ -42,7 +42,7 @@ pub struct GraphRow {
 /// to `--decorate=short`: piped output otherwise depends on git's
 /// `--decorate=auto` default and the user's `log.decorate` config, so the
 /// refs field would silently vary across environments.
-pub fn log(worktree: &Path, max_count: usize) -> Result<Vec<LogCommit>> {
+pub fn log(worktree: &Path, skip: usize, max_count: usize) -> Result<Vec<LogCommit>> {
     // An unborn branch (no commits yet) is an empty history, not an
     // error — detected structurally, not via (locale-dependent) stderr.
     if engine::run_trimmed(worktree, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
@@ -55,6 +55,7 @@ pub fn log(worktree: &Path, max_count: usize) -> Result<Vec<LogCommit>> {
             "log",
             "--topo-order",
             "--decorate=short",
+            &format!("--skip={skip}"),
             &format!("--max-count={max_count}"),
             "--format=%x00%H%x01%h%x01%P%x01%an%x01%at%x01%D%x01%s",
         ],
@@ -179,9 +180,14 @@ pub fn commit_files(worktree: &Path, sha: &str, first_parent: bool) -> Result<Ve
     } else {
         None
     };
+    // `-p` is REQUIRED for rename detection with --name-status: without
+    // patch generation, diff-tree reports renames as delete + add even
+    // under `-M` (the records are parsed instead of the patch).
     let mut args = vec![
         "--no-optional-locks",
         "diff-tree",
+        "-M",
+        "-p",
         "--no-commit-id",
         "--name-status",
         "-r",
@@ -200,12 +206,15 @@ pub fn commit_files(worktree: &Path, sha: &str, first_parent: bool) -> Result<Ve
     let mut records = out.split(|b| *b == 0u8).filter(|r| !r.is_empty());
     while let Some(status) = records.next() {
         let letter = status.first().copied().unwrap_or(b'?') as char;
-        let path = String::from_utf8_lossy(records.next().unwrap_or_default()).into_owned();
-        // Renames/copies carry a score and TWO paths.
-        let orig_path = if letter == 'R' || letter == 'C' {
-            Some(String::from_utf8_lossy(records.next().unwrap_or_default()).into_owned())
+        // R/C records carry TWO paths: git writes the PRE-image (old)
+        // first, then the post-image (new) — the display order is
+        // "old → new" and the diff must be queried with the NEW path.
+        let first = String::from_utf8_lossy(records.next().unwrap_or_default()).into_owned();
+        let (path, orig_path) = if letter == 'R' || letter == 'C' {
+            let new_path = String::from_utf8_lossy(records.next().unwrap_or_default()).into_owned();
+            (new_path, Some(first))
         } else {
-            None
+            (first, None)
         };
         files.push(CommitFile {
             letter,
@@ -228,6 +237,9 @@ pub fn commit_diff(worktree: &Path, sha: &str, rel_path: &str) -> Result<Unified
             "show",
             "--format=",
             "--first-parent",
+            // Rename headers under a pathspec need explicit detection:
+            // without -M a pure rename renders as a full deletion.
+            "-M",
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",

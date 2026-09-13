@@ -540,6 +540,9 @@ impl RootView {
         self.history = None;
         self.history_subscription = None;
         self.section = Section::WorkingCopy;
+        // A fresh handle: the next drill-in's History opens at the top
+        // instead of inheriting this session's scroll offset.
+        self.history_list_scroll = gpui::UniformListScrollHandle::new();
         self.detail = None;
         // Re-arm the diff-pane scroll bookkeeping: each store's detail
         // generation restarts at 0, so a later drill-in could otherwise
@@ -685,26 +688,33 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let list_focused = self.history_list_focus.is_focused(window);
-        let files_focused = self.history_files_focus.is_focused(window);
-        if !list_focused && !files_focused {
-            return;
-        }
         let Some(hs) = self.history.clone() else {
             return;
         };
+        let list_focused = self.history_list_focus.is_focused(window);
+        let files_focused = self.history_files_focus.is_focused(window);
+        let container_focused = self.detail_focus.is_focused(window);
+        if !list_focused && !files_focused && !container_focused {
+            return;
+        }
+        // Keys that work on every focused surface in this section.
         match ks.key.as_str() {
-            "escape" => self.close_detail(window, cx),
+            "escape" => return self.close_detail(window, cx),
             "1" => {
                 self.section = Section::WorkingCopy;
                 window.focus(&self.detail_list_focus);
                 cx.notify();
+                return;
             }
-            "2" => {}
             "t" => {
                 let path = hs.read(cx).worktree.clone();
                 open_terminal(&path);
+                return;
             }
+            _ => {}
+        }
+        match ks.key.as_str() {
+            "2" => {}
             "r" => hs.update(cx, |h, cx| h.refresh(cx)),
             "up" if list_focused => {
                 let pos = hs.update(cx, |h, cx| {
