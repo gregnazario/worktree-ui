@@ -85,11 +85,11 @@ pub struct RootView {
     /// tall diff moves the cursor to a hunk that is rendered but scrolled
     /// off-screen, and `s` stages content the user cannot see.
     pub diff_scroll: gpui::ScrollHandle,
-    /// File the diff pane last scrolled for; a different (path, kind)
-    /// resets `diff_scroll` so a new file never opens deep-scrolled. NOT
-    /// keyed on the detail generation: same-file reloads (post-mutation,
-    /// where the cursor deliberately stays on the next hunk) must not
-    /// snap the pane back to the top.
+    /// Diff identity ("kind:path") the pane last scrolled for; any change
+    /// resets `diff_scroll` so a new diff never opens deep-scrolled. NOT
+    /// keyed on the detail generation: same-file same-surface reloads
+    /// (post-mutation, where the cursor deliberately stays on the next
+    /// hunk) must not snap the pane back to the top.
     pub diff_scroll_file: Option<String>,
 }
 

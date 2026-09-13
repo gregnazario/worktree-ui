@@ -584,10 +584,13 @@ impl WorkingCopyStore {
         self.hunk_cursor.min(self.hunk_bound().saturating_sub(1))
     }
 
-    /// Path of the currently-loaded diff; the view keys the diff pane's
-    /// scroll reset on it (reset when the displayed FILE changes).
-    pub fn detail_path(&self) -> Option<&str> {
-        self.detail_of.as_ref().map(|(p, _)| p.as_str())
+    /// Stable identity of the currently-loaded diff ("kind:path"); the
+    /// view keys the diff pane's scroll reset on it. Kind matters: one
+    /// path can back TWO diffs (a file with staged and unstaged rows),
+    /// and switching surfaces is a different diff that must reset the
+    /// scroll like any other file change.
+    pub fn detail_key(&self) -> Option<String> {
+        self.detail_of.as_ref().map(|(p, k)| format!("{k:?}:{p}"))
     }
 
     /// True when the hovered-hunk flow is fully live: the selected row is
@@ -1022,7 +1025,7 @@ impl WorkingCopyStore {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DetailKind {
     Staged,
     Unstaged,

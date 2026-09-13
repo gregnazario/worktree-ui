@@ -407,9 +407,9 @@ fn render_diff_pane(
     // file must never open at the previous file's offset (its cursor and
     // highlight sit on hunk 0, off-screen — `s` would stage what the user
     // cannot see). Drill-ins reset in `open_detail`.
-    if let Some(path) = store.detail_path() {
-        if this.diff_scroll_file.as_deref() != Some(path) {
-            this.diff_scroll_file = Some(path.to_string());
+    if let Some(key) = store.detail_key() {
+        if this.diff_scroll_file.as_deref() != Some(key.as_str()) {
+            this.diff_scroll_file = Some(key);
             this.diff_scroll.set_offset(gpui::point(px(0.), px(0.)));
         }
     }

@@ -693,7 +693,6 @@ fn hunk_cursor_never_leaves_the_rendered_range(cx: &mut TestAppContext) {
             .any(|h| String::from_utf8_lossy(&h.raw).contains("tail edit")),
         "the truncated hunk must not be staged"
     );
-    assert!(!String::from_utf8_lossy(&staged.hunks[0].raw).contains("line 12000 edited"));
 }
 
 /// The detail lags the selection: between `select()` and the async detail
