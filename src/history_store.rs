@@ -48,10 +48,22 @@ pub struct HistoryStore {
     /// A worktree-affecting action (checkout / worktree add) is in flight;
     /// blocks further actions until its completion lands.
     action_in_flight: bool,
+    /// True when the log fetch returned the full batch — older commits
+    /// likely exist and `L` will find them.
+    pub has_more: bool,
+    /// True once the first log load completed (either way): the view
+    /// distinguishes "loading" from "no commits yet".
+    pub initial_load_done: bool,
 }
 
 impl HistoryStore {
     pub fn new(worktree: PathBuf, cx: &mut App) -> Entity<Self> {
+        Self::new_with_batch(worktree, HISTORY_BATCH, cx)
+    }
+
+    /// Batch size injectable for tests (has_more/load-more behavior needs
+    /// a batch smaller than the fixture's history).
+    pub fn new_with_batch(worktree: PathBuf, batch: usize, cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|_cx| Self {
             worktree: worktree.clone(),
             commits: Vec::new(),
@@ -61,7 +73,7 @@ impl HistoryStore {
             selected_file: None,
             file_diff: Err(String::new()),
             pane: Pane::Commits,
-            max_count: HISTORY_BATCH,
+            max_count: batch,
             message: None,
             busy_hint: false,
             mutated: false,
@@ -69,6 +81,8 @@ impl HistoryStore {
             load_generation: 0,
             load_failed: false,
             action_in_flight: false,
+            has_more: false,
+            initial_load_done: false,
         });
         entity.update(cx, |store, cx| store.refresh(cx));
         entity
@@ -86,7 +100,9 @@ impl HistoryStore {
         self.load_generation += 1;
         let gen = self.load_generation;
         let worktree = self.worktree.clone();
-        let max_count = self.max_count;
+        // Fetch one extra row so truncation (more history exists) is
+        // distinguishable from exhaustion.
+        let max_count = self.max_count + 1;
         let keep_hash = self
             .selected
             .and_then(|i| self.commits.get(i))
@@ -101,9 +117,12 @@ impl HistoryStore {
                     return;
                 }
                 match result {
-                    Ok(commits) => {
+                    Ok(mut fetched) => {
                         store.load_failed = false;
-                        let mut commits = commits;
+                        store.initial_load_done = true;
+                        store.has_more = fetched.len() > store.max_count;
+                        fetched.truncate(store.max_count);
+                        let mut commits = fetched;
                         store.rows = history::assign_lanes(&mut commits);
                         store.commits = commits;
                         // Keep the selection on the same commit; clamp to
@@ -322,7 +341,7 @@ impl HistoryStore {
                 .background_executor()
                 .spawn(async move { history::commit_diff(&worktree, &sha, &file.path) })
                 .await;
-            this.update(cx, |store, _cx| {
+            this.update(cx, |store, cx| {
                 if gen != store.detail_generation {
                     return;
                 }
@@ -330,6 +349,9 @@ impl HistoryStore {
                     Ok(d) => Ok(d),
                     Err(e) => Err(e.message),
                 };
+                // Without this, the diff pane keeps the PREVIOUS file's
+                // diff until some unrelated keystroke re-renders.
+                cx.notify();
             })
             .ok();
         })
@@ -353,6 +375,7 @@ impl HistoryStore {
     /// status change).
     pub fn checkout(&mut self, cx: &mut Context<Self>) {
         if self.busy() {
+            self.busy_message(cx);
             return;
         }
         let Some(commit) = self.selected.and_then(|i| self.commits.get(i)) else {
@@ -377,6 +400,14 @@ impl HistoryStore {
                         store.message = Some(format!("Checked out {short} (detached HEAD)"));
                         store.mutated = true;
                         store.busy_hint = false;
+                        // HEAD moved: the list (reachability, decorations)
+                        // must reflect the detached state, not just the
+                        // home list.
+                        store.refresh(cx);
+                        // HEAD moved: the list (reachability, decorations)
+                        // must reflect the detached state, not just the
+                        // home list.
+                        store.refresh(cx);
                     }
                     Err(e) => {
                         store.message = Some(e.message);
@@ -393,6 +424,7 @@ impl HistoryStore {
     /// `w`: opens a new worktree at the selected commit.
     pub fn open_worktree(&mut self, cx: &mut Context<Self>) {
         if self.busy() {
+            self.busy_message(cx);
             return;
         }
         let Some(commit) = self.selected.and_then(|i| self.commits.get(i)) else {

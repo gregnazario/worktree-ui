@@ -110,6 +110,27 @@ fn refresh_keeps_the_selection_by_hash_and_reload_files(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn has_more_tracks_truncation_and_load_more_fills(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    four_commit_repo(tmp.path());
+    let store = cx.update(|cx| HistoryStore::new_with_batch(tmp.path().to_path_buf(), 2, cx));
+    cx.run_until_parked();
+    store.update(cx, |hs, _cx| {
+        assert_eq!(hs.commits.len(), 2, "batch honored");
+        assert!(hs.has_more, "4 commits > batch of 2");
+        assert!(hs.selected.is_some());
+    });
+    store.update(cx, |hs, cx| {
+        hs.load_more(cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |hs, _cx| {
+        assert_eq!(hs.commits.len(), 4, "load_more fetched the rest");
+        assert!(!hs.has_more, "exhausted: no more to load");
+    });
+}
+
+#[gpui::test]
 fn checkout_flags_a_home_mutation_and_moves_head(cx: &mut TestAppContext) {
     let tmp = tempfile::tempdir().unwrap();
     four_commit_repo(tmp.path());
@@ -200,13 +221,32 @@ fn actions_are_gated_while_one_is_in_flight(cx: &mut TestAppContext) {
     four_commit_repo(tmp.path());
     let store = cx.update(|cx| HistoryStore::new(tmp.path().to_path_buf(), cx));
     cx.run_until_parked();
-    store.update(cx, |hs, _cx| {
-        assert!(!hs.busy());
+    // Kick off a checkout WITHOUT letting it land: the action must gate.
+    store.update(cx, |hs, cx| {
+        hs.checkout(cx);
+        assert!(hs.busy(), "in-flight action sets the busy flag");
     });
-    // busy() flips only while an action runs; the flag round-trips through
-    // the completion (checked indirectly by checkout's test above). Here we
-    // pin the gating contract directly.
-    store.update(cx, |hs, _cx| {
-        assert!(!hs.busy(), "idle store is not busy");
+    store.update(cx, |hs, cx| {
+        // A second action while busy is refused with an explanation, not a
+        // silent second worktree.
+        hs.open_worktree(cx);
+        assert!(hs.busy(), "still the first action");
+        assert!(
+            hs.message.as_deref().unwrap_or_default().contains("Busy"),
+            "expected the busy hint, got {:?}",
+            hs.message
+        );
     });
+    cx.run_until_parked();
+    store.update(cx, |hs, _cx| {
+        assert!(!hs.busy(), "busy clears when the action lands");
+    });
+    // The gated `w` never ran: no worktree was created (main only), and
+    // the checkout itself doesn't create one either.
+    let list = sh_out(tmp.path(), &["git", "worktree", "list"]);
+    assert_eq!(
+        list.lines().count(),
+        1,
+        "the gated second action must not run: {list}"
+    );
 }

@@ -248,7 +248,8 @@ fn open_worktree_at_creates_a_registered_detached_worktree() {
         "path names the commit: {created:?}"
     );
     let list = sh_out(tmp.path(), &["git", "worktree", "list", "--porcelain"]);
-    assert!(list.contains(&created.display().to_string()));
+    let created = created.display().to_string().replace('\\', "/");
+    assert!(list.contains(&created), "list: {list}");
 }
 
 #[test]

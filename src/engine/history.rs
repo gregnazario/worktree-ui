@@ -38,27 +38,27 @@ pub struct GraphRow {
     pub cells: Vec<GraphCell>,
 }
 
-/// `git log --topo-order`, newest first, batched.
+/// `git log --topo-order`, newest first, batched. Decorations are pinned
+/// to `--decorate=short`: piped output otherwise depends on git's
+/// `--decorate=auto` default and the user's `log.decorate` config, so the
+/// refs field would silently vary across environments.
 pub fn log(worktree: &Path, max_count: usize) -> Result<Vec<LogCommit>> {
+    // An unborn branch (no commits yet) is an empty history, not an
+    // error — detected structurally, not via (locale-dependent) stderr.
+    if engine::run_trimmed(worktree, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
+        return Ok(Vec::new());
+    }
     let out = engine::run_bytes(
         worktree,
         &[
             "--no-optional-locks",
             "log",
             "--topo-order",
+            "--decorate=short",
             &format!("--max-count={max_count}"),
             "--format=%x00%H%x01%h%x01%P%x01%an%x01%at%x01%D%x01%s",
         ],
-    )
-    .or_else(|e| {
-        // An unborn branch (no commits yet) is an empty history, not an
-        // error — the same distinction the working-copy surface makes.
-        if e.message.contains("does not have any commits yet") {
-            Ok(Vec::new())
-        } else {
-            Err(e)
-        }
-    })?;
+    )?;
     Ok(parse_log(&out))
 }
 
@@ -197,7 +197,9 @@ pub fn commit_files(worktree: &Path, sha: &str) -> Result<Vec<CommitFile>> {
 }
 
 /// The unified diff of one file in one commit, against its first parent
-/// (`git show` is root-commit-safe and first-parent by construction).
+/// (`--first-parent` makes merge commits diff against parent 1 instead of
+/// emitting combined `@@@` diffs this parser cannot read; root commits
+/// are unaffected — `git show` diffs them against nothing).
 pub fn commit_diff(worktree: &Path, sha: &str, rel_path: &str) -> Result<UnifiedDiff> {
     let out = engine::run_bytes(
         worktree,
@@ -205,6 +207,7 @@ pub fn commit_diff(worktree: &Path, sha: &str, rel_path: &str) -> Result<Unified
             "--no-optional-locks",
             "show",
             "--format=",
+            "--first-parent",
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",

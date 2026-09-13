@@ -8,8 +8,8 @@ use crate::engine::history::GraphCell;
 use crate::views::working_copy::tab_label;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, rgba, Context, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window,
+    div, px, rgba, uniform_list, Context, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
 /// Diff lines rendered per commit-detail pane.
@@ -118,7 +118,7 @@ pub fn render(
                 .child(
                     div().text_size(px(11.)).text_color(DIM).child(
                         if files_focused {
-                            "↑↓ file · tab back to commits · S stage all · 1/2 section · esc back"
+                            "↑↓ file · tab back to commits · 1/2 section · esc back"
                                 .to_string()
                         } else if list_focused {
                             "↑↓ commit · y copy hash · x checkout · w new worktree · L load more · r refresh · t terminal · 1/2 section · esc back".to_string()
@@ -138,29 +138,48 @@ pub fn render(
 
 /// The commit list: graph cells, short hash, subject, author + age.
 fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoElement {
-    let list_focus = this.history_list_focus.clone();
     let Some(hs) = this.history.clone() else {
         return div().into_any_element();
     };
-    let loading = hs.read(cx).commits.is_empty() && !hs.read(cx).load_failed;
-    let mut list = div()
-        .id("history-commits")
-        .track_focus(&list_focus)
+    let (count, loading, no_commits, load_failed, has_more, selected) = {
+        let s = hs.read(cx);
+        (
+            s.commits.len(),
+            s.commits.is_empty() && !s.initial_load_done,
+            s.commits.is_empty() && s.initial_load_done,
+            s.load_failed,
+            s.has_more,
+            s.selected,
+        )
+    };
+    let mut wrap = div()
+        .id("history-commits-wrap")
+        .track_focus(&this.history_list_focus)
         .w(px(430.))
         .flex()
         .flex_col()
         .flex_shrink_0()
         .border_r_1()
-        .border_color(BORDER)
-        .overflow_y_scroll();
-    if hs.read(cx).load_failed {
+        .border_color(BORDER);
+    if load_failed {
         let text = hs.read(cx).message.clone().unwrap_or_default();
-        return list
+        return wrap
             .child(div().p_4().text_size(px(13.)).text_color(DIM).child(text))
             .into_any_element();
     }
+    if no_commits {
+        return wrap
+            .child(
+                div()
+                    .p_4()
+                    .text_size(px(13.))
+                    .text_color(DIM)
+                    .child("No commits yet"),
+            )
+            .into_any_element();
+    }
     if loading {
-        return list
+        return wrap
             .child(
                 div()
                     .p_4()
@@ -170,108 +189,121 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
             )
             .into_any_element();
     }
+
+    // A virtualized list: only the visible rows are built each frame, so
+    // the frame cost stays bounded no matter how many batches `L` loads.
+    // Rows are uniform (single-line, fixed paddings) as uniform_list
+    // requires.
+    let focus = this.history_list_focus.clone();
+    let scroll = this.history_list_scroll.clone();
     let now = now_secs();
-    let count = hs.read(cx).commits.len();
-    let selected = hs.read(cx).selected;
-    for pos in 0..count {
-        let (cells, lane, short, subject, author, timestamp, refs) = {
-            let s = hs.read(cx);
-            let c = &s.commits[pos];
-            let cells = s.rows[pos].cells.clone();
-            (
-                cells,
-                s.rows[pos].lane,
-                c.short.clone(),
-                c.subject.clone(),
-                c.author.clone(),
-                c.timestamp,
-                c.refs.clone(),
-            )
-        };
-        let is_selected = selected == Some(pos);
-        let mut row = div()
-            .id(SharedString::from(format!("h-row-{pos}")))
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_1()
-            .when(is_selected, |r| r.bg(ROW_SELECTED));
-        // Graph: one fixed-width cell per lane, so alignment never
-        // depends on the font.
-        for (i, cell) in cells.iter().enumerate() {
-            let (ch, color) = match cell {
-                GraphCell::Commit => ("*", if i == lane { ACCENT } else { DIM }),
-                GraphCell::Wire => ("│", DIM),
-                GraphCell::Empty => (" ", rgba(0x00000000)),
-            };
-            row = row.child(
-                div()
-                    .w(px(14.))
-                    .flex_shrink_0()
-                    .text_size(px(12.))
-                    .text_color(color)
-                    .child(ch),
-            );
-        }
-        let _ = lane;
-        row = row
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(11.))
-                    .text_color(DIM)
-                    .child(short.clone()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(12.))
-                    .text_color(if is_selected { TEXT } else { DIM })
-                    .child(subject),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(11.))
-                    .text_color(DIM)
-                    .child(format!("{} · {}", author, age_label(timestamp, now))),
-            );
-        if !refs.is_empty() {
-            row = row.child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(10.))
-                    .text_color(ACCENT)
-                    .child(refs.clone()),
-            );
-        }
-        let hs_clone = hs.clone();
-        list = list.child(row.on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _, window, cx| {
-                window.focus(&this.history_list_focus);
-                hs_clone.update(cx, |store, cx| store.select(Some(pos), cx));
-            }),
-        ));
-    }
-    let more = hs.read(cx).max_count;
-    if count >= more {
-        list = list.child(
+    let list = uniform_list("history-commits", count, move |range, _window, cx| {
+        range
+            .filter(|pos| *pos < count)
+            .filter_map(|pos| {
+                let (cells, lane, short, subject, author, timestamp, refs, is_selected) = {
+                    let s = hs.read(cx);
+                    let row = s.rows.get(pos)?;
+                    let commit = s.commits.get(pos)?;
+                    (
+                        row.cells.clone(),
+                        row.lane,
+                        commit.short.clone(),
+                        commit.subject.clone(),
+                        commit.author.clone(),
+                        commit.timestamp,
+                        commit.refs.clone(),
+                        selected == Some(pos),
+                    )
+                };
+                let mut row = div()
+                    .id(SharedString::from(format!("h-row-{pos}")))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .when(is_selected, |r| r.bg(ROW_SELECTED))
+                    .on_mouse_down(MouseButton::Left, {
+                        let hs = hs.clone();
+                        let focus = focus.clone();
+                        move |_, window, cx| {
+                            window.focus(&focus);
+                            hs.update(cx, |store, cx| store.select(Some(pos), cx));
+                        }
+                    });
+                for (i, cell) in cells.iter().enumerate() {
+                    let (ch, color) = match cell {
+                        GraphCell::Commit => ("*", if i == lane { ACCENT } else { DIM }),
+                        GraphCell::Wire => ("│", DIM),
+                        GraphCell::Empty => (" ", rgba(0x00000000)),
+                    };
+                    row = row.child(
+                        div()
+                            .w(px(14.))
+                            .flex_shrink_0()
+                            .text_size(px(12.))
+                            .text_color(color)
+                            .child(ch),
+                    );
+                }
+                row = row
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(11.))
+                            .text_color(DIM)
+                            .child(short),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(if is_selected { TEXT } else { DIM })
+                            .child(subject),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(11.))
+                            .text_color(DIM)
+                            .child(format!("{} · {}", author, age_label(timestamp, now))),
+                    );
+                if !refs.is_empty() {
+                    row = row.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .text_color(ACCENT)
+                            .child(refs),
+                    );
+                }
+                Some(row)
+            })
+            .collect()
+    })
+    .track_scroll(scroll)
+    .flex_1()
+    .min_h_0();
+
+    wrap = wrap.child(list);
+    if has_more {
+        wrap = wrap.child(
             div()
                 .px_3()
                 .py_2()
                 .text_size(px(11.))
                 .text_color(DIM)
-                .child(format!("… older commits — L loads {more} more")),
+                .child(format!(
+                    "… older commits — L loads {} more",
+                    crate::history_store::HISTORY_BATCH
+                )),
         );
     }
-    list.into_any_element()
+    wrap.into_any_element()
 }
 
-/// The right column: the selected commit's changed files above the
-/// selected file's diff.
 fn render_detail(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoElement {
     let files_focus = this.history_files_focus.clone();
     let mut pane = div()

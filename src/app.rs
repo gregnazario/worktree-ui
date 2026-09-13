@@ -98,6 +98,8 @@ pub struct RootView {
     pub history_subscription: Option<gpui::Subscription>,
     pub history_list_focus: FocusHandle,
     pub history_files_focus: FocusHandle,
+    /// Scroll position of the history commit list (virtualized).
+    pub history_list_scroll: gpui::UniformListScrollHandle,
     /// Scroll position of the diff pane. Keyboard hunk movement scrolls
     /// the hovered hunk into view through it — without this, `down` on a
     /// tall diff moves the cursor to a hunk that is rendered but scrolled
@@ -201,6 +203,7 @@ impl RootView {
         let detail_diff_focus = cx.focus_handle();
         let history_list_focus = cx.focus_handle();
         let history_files_focus = cx.focus_handle();
+        let history_list_scroll = gpui::UniformListScrollHandle::new();
         let diff_scroll = gpui::ScrollHandle::new();
         // Forced mismatch: the first detail land of any drill-in runs the
         // reset branch, so no previous session's scroll offset can leak in.
@@ -224,6 +227,7 @@ impl RootView {
             history_subscription: None,
             history_list_focus,
             history_files_focus,
+            history_list_scroll,
             diff_scroll,
             diff_scroll_generation,
             diff_scroll_key,
@@ -714,13 +718,47 @@ impl RootView {
                 hs.update(cx, |h, cx| h.toggle_pane(cx));
                 window.focus(&self.history_list_focus);
             }
-            "y" if list_focused => hs.update(cx, |h, cx| h.copy_hash(cx)),
-            "x" if list_focused => hs.update(cx, |h, cx| h.checkout(cx)),
-            "w" if list_focused => hs.update(cx, |h, cx| h.open_worktree(cx)),
+            // Actions explain themselves when swallowed: busy (an action
+            // in flight) or still loading (no commits to act on yet).
+            "y" if list_focused => hs.update(cx, |h, cx| {
+                if h.busy() {
+                    h.busy_message(cx);
+                } else if h.commits.is_empty() {
+                    h.loading_message(cx);
+                } else {
+                    h.copy_hash(cx);
+                }
+            }),
+            "x" if list_focused => hs.update(cx, |h, cx| {
+                if h.busy() {
+                    h.busy_message(cx);
+                } else if h.commits.is_empty() {
+                    h.loading_message(cx);
+                } else {
+                    h.checkout(cx);
+                }
+            }),
+            "w" if list_focused => hs.update(cx, |h, cx| {
+                if h.busy() {
+                    h.busy_message(cx);
+                } else if h.commits.is_empty() {
+                    h.loading_message(cx);
+                } else {
+                    h.open_worktree(cx);
+                }
+            }),
             // gpui normalizes capitals to lowercase + shift.
-            "l" if list_focused && ks.modifiers.shift => {
-                hs.update(cx, |h, cx| h.load_more(cx));
-            }
+            "l" if list_focused && ks.modifiers.shift => hs.update(cx, |h, cx| {
+                if h.busy() {
+                    h.busy_message(cx);
+                } else if !h.has_more {
+                    h.message = Some("No older commits to load".into());
+                    h.note_transient_hint();
+                    cx.notify();
+                } else {
+                    h.load_more(cx);
+                }
+            }),
             _ => {}
         }
     }
