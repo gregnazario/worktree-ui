@@ -83,7 +83,9 @@ pub fn parse_log(bytes: &[u8]) -> Vec<LogCommit> {
             continue; // the format's leading NUL leaves an empty first record
         }
         // splitn(7): the subject is the LAST field, so SOH bytes inside
-        // author/refs metadata shift nothing — the tail stays whole.
+        // the subject can't truncate it. (An SOH in an *earlier* field —
+        // author/refs — would still shift those; that record is dropped
+        // by the shape validation below.)
         let fields: Vec<&[u8]> = record.splitn(7, |b| *b == 1u8).collect();
         let field = |i: usize| -> String {
             fields
@@ -100,9 +102,22 @@ pub fn parse_log(bytes: &[u8]) -> Vec<LogCommit> {
             continue;
         }
         let timestamp = field(4).parse::<i64>().unwrap_or(0);
+        let parents: Vec<String> = field(2).split_whitespace().map(str::to_string).collect();
+        // Corrupt/hand-crafted records can garble middle fields (an SOH
+        // in the author shifts parents/timestamp): drop instead of
+        // rendering a garbled row.
+        if field(2)
+            .bytes()
+            .any(|b| !b.is_ascii_hexdigit() && !b.is_ascii_whitespace())
+        {
+            continue;
+        }
+        if timestamp == 0 && !field(4).trim().is_empty() && field(4).trim() != "0" {
+            continue;
+        }
         commits.push(LogCommit {
             short: field(1),
-            parents: field(2).split_whitespace().map(str::to_string).collect(),
+            parents,
             author: field(3),
             timestamp,
             refs: field(5),

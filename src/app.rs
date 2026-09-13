@@ -914,6 +914,9 @@ impl RootView {
             }
             cx.notify();
         }));
+        // The fresh store just loaded the current log: a stale flag set
+        // by an earlier working-copy mutation no longer applies.
+        self.history_stale = false;
         self.history = Some(hs);
         window.focus(&self.history_list_focus);
         cx.notify();
