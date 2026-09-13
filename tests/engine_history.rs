@@ -5,7 +5,6 @@ mod common;
 
 use common::{fixture_repo, sh, sh_allow_fail, sh_out};
 use worktree_tool::engine;
-use worktree_tool::engine::history::parse_log;
 use worktree_tool::engine::history::{self, GraphCell};
 
 /// init commit + one follow-up commit editing f.txt. Returns (init_sha,
