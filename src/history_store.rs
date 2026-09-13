@@ -168,11 +168,14 @@ impl HistoryStore {
                         store.load_commit_files(cx);
                     }
                     Err(e) => {
-                        // Only a failed FIRST load replaces the list with
-                        // the error pane; later failures (manual `r`,
-                        // transient lock contention) keep the working list
-                        // and surface the error in the footer.
-                        store.load_failed = !store.initial_load_done;
+                        // The first load is "completed (either way)" per the
+                        // field doc: a failed FIRST load takes the error
+                        // pane (and makes the action blocker say "press r"),
+                        // while later failures keep the working list and
+                        // surface the error in the footer only.
+                        let first = store.commits.is_empty();
+                        store.initial_load_done = true;
+                        store.load_failed = first;
                         store.message = Some(if e.is_lock_error() {
                             "another git process may be using this worktree — retry".into()
                         } else {

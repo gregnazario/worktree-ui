@@ -228,6 +228,17 @@ fn commit_diff_renders_the_file_against_the_first_parent() {
 }
 
 #[test]
+fn log_propagates_a_broken_head_instead_of_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture_repo(tmp.path());
+    // Corrupt HEAD: rev-parse HEAD fails AND symbolic-ref fails — the log
+    // must surface an error, not masquerade as "No commits yet".
+    std::fs::write(tmp.path().join(".git/HEAD"), "garbage").unwrap();
+    let err = history::log(tmp.path(), 0, 10).unwrap_err();
+    assert!(!err.message.is_empty());
+}
+
+#[test]
 fn checkout_refuses_when_the_worktree_is_dirty() {
     let tmp = tempfile::tempdir().unwrap();
     let (init, _) = two_commit_repo(tmp.path());

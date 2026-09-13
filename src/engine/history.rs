@@ -48,6 +48,10 @@ pub fn log(worktree: &Path, skip: usize, max_count: usize) -> Result<Vec<LogComm
     // repository (errors propagate), then HEAD may simply not exist.
     engine::run_trimmed(worktree, &["rev-parse", "--is-inside-work-tree"])?;
     if engine::run_trimmed(worktree, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
+        // Unborn branch: symbolic-ref still resolves to the branch name.
+        // A broken/corrupt HEAD fails HERE too and propagates as an error
+        // instead of masquerading as "No commits yet".
+        engine::run_trimmed(worktree, &["symbolic-ref", "--short", "HEAD"])?;
         return Ok(Vec::new());
     }
     let out = engine::run_bytes(
@@ -57,6 +61,10 @@ pub fn log(worktree: &Path, skip: usize, max_count: usize) -> Result<Vec<LogComm
             "log",
             "--topo-order",
             "--decorate=short",
+            // Machine-parsed output must be immune to the user's
+            // log.showSignature config, which interleaves gpg lines
+            // between records.
+            "--no-show-signature",
             &format!("--skip={skip}"),
             &format!("--max-count={max_count}"),
             "--format=%x00%H%x01%h%x01%P%x01%an%x01%at%x01%D%x01%s",
@@ -245,6 +253,8 @@ pub fn commit_diff(worktree: &Path, sha: &str, rel_path: &str) -> Result<Unified
             "show",
             "--format=",
             "--first-parent",
+            // Same show.showSignature immunity as the log command.
+            "--no-show-signature",
             // Rename headers under a pathspec need explicit detection:
             // without -M a pure rename renders as a full deletion.
             "-M",
@@ -291,9 +301,20 @@ pub fn open_worktree_at(worktree: &Path, sha: &str, short: &str) -> Result<PathB
     let parent = worktree.parent().ok_or_else(|| GitError {
         message: "cannot place a worktree next to the repository root".into(),
     })?;
+    // Collisions hide in two places: an existing DIRECTORY, and a
+    // worktree still REGISTERED in .git/worktrees whose directory was
+    // deleted by hand (git refuses to reuse the name). Both advance the
+    // suffix.
+    let registered = engine::run_trimmed(worktree, &["worktree", "list", "--porcelain"])
+        .unwrap_or_default()
+        .replace('\\', "/");
     let mut path = parent.join(format!("{name}-{short}"));
     let mut n = 2u32;
-    while path.exists() {
+    loop {
+        let candidate = path.display().to_string().replace('\\', "/");
+        if !path.exists() && !registered.contains(&candidate) {
+            break;
+        }
         path = parent.join(format!("{name}-{short}-{n}"));
         n += 1;
     }
