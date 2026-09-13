@@ -751,41 +751,41 @@ impl RootView {
                 window.focus(&self.history_list_focus);
             }
             // Actions explain themselves when swallowed: busy (an action
-            // in flight) or still loading (no commits to act on yet).
+            // in flight), still loading, a failed first load, or an empty
+            // repo — each state gets its own accurate message.
             "y" if list_focused => hs.update(cx, |h, cx| {
-                if h.busy() {
-                    h.busy_message(cx);
-                } else if h.commits.is_empty() {
-                    h.loading_message(cx);
+                if let Some(blocked) = h.action_blocker() {
+                    h.message = Some(blocked);
+                    h.note_transient_hint();
+                    cx.notify();
                 } else {
                     h.copy_hash(cx);
                 }
             }),
             "x" if list_focused => hs.update(cx, |h, cx| {
-                if h.busy() {
-                    h.busy_message(cx);
-                } else if h.commits.is_empty() {
-                    h.loading_message(cx);
+                if let Some(blocked) = h.action_blocker() {
+                    h.message = Some(blocked);
+                    h.note_transient_hint();
+                    cx.notify();
                 } else {
                     h.checkout(cx);
                 }
             }),
             "w" if list_focused => hs.update(cx, |h, cx| {
-                if h.busy() {
-                    h.busy_message(cx);
-                } else if h.commits.is_empty() {
-                    h.loading_message(cx);
+                if let Some(blocked) = h.action_blocker() {
+                    h.message = Some(blocked);
+                    h.note_transient_hint();
+                    cx.notify();
                 } else {
                     h.open_worktree(cx);
                 }
             }),
             // gpui normalizes capitals to lowercase + shift.
             "l" if list_focused && ks.modifiers.shift => hs.update(cx, |h, cx| {
-                if h.busy() {
-                    h.busy_message(cx);
-                } else if h.commits.is_empty() {
-                    // The first log may still be in flight.
-                    h.loading_message(cx);
+                if let Some(blocked) = h.action_blocker() {
+                    h.message = Some(blocked);
+                    h.note_transient_hint();
+                    cx.notify();
                 } else if !h.has_more {
                     h.message = Some("No older commits to load".into());
                     h.note_transient_hint();

@@ -232,6 +232,13 @@ impl HistoryStore {
                         store.load_failed = false;
                         store.has_more = fetched.len() > HISTORY_BATCH;
                         fetched.truncate(HISTORY_BATCH);
+                        // The repo may have gained commits above the
+                        // window between loads (commit in a terminal,
+                        // come back, press L): the skip window shifts and
+                        // the boundary commit would be appended twice.
+                        let known: std::collections::HashSet<String> =
+                            store.commits.iter().map(|c| c.hash.clone()).collect();
+                        fetched.retain(|c| !known.contains(&c.hash));
                         let mut commits = std::mem::take(&mut store.commits);
                         commits.append(&mut fetched);
                         store.rows = history::assign_lanes(&mut commits);
@@ -555,5 +562,25 @@ impl HistoryStore {
     /// An action (checkout / worktree add) is in flight.
     pub fn busy(&self) -> bool {
         self.action_in_flight
+    }
+
+    /// Why an action key currently cannot run, or None when it can.
+    /// Centralized so every caller explains the same state the same way —
+    /// notably a FAILED first load is finished, not "loading", and must
+    /// point at retrying instead.
+    pub fn action_blocker(&self) -> Option<String> {
+        if self.busy() {
+            return Some("Busy — wait for the current operation".into());
+        }
+        if self.commits.is_empty() {
+            if !self.initial_load_done {
+                return Some("Loading history…".into());
+            }
+            if self.load_failed {
+                return Some("history failed to load — press r to retry".into());
+            }
+            return Some("No commits yet".into());
+        }
+        None
     }
 }
