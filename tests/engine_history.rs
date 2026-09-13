@@ -235,7 +235,7 @@ fn checkout_refuses_when_the_worktree_is_dirty() {
 
     let err = history::checkout(tmp.path(), &init).unwrap_err();
     assert!(
-        err.message.contains("working copy has changes"),
+        err.message.contains("tracked changes"),
         "expected the dirty refusal, got: {err}"
     );
     // HEAD untouched.

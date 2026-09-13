@@ -136,7 +136,7 @@ pub fn assign_lanes(commits: &mut [LogCommit]) -> Vec<GraphRow> {
             wires[slot] = Some(parent.clone());
         }
         commit.lane = lane;
-        let cells = (0..wires.len())
+        let mut cells: Vec<GraphCell> = (0..wires.len())
             .map(|i| {
                 if i == lane {
                     GraphCell::Commit
@@ -147,6 +147,12 @@ pub fn assign_lanes(commits: &mut [LogCommit]) -> Vec<GraphRow> {
                 }
             })
             .collect();
+        // Trim freed trailing lanes: a wire closing at the last lane must
+        // not paint a phantom blank column on every subsequent row (the
+        // commit's own cell is never Empty, so its lane always survives).
+        while matches!(cells.last(), Some(GraphCell::Empty)) {
+            cells.pop();
+        }
         rows.push(GraphRow { lane, cells });
     }
     rows
@@ -257,10 +263,14 @@ pub fn commit_diff(worktree: &Path, sha: &str, rel_path: &str) -> Result<Unified
 /// jump, and git's own carry-over behavior would be surprising here.
 pub fn checkout(worktree: &Path, sha: &str) -> Result<()> {
     let status = crate::engine::working_copy::status(worktree)?;
-    if !status.entries.is_empty() {
+    // Only TRACKED changes endanger a checkout: untracked files are
+    // carried across untouched (and git itself refuses if one would be
+    // clobbered, with that stderr surfaced here).
+    let dirty = status.entries.iter().any(|entry| !entry.untracked);
+    if dirty {
         return Err(GitError {
             message:
-                "the working copy has changes — commit or discard them before checking out a commit"
+                "the working copy has tracked changes — commit or discard them before checking out a commit"
                     .into(),
         });
     }

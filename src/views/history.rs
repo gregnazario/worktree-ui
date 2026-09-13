@@ -255,12 +255,15 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
                             .text_color(DIM)
                             .child(short),
                     )
+                    // uniform_list requires uniform row height: long
+                    // subjects must ellipsize, never wrap.
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .text_size(px(12.))
                             .text_color(if is_selected { TEXT } else { DIM })
+                            .truncate()
                             .child(subject),
                     )
                     .child(

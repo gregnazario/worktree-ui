@@ -179,7 +179,7 @@ fn checkout_refuses_when_dirty(cx: &mut TestAppContext) {
             hs.message
                 .as_deref()
                 .unwrap_or_default()
-                .contains("working copy has changes"),
+                .contains("tracked changes"),
             "expected the dirty refusal, got {:?}",
             hs.message
         );
