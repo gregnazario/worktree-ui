@@ -51,6 +51,9 @@ pub struct HistoryStore {
     /// True when the FIRST log load failed; the view shows the error
     /// instead of an eternal "Loading history…".
     pub load_failed: bool,
+    /// The first load's error text — separate from the transient
+    /// `message`, which later keystrokes overwrite.
+    pub load_error: Option<String>,
     /// A worktree-affecting action (checkout / worktree add) is in flight;
     /// blocks further actions until its completion lands.
     action_in_flight: bool,
@@ -91,6 +94,7 @@ impl HistoryStore {
             action_in_flight: false,
             has_more: false,
             initial_load_done: false,
+            load_error: None,
         });
         entity.update(cx, |store, cx| store.refresh(cx));
         entity
@@ -176,11 +180,17 @@ impl HistoryStore {
                         let first = store.commits.is_empty();
                         store.initial_load_done = true;
                         store.load_failed = first;
-                        store.message = Some(if e.is_lock_error() {
-                            "another git process may be using this worktree — retry".into()
+                        let text = if e.is_lock_error() {
+                            "another git process may be using this worktree — retry".to_string()
                         } else {
                             e.message
-                        });
+                        };
+                        if first {
+                            // Dedicated field: the error pane must survive
+                            // later keystrokes (the footer message does not).
+                            store.load_error = Some(text.clone());
+                        }
+                        store.message = Some(text);
                         store.busy_hint = true;
                     }
                 }

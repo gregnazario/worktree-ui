@@ -162,7 +162,9 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
         .border_r_1()
         .border_color(BORDER);
     if load_failed {
-        let text = hs.read(cx).message.clone().unwrap_or_default();
+        // The dedicated error text survives later keystrokes — unlike the
+        // transient footer message, which actions overwrite.
+        let text = hs.read(cx).load_error.clone().unwrap_or_default();
         return wrap
             .child(div().p_4().text_size(px(13.)).text_color(DIM).child(text))
             .into_any_element();

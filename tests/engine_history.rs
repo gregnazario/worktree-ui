@@ -89,6 +89,39 @@ fn log_on_a_repo_without_commits_is_empty() {
 }
 
 #[test]
+fn lanes_fork_does_not_double_wire_the_shared_parent() {
+    // Two children of A (a fork): A must keep ONE wire. Regression for an
+    // i==0 placement that re-wired the shared parent on the second child,
+    // leaving an unconsumable phantom wire.
+    let mut commits = vec![
+        log_commit("c", &[]),
+        log_commit("b", &["a"]),
+        log_commit("a", &[]),
+    ];
+    // relabel: c and b both fork from a
+    commits[0].parents = vec!["a".into()];
+    commits[1].parents = vec!["a".into()];
+    commits[2].hash = "a".into();
+    commits[2].parents = vec![];
+    let rows = history::assign_lanes(&mut commits);
+    // The root's row must be exactly its commit cell — no phantom wire.
+    assert_eq!(rows[2].cells, vec![GraphCell::Commit]);
+}
+
+fn log_commit(hash: &str, parents: &[&str]) -> worktree_tool::engine::history::LogCommit {
+    worktree_tool::engine::history::LogCommit {
+        hash: hash.to_string(),
+        short: hash.to_string(),
+        parents: parents.iter().map(|p| p.to_string()).collect(),
+        author: "t".into(),
+        timestamp: 0,
+        refs: String::new(),
+        subject: hash.into(),
+        lane: 0,
+    }
+}
+
+#[test]
 fn lanes_linear_history_stays_on_lane_zero() {
     let tmp = tempfile::tempdir().unwrap();
     two_commit_repo(tmp.path());

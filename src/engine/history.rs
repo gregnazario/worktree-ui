@@ -131,15 +131,19 @@ pub fn assign_lanes(commits: &mut [LogCommit]) -> Vec<GraphRow> {
                 })
             });
         wires[lane] = None; // the commit consumed its wire
-                            // The FIRST parent continues the commit's column (index-based,
-                            // not "first parent that happens to lack a wire": in criss-cross
-                            // topologies a pre-wired first parent would hand the column to a
-                            // later parent). Already-wired parents keep their column.
+                            // The already-wired check comes FIRST for every parent: a parent
+                            // shared by two children (every fork) must keep its single
+                            // existing wire, not be re-wired onto the second child's lane.
+                            // Then the FIRST parent continues the commit's column (index-
+                            // based: in criss-cross topologies a pre-wired first parent
+                            // keeping its own column must not hand the lane to a later
+                            // parent); later parents take free slots.
         for (i, parent) in commit.parents.iter().enumerate() {
+            if wires.iter().any(|w| w.as_deref() == Some(parent.as_str())) {
+                continue;
+            }
             let slot = if i == 0 {
                 lane
-            } else if wires.iter().any(|w| w.as_deref() == Some(parent.as_str())) {
-                continue;
             } else {
                 wires.iter().position(|w| w.is_none()).unwrap_or_else(|| {
                     wires.push(None);
