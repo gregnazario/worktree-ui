@@ -406,7 +406,8 @@ mod apply_tests {
         // the hovered hunk's byte-exact raw.
         let mut patch = ud.header_raw.clone();
         patch.extend_from_slice(&ud.hunks[0].raw);
-        mutate::apply_cached(tmp.path(), patch).unwrap();
+        let expected = ud.index_pre_image.clone();
+        mutate::apply_cached(tmp.path(), "h.txt", patch.clone(), expected.as_deref()).unwrap();
 
         // The index holds only the hunk-1 change…
         let staged = diff::diff_staged(tmp.path(), "h.txt").unwrap();
@@ -435,15 +436,18 @@ mod apply_tests {
         let ud = diff::diff_unstaged(tmp.path(), "h.txt").unwrap();
         let mut patch = ud.header_raw.clone();
         patch.extend_from_slice(&ud.hunks[0].raw);
-        mutate::apply_cached(tmp.path(), patch.clone()).unwrap();
+        let expected = ud.index_pre_image.clone();
+        mutate::apply_cached(tmp.path(), "h.txt", patch.clone(), expected.as_deref()).unwrap();
 
-        // The index already contains this hunk: the preimage no longer
-        // matches, and git must refuse (the UI surfaces this as "stage the
-        // whole file instead") — never a silent success.
-        let err = mutate::apply_cached(tmp.path(), patch).unwrap_err();
+        // The index already contains this hunk: its blob no longer matches
+        // the diff's post-image, and the explicit check refuses (the UI
+        // surfaces this as "press r and try again") — never a silent
+        // success, and never a duplicated pure-insertion hunk.
+        let err =
+            mutate::apply_cached(tmp.path(), "h.txt", patch, expected.as_deref()).unwrap_err();
         assert!(
-            err.message.contains("does not apply") || err.message.contains("patch failed"),
-            "expected git's apply refusal, got: {err}"
+            err.message.contains("changed since this diff was loaded"),
+            "expected the stale-index refusal, got: {err}"
         );
     }
 
@@ -460,7 +464,8 @@ mod apply_tests {
         assert_eq!(ud.hunks.len(), 1);
         let mut patch = ud.header_raw.clone();
         patch.extend_from_slice(&ud.hunks[0].raw);
-        mutate::apply_cached(tmp.path(), patch).unwrap();
+        let expected = ud.index_pre_image.clone();
+        mutate::apply_cached(tmp.path(), "n.txt", patch, expected.as_deref()).unwrap();
 
         let staged = diff::diff_staged(tmp.path(), "n.txt").unwrap();
         assert_eq!(staged.hunks.len(), 1);

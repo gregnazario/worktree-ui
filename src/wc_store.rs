@@ -579,11 +579,13 @@ impl WorkingCopyStore {
         .detach();
     }
 
-    /// Index of the hovered hunk, clamped to the current detail's hunk
-    /// count (0 when there is no diff). `saturating` because a non-binary
-    /// diff can legitimately have ZERO hunks — a mode-only change or a
-    /// 100%-similarity rename renders header-only — and `n - 1` would
-    /// underflow (panic in debug, usize::MAX in release).
+    /// Index of the hovered hunk, clamped to the number of hunks the diff
+    /// pane renders (`hunk_bound`) — never the raw hunk count, which the
+    /// render cap can truncate (0 when there is no diff). `saturating`
+    /// because a non-binary diff can legitimately have ZERO hunks — a
+    /// mode-only change or a 100%-similarity rename renders header-only —
+    /// and `n - 1` would underflow (panic in debug, usize::MAX in
+    /// release).
     pub fn hunk_cursor(&self) -> usize {
         self.hunk_cursor.min(self.hunk_bound().saturating_sub(1))
     }
@@ -620,8 +622,9 @@ impl WorkingCopyStore {
             && self.hunk_bound() > 0
     }
 
-    /// Hunks the diff pane can actually render (headers before the line
-    /// cap): the ceiling for the cursor and for `stage_hunk`. Zero-hunk
+    /// Hunks the diff pane can actually render — only body lines count
+    /// toward the line cap: the ceiling for the cursor and for
+    /// `stage_hunk`. Zero-hunk
     /// non-binary diffs (mode-only change, pure rename) yield 0 — the
     /// clamp saturates rather than underflowing.
     pub fn hunk_bound(&self) -> usize {
@@ -759,12 +762,19 @@ impl WorkingCopyStore {
             cx.notify();
             return;
         }
-        // Not-yet-loaded, failed, or header-only diffs (mode-only change,
-        // pure rename) land here: never a silent no-op — the footer
-        // advertises `s stage hunk`, so a dead key must explain itself.
+        // Never a silent no-op — the footer advertises `s stage hunk`, so
+        // a dead key must explain itself. A FAILED load is distinct from a
+        // genuinely hunk-less diff: "stage the whole file" is the wrong
+        // remedy for a transient git error; a retry is.
         let Some(FileDetail::Diff(ud)) = self.detail.as_ref() else {
-            self.message =
-                Some("no hunks in this diff — stage the whole file with s on the file row".into());
+            self.message = Some(
+                if matches!(self.detail.as_ref(), Some(FileDetail::Failed(_))) {
+                    "the diff failed to load — press r to retry".to_string()
+                } else {
+                    "no hunks in this diff — stage the whole file with s on the file row"
+                        .to_string()
+                },
+            );
             self.note_transient_hint();
             cx.notify();
             return;
@@ -788,6 +798,8 @@ impl WorkingCopyStore {
         };
         let mut patch = ud.header_raw.clone();
         patch.extend_from_slice(&hunk.raw);
+        let pre_image = ud.index_pre_image.clone();
+        let path = entry.path.clone();
         let worktree = self.worktree.clone();
         // Bump to cancel in-flight snapshot loads — and in-flight DETAIL
         // loads: one that started before the apply would land after
@@ -803,7 +815,9 @@ impl WorkingCopyStore {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { mutate::apply_cached(&worktree, patch) })
+                .spawn(async move {
+                    mutate::apply_cached(&worktree, &path, patch, pre_image.as_deref())
+                })
                 .await;
             this.update(cx, |store, cx| {
                 store.after_mutation(

@@ -55,11 +55,33 @@ fn run_chunk(worktree: &Path, prefix: &[&str], chunk: &[String]) -> Result<()> {
 
 /// Applies a reconstructed patch — the diff's byte-exact header plus the
 /// selected hunks' `raw` — to the index only. The worktree is never
-/// touched: a stale patch (the index moved since the diff was shown)
-/// simply fails git's preimage check, which callers surface as "stage the
-/// whole file instead". Takes index.lock like every mutation, so no
+/// touched. Before applying, the index's staged blob is compared against
+/// the diff header's abbreviated PRE-image (`expects_index_blob`): git's
+/// preimage check catches most stale patches, but a PURE-INSERTION hunk
+/// has no removal preimage — if the index moved and already contains the
+/// inserted lines, apply would silently duplicate them — so the explicit
+/// check refuses instead. Takes index.lock like every mutation, so no
 /// `--no-optional-locks` here.
-pub fn apply_cached(worktree: &Path, patch: Vec<u8>) -> Result<()> {
+pub fn apply_cached(
+    worktree: &Path,
+    rel_path: &str,
+    patch: Vec<u8>,
+    expects_index_blob: Option<&str>,
+) -> Result<()> {
+    if let Some(expected) = expects_index_blob {
+        let staged = engine::run_trimmed(
+            worktree,
+            &["ls-files", "-s", "--", &format!(":(literal){rel_path}")],
+        )?;
+        // "100644 <full-sha> 0\t<path>" — the header's pre-image hash is
+        // an abbreviation of this one.
+        let index_blob = staged.split_whitespace().nth(1).unwrap_or_default();
+        if !index_blob.starts_with(expected) {
+            return Err(crate::engine::GitError {
+                message: "the file's staged state changed since this diff was loaded — press r and try again".into(),
+            });
+        }
+    }
     engine::run_bytes_stdin(
         worktree,
         &["apply", "--cached", "--whitespace=nowarn"],
