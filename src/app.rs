@@ -96,6 +96,9 @@ pub struct RootView {
     /// Observation of the history store: checkout / worktree-add actions
     /// flag `mutated`, which refreshes the home worktree list.
     pub history_subscription: Option<gpui::Subscription>,
+    /// Set when working-copy mutations make the history log stale; the
+    /// next entry into the History section revalidates it.
+    pub history_stale: bool,
     pub history_list_focus: FocusHandle,
     pub history_files_focus: FocusHandle,
     /// Scroll position of the history commit list (virtualized).
@@ -225,6 +228,7 @@ impl RootView {
             section: Section::WorkingCopy,
             history: None,
             history_subscription: None,
+            history_stale: false,
             history_list_focus,
             history_files_focus,
             history_list_scroll,
@@ -505,6 +509,9 @@ impl RootView {
         self.detail_subscription = Some(cx.observe(&wc, move |this, wc, cx| {
             if wc.update(cx, |store, _cx| store.take_mutated()) {
                 this.store.update(cx, |store, cx| store.refresh(cx));
+                // A commit/stage changes reachable history: re-entry into
+                // the History section must revalidate its log.
+                this.history_stale = true;
             }
             cx.notify();
         }));
@@ -814,9 +821,14 @@ impl RootView {
         }
         self.section = Section::History;
         if let Some(hs) = &self.history {
-            // Re-entering after commits made in section 1: revalidate the
-            // log instead of showing a stale history.
-            hs.update(cx, |h, cx| h.refresh(cx));
+            // Revalidate only when the working copy mutated since the last
+            // visit — an unconditional refetch on every tab press costs a
+            // full-depth log run for nothing.
+            let stale = self.history_stale;
+            self.history_stale = false;
+            if stale {
+                hs.update(cx, |h, cx| h.refresh(cx));
+            }
             window.focus(&self.history_list_focus);
             cx.notify();
             return;
@@ -835,6 +847,7 @@ impl RootView {
                 if let Some(wc) = &this.detail {
                     wc.update(cx, |store, cx| store.refresh(cx));
                 }
+                this.history_stale = false;
             }
             cx.notify();
         }));
