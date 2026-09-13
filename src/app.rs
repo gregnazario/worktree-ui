@@ -516,6 +516,15 @@ impl RootView {
     /// Returns to the home list: refocus it and refresh, since the user may
     /// have mutated the worktree from the detail view.
     pub fn close_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // An in-flight history action (checkout / worktree add) would
+        // lose its completion when the store drops — the home list would
+        // go stale. Keep the drill-in until it lands.
+        if let Some(hs) = &self.history {
+            if hs.read(cx).busy() {
+                hs.update(cx, |store, cx| store.busy_message(cx));
+                return;
+            }
+        }
         // A busy detail view means an operation is in flight — possibly the
         // commit editor, which can run for minutes. Dropping the store now
         // would orphan it: re-drilling opens a fresh, idle store while the

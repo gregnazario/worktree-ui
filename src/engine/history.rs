@@ -81,7 +81,9 @@ fn parse_log(bytes: &[u8]) -> Vec<LogCommit> {
         if record.is_empty() {
             continue; // the format's leading NUL leaves an empty first record
         }
-        let fields: Vec<&[u8]> = record.split(|b| *b == 1u8).collect();
+        // splitn(7): the subject is the LAST field, so SOH bytes inside
+        // author/refs metadata shift nothing — the tail stays whole.
+        let fields: Vec<&[u8]> = record.splitn(7, |b| *b == 1u8).collect();
         let field = |i: usize| -> String {
             fields
                 .get(i)
@@ -129,19 +131,20 @@ pub fn assign_lanes(commits: &mut [LogCommit]) -> Vec<GraphRow> {
                 })
             });
         wires[lane] = None; // the commit consumed its wire
-        let mut first_parent_placed = false;
-        for parent in &commit.parents {
-            if wires.iter().any(|w| w.as_deref() == Some(parent.as_str())) {
-                continue; // the merge target's wire already exists
-            }
-            let slot = if first_parent_placed {
+                            // The FIRST parent continues the commit's column (index-based,
+                            // not "first parent that happens to lack a wire": in criss-cross
+                            // topologies a pre-wired first parent would hand the column to a
+                            // later parent). Already-wired parents keep their column.
+        for (i, parent) in commit.parents.iter().enumerate() {
+            let slot = if i == 0 {
+                lane
+            } else if wires.iter().any(|w| w.as_deref() == Some(parent.as_str())) {
+                continue;
+            } else {
                 wires.iter().position(|w| w.is_none()).unwrap_or_else(|| {
                     wires.push(None);
                     wires.len() - 1
                 })
-            } else {
-                first_parent_placed = true;
-                lane // the first parent continues the commit's column
             };
             wires[slot] = Some(parent.clone());
         }
