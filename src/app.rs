@@ -531,18 +531,24 @@ impl RootView {
             if hs.read(cx).busy() {
                 // Surface the blockage in the VISIBLE section: pressing
                 // esc from the Working Copy section would otherwise show
-                // nothing (the History view isn't rendered there).
+                // nothing (the History view isn't rendered there). Name
+                // the actual in-flight action.
+                let what = hs.read(cx).action_name().unwrap_or("history action");
+                let msg = format!("Busy — {what} is finishing in this worktree");
                 if self.section == Section::WorkingCopy {
                     if let Some(wc) = &self.detail {
                         wc.update(cx, |store, cx| {
-                            store.message =
-                                Some("Busy — a checkout is finishing in this worktree".into());
+                            store.message = Some(msg);
                             store.note_transient_hint();
                             cx.notify();
                         });
                     }
                 } else {
-                    hs.update(cx, |store, cx| store.busy_message(cx));
+                    hs.update(cx, |store, cx| {
+                        store.message = Some(msg);
+                        store.note_transient_hint();
+                        cx.notify();
+                    });
                 }
                 return;
             }

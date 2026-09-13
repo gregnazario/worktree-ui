@@ -66,6 +66,8 @@ pub struct HistoryStore {
     /// A worktree-affecting action (checkout / worktree add) is in flight;
     /// blocks further actions until its completion lands.
     action_in_flight: bool,
+    /// Which action is running — the busy message names it accurately.
+    action_kind: Option<&'static str>,
     /// True when the log fetch returned the full batch — older commits
     /// likely exist and `L` will find them.
     pub has_more: bool,
@@ -104,6 +106,7 @@ impl HistoryStore {
             retrying: false,
             batch,
             action_in_flight: false,
+            action_kind: None,
             has_more: false,
             initial_load_done: false,
             load_error: None,
@@ -146,10 +149,9 @@ impl HistoryStore {
         // distinguishable from exhaustion.
         let skip = 0;
         let max_count = self.max_count + 1;
-        let keep_hash = self
-            .selected
-            .and_then(|i| self.commits.get(i))
-            .map(|c| c.hash.clone());
+        // keep_hash is resolved AGAIN inside the completion (from the
+        // CURRENT selection) so mid-flight navigation wins over the
+        // stale position this refresh started from.
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -164,6 +166,13 @@ impl HistoryStore {
                 // the in-flight flag is released HERE or `L` stays off.
                 store.load_more_in_flight = false;
                 store.retrying = false;
+                // Resolve the keep-target from the CURRENT selection: the
+                // user may have navigated while this fetch was in flight,
+                // and their position wins over where the refresh started.
+                let keep_hash = store
+                    .selected
+                    .and_then(|i| store.commits.get(i))
+                    .map(|c| c.hash.clone());
                 match result {
                     Ok(mut fetched) => {
                         store.load_failed = false;
@@ -553,6 +562,7 @@ impl HistoryStore {
         self.message = Some(format!("Checking out {short}…"));
         self.note_transient_hint();
         self.action_in_flight = true;
+        self.action_kind = Some("checkout");
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -561,6 +571,7 @@ impl HistoryStore {
                 .await;
             this.update(cx, |store, cx| {
                 store.action_in_flight = false;
+                store.action_kind = None;
                 match result {
                     Ok(()) => {
                         store.message = Some(format!("Checked out {short} (detached HEAD)"));
@@ -599,6 +610,7 @@ impl HistoryStore {
         self.message = Some(format!("Creating worktree at {short}…"));
         self.note_transient_hint();
         self.action_in_flight = true;
+        self.action_kind = Some("worktree add");
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -607,6 +619,7 @@ impl HistoryStore {
                 .await;
             this.update(cx, |store, cx| {
                 store.action_in_flight = false;
+                store.action_kind = None;
                 match result {
                     Ok(path) => {
                         store.message = Some(format!("Worktree created at {}", path.display()));
@@ -628,6 +641,11 @@ impl HistoryStore {
     /// An action (checkout / worktree add) is in flight.
     pub fn busy(&self) -> bool {
         self.action_in_flight
+    }
+
+    /// Name of the in-flight action, for accurate busy messages.
+    pub fn action_name(&self) -> Option<&'static str> {
+        self.action_kind
     }
 
     /// Widest graph row in the loaded list (number of lanes at the
