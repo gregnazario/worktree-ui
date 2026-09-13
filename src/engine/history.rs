@@ -76,7 +76,7 @@ pub fn log(worktree: &Path, skip: usize, max_count: usize) -> Result<Vec<LogComm
 
 /// Parses `%x00`-separated records with `%x01`-separated fields. Display
 /// strings (author, refs, subject) are lossy-decoded; hashes are ASCII.
-fn parse_log(bytes: &[u8]) -> Vec<LogCommit> {
+pub fn parse_log(bytes: &[u8]) -> Vec<LogCommit> {
     let mut commits = Vec::new();
     for record in bytes.split(|b| *b == 0u8) {
         if record.is_empty() {
@@ -92,7 +92,11 @@ fn parse_log(bytes: &[u8]) -> Vec<LogCommit> {
                 .unwrap_or_default()
         };
         let hash = field(0);
-        if hash.is_empty() {
+        // The NUL delimiter can appear INSIDE a field (a hand-crafted
+        // commit object or a corrupt repo), splitting a record mid-field
+        // and minting a phantom "commit" whose hash is subject text.
+        // Validate the shape before accepting the record.
+        if hash.len() != 40 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             continue;
         }
         let timestamp = field(4).parse::<i64>().unwrap_or(0);

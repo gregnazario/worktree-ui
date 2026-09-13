@@ -5,6 +5,7 @@ mod common;
 
 use common::{fixture_repo, sh, sh_allow_fail, sh_out};
 use worktree_tool::engine;
+use worktree_tool::engine::history::parse_log;
 use worktree_tool::engine::history::{self, GraphCell};
 
 /// init commit + one follow-up commit editing f.txt. Returns (init_sha,
@@ -72,6 +73,25 @@ fn log_merge_has_both_parents_in_order() {
     let log = history::log(tmp.path(), 0, 10).unwrap();
     assert_eq!(log[0].subject, "merge");
     assert_eq!(log[0].parents, vec![main, side], "first parent first");
+}
+
+#[test]
+fn parse_log_skips_phantom_records_from_embedded_nuls() {
+    // A NUL inside the subject splits the record; the tail must not be
+    // accepted as a phantom commit (untrusted/corrupt clones).
+    let mut raw = Vec::new();
+    raw.extend_from_slice(b"\0");
+    raw.extend_from_slice(format!("{}\x01", "a".repeat(40)).as_bytes()); // full hash
+    raw.extend_from_slice(b"abc1234\x01");
+    raw.extend_from_slice(b"\x01"); // parents empty
+    raw.extend_from_slice(b"t\x011700000000\x01main\x01real subject\n");
+    // phantom record: "hash" is subject text, not hex
+    raw.extend_from_slice(
+        b"\0not-a-real-commit-hash-at-all\x01x\x01\x01x\x011700000001\x01\x01junk subject\n",
+    );
+    let log = history::parse_log(&raw);
+    assert_eq!(log.len(), 1, "phantom record skipped: {log:?}");
+    assert_eq!(log[0].subject, "real subject");
 }
 
 #[test]

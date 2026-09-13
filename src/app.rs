@@ -529,7 +529,21 @@ impl RootView {
         // go stale. Keep the drill-in until it lands.
         if let Some(hs) = &self.history {
             if hs.read(cx).busy() {
-                hs.update(cx, |store, cx| store.busy_message(cx));
+                // Surface the blockage in the VISIBLE section: pressing
+                // esc from the Working Copy section would otherwise show
+                // nothing (the History view isn't rendered there).
+                if self.section == Section::WorkingCopy {
+                    if let Some(wc) = &self.detail {
+                        wc.update(cx, |store, cx| {
+                            store.message =
+                                Some("Busy — a checkout is finishing in this worktree".into());
+                            store.note_transient_hint();
+                            cx.notify();
+                        });
+                    }
+                } else {
+                    hs.update(cx, |store, cx| store.busy_message(cx));
+                }
                 return;
             }
         }
@@ -756,7 +770,19 @@ impl RootView {
         }
         match ks.key.as_str() {
             "2" => {}
-            "r" => hs.update(cx, |h, cx| h.refresh(cx)),
+            // r is gated like every other history key: a mid-flight
+            // checkout must not spawn a redundant concurrent log, and the
+            // refresh's success cleanup would erase the in-flight
+            // action's progress hint.
+            "r" if list_focused || files_focused => hs.update(cx, |h, cx| {
+                if let Some(blocked) = h.action_blocker() {
+                    h.message = Some(blocked);
+                    h.note_transient_hint();
+                    cx.notify();
+                } else {
+                    h.refresh(cx);
+                }
+            }),
             "up" if list_focused => {
                 let pos = hs.update(cx, |h, cx| {
                     h.select_prev(cx);
