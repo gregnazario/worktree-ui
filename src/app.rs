@@ -1691,6 +1691,59 @@ mod tests {
     }
 
     #[gpui::test]
+    fn staging_a_hunk_reveals_the_next_hovered_hunk(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        // Three hunks with a tall first hunk: after staging hunk 3 the
+        // cursor clamps onto hunk 2, which sits BELOW the viewport at the
+        // old scroll offset — the post-mutation reload must reveal it, or
+        // the next `s` stages content the user cannot see.
+        let lines: Vec<String> = (1..=1500).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("m.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["git", "add", "m.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "m"]);
+        let mut edited = lines.clone();
+        for (i, l) in edited.iter_mut().enumerate().take(250) {
+            *l = format!("edited {i}");
+        }
+        edited[699] = "line 700 edited".into();
+        edited[1399] = "line 1400 edited".into();
+        std::fs::write(repo.join("m.txt"), edited.join("\n") + "\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("down");
+        vcx.simulate_keystrokes("down"); // hover hunk 3 (the last one)
+        vcx.simulate_keystrokes("s"); // stage it
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(wc.hunk_count(), Some(2), "hunk 3 staged and gone");
+            assert_eq!(wc.hunk_cursor(), 1, "cursor clamped onto hunk 2");
+            let handle = &root.diff_scroll;
+            // The hovered block is hunk 2: child index 2 (file-header
+            // summary is child 0). Its TOP must be on screen after the
+            // post-mutation reload.
+            let bounds = handle
+                .bounds_for_item(2)
+                .expect("hunk 2 block has recorded bounds");
+            let offset = handle.offset().y;
+            let viewport = handle.bounds().size.height;
+            assert!(
+                bounds.top() + offset < viewport - gpui::px(10.)
+                    && bounds.bottom() + offset > gpui::px(0.),
+                "hunk 2 must be revealed after staging hunk 3 (top {:#?} + offset {offset:#?} vs viewport {viewport:#?})",
+                bounds.top()
+            );
+        });
+    }
+
+    #[gpui::test]
     fn diff_pane_shift_s_still_stages_all(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("fixture");
