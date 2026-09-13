@@ -44,7 +44,9 @@ pub struct GraphRow {
 /// refs field would silently vary across environments.
 pub fn log(worktree: &Path, skip: usize, max_count: usize) -> Result<Vec<LogCommit>> {
     // An unborn branch (no commits yet) is an empty history, not an
-    // error — detected structurally, not via (locale-dependent) stderr.
+    // error — detected structurally: first the directory must BE a
+    // repository (errors propagate), then HEAD may simply not exist.
+    engine::run_trimmed(worktree, &["rev-parse", "--is-inside-work-tree"])?;
     if engine::run_trimmed(worktree, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
         return Ok(Vec::new());
     }

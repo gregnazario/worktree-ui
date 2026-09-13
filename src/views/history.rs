@@ -197,6 +197,16 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
     let focus = this.history_list_focus.clone();
     let scroll = this.history_list_scroll.clone();
     let now = now_secs();
+    // Rows trim trailing freed lanes; the RENDER pads every row to the
+    // widest lane so hash/subject columns align across the fork/merge
+    // raggedness the graph exists to show.
+    let graph_width = hs
+        .read(cx)
+        .rows
+        .iter()
+        .map(|r| r.cells.len())
+        .max()
+        .unwrap_or(0);
     let list = uniform_list("history-commits", count, move |range, _window, cx| {
         range
             .filter(|pos| *pos < count)
@@ -232,7 +242,9 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
                             hs.update(cx, |store, cx| store.select(Some(pos), cx));
                         }
                     });
-                for (i, cell) in cells.iter().enumerate() {
+                let mut padded = cells.clone();
+                padded.resize(graph_width.max(cells.len()), GraphCell::Empty);
+                for (i, cell) in padded.iter().enumerate() {
                     let (ch, color) = match cell {
                         GraphCell::Commit => ("*", if i == lane { ACCENT } else { DIM }),
                         GraphCell::Wire => ("│", DIM),

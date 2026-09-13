@@ -780,6 +780,9 @@ impl RootView {
             "l" if list_focused && ks.modifiers.shift => hs.update(cx, |h, cx| {
                 if h.busy() {
                     h.busy_message(cx);
+                } else if h.commits.is_empty() {
+                    // The first log may still be in flight.
+                    h.loading_message(cx);
                 } else if !h.has_more {
                     h.message = Some("No older commits to load".into());
                     h.note_transient_hint();
