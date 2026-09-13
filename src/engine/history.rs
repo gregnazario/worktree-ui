@@ -161,21 +161,41 @@ pub struct CommitFile {
 }
 
 /// Files changed by a commit with one-letter statuses. `--root` makes the
-/// root commit list its initial files as additions.
-pub fn commit_files(worktree: &Path, sha: &str) -> Result<Vec<CommitFile>> {
-    let out = engine::run_bytes(
-        worktree,
-        &[
-            "--no-optional-locks",
-            "diff-tree",
-            "--no-commit-id",
-            "--name-status",
-            "-r",
-            "-z",
-            "--root",
-            sha,
-        ],
-    )?;
+/// root commit list its initial files as additions; pass `first_parent`
+/// for MERGE commits — plain `diff-tree` emits nothing for them (no
+/// changes against all parents at once), while first-parent mode diffs
+/// against parent 1 like `commit_diff`.
+pub fn commit_files(worktree: &Path, sha: &str, first_parent: bool) -> Result<Vec<CommitFile>> {
+    // For merges, diff explicitly against parent 1: plain single-arg
+    // diff-tree emits NOTHING for merges (--first-parent alone doesn't
+    // change that). The two-argument form is a plain A..B diff.
+    let parent1 = if first_parent {
+        engine::run_trimmed(
+            worktree,
+            &["rev-parse", "-q", "--verify", &format!("{sha}^1")],
+        )
+        .ok()
+        .filter(|p| !p.is_empty())
+    } else {
+        None
+    };
+    let mut args = vec![
+        "--no-optional-locks",
+        "diff-tree",
+        "--no-commit-id",
+        "--name-status",
+        "-r",
+        "-z",
+        "--root",
+    ];
+    match &parent1 {
+        Some(parent) => {
+            args.push(parent);
+            args.push(sha);
+        }
+        None => args.push(sha),
+    }
+    let out = engine::run_bytes(worktree, &args)?;
     let mut files = Vec::new();
     let mut records = out.split(|b| *b == 0u8).filter(|r| !r.is_empty());
     while let Some(status) = records.next() {

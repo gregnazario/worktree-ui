@@ -706,8 +706,27 @@ impl RootView {
                 open_terminal(&path);
             }
             "r" => hs.update(cx, |h, cx| h.refresh(cx)),
-            "up" if list_focused => hs.update(cx, |h, cx| h.select_prev(cx)),
-            "down" if list_focused => hs.update(cx, |h, cx| h.select_next(cx)),
+            "up" if list_focused => {
+                let pos = hs.update(cx, |h, cx| {
+                    h.select_prev(cx);
+                    h.selected
+                });
+                // Keep the selected commit on screen as the cursor moves.
+                if let Some(pos) = pos {
+                    self.history_list_scroll
+                        .scroll_to_item(pos, gpui::ScrollStrategy::Center);
+                }
+            }
+            "down" if list_focused => {
+                let pos = hs.update(cx, |h, cx| {
+                    h.select_next(cx);
+                    h.selected
+                });
+                if let Some(pos) = pos {
+                    self.history_list_scroll
+                        .scroll_to_item(pos, gpui::ScrollStrategy::Center);
+                }
+            }
             "up" if files_focused => hs.update(cx, |h, cx| h.select_file_prev(cx)),
             "down" if files_focused => hs.update(cx, |h, cx| h.select_file_next(cx)),
             "tab" if list_focused => {

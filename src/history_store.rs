@@ -120,6 +120,8 @@ impl HistoryStore {
                     Ok(mut fetched) => {
                         store.load_failed = false;
                         store.initial_load_done = true;
+                        // A transient hint ("Loading N commits…") from the
+                        // load that just landed must not outlive it.
                         store.has_more = fetched.len() > store.max_count;
                         fetched.truncate(store.max_count);
                         let mut commits = fetched;
@@ -146,6 +148,10 @@ impl HistoryStore {
                         store.files = None;
                         store.selected_file = None;
                         store.file_diff = Err(String::new());
+                        if store.busy_hint {
+                            store.message = None;
+                            store.busy_hint = false;
+                        }
                         store.load_commit_files(cx);
                     }
                     Err(e) => {
@@ -280,10 +286,11 @@ impl HistoryStore {
         let gen = self.detail_generation;
         let worktree = self.worktree.clone();
         let sha = commit.hash.clone();
+        let is_merge = commit.parents.len() > 1;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { history::commit_files(&worktree, &sha) })
+                .spawn(async move { history::commit_files(&worktree, &sha, is_merge) })
                 .await;
             this.update(cx, |store, cx| {
                 if gen != store.detail_generation {
@@ -400,10 +407,6 @@ impl HistoryStore {
                         store.message = Some(format!("Checked out {short} (detached HEAD)"));
                         store.mutated = true;
                         store.busy_hint = false;
-                        // HEAD moved: the list (reachability, decorations)
-                        // must reflect the detached state, not just the
-                        // home list.
-                        store.refresh(cx);
                         // HEAD moved: the list (reachability, decorations)
                         // must reflect the detached state, not just the
                         // home list.

@@ -178,17 +178,38 @@ fn commit_files_cover_add_modify_delete_and_root() {
     sh(Some(tmp.path()), &["git", "commit", "-qm", "three changes"]);
     let sha = sh_out(tmp.path(), &["git", "rev-parse", "main"]);
 
-    let files = history::commit_files(tmp.path(), &sha).unwrap();
+    let files = history::commit_files(tmp.path(), &sha, false).unwrap();
     let letters: Vec<(char, &str)> = files.iter().map(|f| (f.letter, f.path.as_str())).collect();
     assert!(letters.contains(&('A', "added.txt")), "{letters:?}");
     assert!(letters.contains(&('M', "f.txt")), "{letters:?}");
     assert!(letters.contains(&('D', "g.txt")), "{letters:?}");
 
     // Root commit: --root makes diff-tree list the initial files.
-    let root_files = history::commit_files(tmp.path(), &root_sha).unwrap();
+    let root_files = history::commit_files(tmp.path(), &root_sha, false).unwrap();
     assert!(root_files
         .iter()
         .any(|f| f.letter == 'A' && f.path == "f.txt"));
+}
+
+#[test]
+fn commit_files_on_a_merge_diffs_against_the_first_parent() {
+    let tmp = tempfile::tempdir().unwrap();
+    merge_repo(tmp.path());
+    let merge = sh_out(tmp.path(), &["git", "rev-parse", "main"]);
+
+    // Plain diff-tree emits NOTHING for merges; first-parent mode lists
+    // the incoming side changes — matching what commit_diff renders.
+    assert!(
+        history::commit_files(tmp.path(), &merge, false)
+            .unwrap()
+            .is_empty(),
+        "plain diff-tree on a merge is empty"
+    );
+    let files = history::commit_files(tmp.path(), &merge, true).unwrap();
+    // The first-parent diff shows what the MERGE brought in: only the
+    // side branch's file (f.txt's "main work" was already in parent 1).
+    let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, vec!["side.txt"], "{paths:?}");
 }
 
 #[test]
