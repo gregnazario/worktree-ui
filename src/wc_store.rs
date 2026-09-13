@@ -596,6 +596,14 @@ impl WorkingCopyStore {
         self.detail_generation
     }
 
+    /// Stable identity of the currently-loaded diff ("kind:path"); the
+    /// view compares it across detail revisions to tell "a different diff
+    /// loaded" (reset to top) from "the same diff reloaded"
+    /// (reveal the hovered hunk — the post-mutation case).
+    pub fn detail_key(&self) -> Option<String> {
+        self.detail_of.as_ref().map(|(p, k)| format!("{k:?}:{p}"))
+    }
+
     /// True when the hovered-hunk flow is fully live: the selected row is
     /// an unstaged file whose diff is the one actually loaded (not a
     /// selection change still in flight) and at least one hunk renders.

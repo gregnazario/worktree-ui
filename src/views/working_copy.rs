@@ -400,18 +400,6 @@ fn render_diff_pane(
         return pane;
     };
     let store = wc.read(cx);
-    // Every detail (re)load reveals the hovered hunk — one rule for file
-    // switches (hunk 0 sits at the top, so this is a no-op), surface
-    // switches, and the post-mutation reload (the shrunken diff's hovered
-    // hunk is scrolled into view instead of the pane keeping the stale
-    // offset). Without it, `s` stages a hunk the user cannot see. The
-    // store bumps its revision when a load lands; `open_detail` seeds a
-    // forced mismatch so a drill-in always reveals too.
-    let detail_generation = store.detail_generation();
-    if detail_generation != this.diff_scroll_generation {
-        this.diff_scroll_generation = detail_generation;
-        this.diff_scroll.scroll_to_item(store.hunk_cursor() + 1);
-    }
     let Some(detail) = &store.detail else {
         return pane.child(
             div()
@@ -421,6 +409,25 @@ fn render_diff_pane(
                 .child("No selection"),
         );
     };
+
+    // On each new DETAIL revision (bumped when a load lands): a different
+    // diff (file switch, surface switch) resets to the top — its cursor
+    // sits on hunk 0 and the previous offset means nothing; the same diff
+    // reloaded post-mutation reveals the hovered hunk (the cursor
+    // deliberately waits on the shrunken diff's next hunk). Without this,
+    // `s` stages a hunk the user cannot see. Drill-ins seed a forced
+    // revision mismatch so the first land always reacts.
+    let detail_generation = store.detail_generation();
+    if detail_generation != this.diff_scroll_generation {
+        this.diff_scroll_generation = detail_generation;
+        let key = store.detail_key();
+        if key != this.diff_scroll_key {
+            this.diff_scroll_key = key;
+            this.diff_scroll.set_offset(gpui::point(px(0.), px(0.)));
+        } else {
+            this.diff_scroll.scroll_to_item(store.hunk_cursor() + 1);
+        }
+    }
     if matches!(store.selected_row(), Some((Group::Conflicts, _))) {
         pane = pane.child(placeholder(
             "Resolve in your editor, then press s to mark resolved",

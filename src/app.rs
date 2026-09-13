@@ -85,14 +85,15 @@ pub struct RootView {
     /// tall diff moves the cursor to a hunk that is rendered but scrolled
     /// off-screen, and `s` stages content the user cannot see.
     pub diff_scroll: gpui::ScrollHandle,
-    /// Detail revision the diff pane last revealed the hovered hunk for.
-    /// Every detail (re)load bumps the store's counter — on the new
-    /// revision the pane scrolls the hovered hunk into view, which covers
-    /// file switches (hunk 0 is already at the top: no scroll), surface
-    /// switches, and the post-mutation reload (the shrunken diff's
-    /// newly-hovered hunk is revealed instead of the pane keeping the
-    /// stale offset).
+    /// Detail revision the diff pane last reacted to. On every new
+    /// revision (the store bumps when a load lands) the pane either resets
+    /// to the top — when a DIFFERENT diff loaded (file switch, surface
+    /// switch) — or reveals the hovered hunk — when the SAME diff
+    /// reloaded (the post-mutation case, where the cursor deliberately
+    /// waits on the shrunken diff's next hunk).
     pub diff_scroll_generation: u64,
+    /// Diff identity ("kind:path") seen at that revision.
+    pub diff_scroll_key: Option<String>,
 }
 
 fn status_badge(status: &WorktreeStatus) -> (String, gpui::Rgba) {
@@ -181,9 +182,10 @@ impl RootView {
         let detail_list_focus = cx.focus_handle();
         let detail_diff_focus = cx.focus_handle();
         let diff_scroll = gpui::ScrollHandle::new();
-        // Forced mismatch: the first detail land of any drill-in reveals
-        // hunk 0, so no previous session's scroll offset can leak in.
+        // Forced mismatch: the first detail land of any drill-in runs the
+        // reset branch, so no previous session's scroll offset can leak in.
         let diff_scroll_generation = u64::MAX;
+        let diff_scroll_key = None;
         window.focus(&root_focus);
         let view = cx.new(|_| Self {
             store,
@@ -199,6 +201,7 @@ impl RootView {
             detail_diff_focus,
             diff_scroll,
             diff_scroll_generation,
+            diff_scroll_key,
         });
         view.update(cx, |this, cx| {
             // Typing in the search field drives the store filter; the
