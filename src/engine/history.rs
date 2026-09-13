@@ -318,8 +318,13 @@ pub fn open_worktree_at(worktree: &Path, sha: &str, short: &str) -> Result<PathB
         // and 8.3 short-name components resolved); deleted worktrees fall
         // back to their raw form, with the directory name as the
         // remaining signal.
+        // Windows canonicalize returns a verbatim \\?\-prefixed path;
+        // strip it so both sides can string-compare.
         match std::fs::canonicalize(path) {
-            Ok(c) => c.display().to_string().replace('\\', "/"),
+            Ok(c) => {
+                let s = c.display().to_string().replace('\\', "/");
+                s.strip_prefix("//?/").unwrap_or(&s).to_string()
+            }
             Err(_) => path.display().to_string().replace('\\', "/"),
         }
     }

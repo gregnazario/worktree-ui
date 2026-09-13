@@ -154,10 +154,14 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
             s.selected,
         )
     };
+    // The column grows with the lane count: fixed-width graph cells are
+    // non-shrinking, so a deep history with many open branches would
+    // otherwise paint past the border and squeeze the subject away.
+    let lane_extra = hs.read(cx).graph_width().saturating_sub(6);
     let mut wrap = div()
         .id("history-commits-wrap")
         .track_focus(&this.history_list_focus)
-        .w(px(430.))
+        .w(px(430. + 14. * lane_extra as f32))
         .flex()
         .flex_col()
         .flex_shrink_0()
@@ -365,6 +369,8 @@ fn render_detail(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoEl
     }
     // Files strip: capped like every other list — a mass-rename commit
     // with thousands of files would otherwise lay them all out per frame.
+    // File navigation is clamped to this same cap, so the selection is
+    // always on a rendered, visible chip.
     const FILE_CHIP_CAP: usize = 200;
     let mut chips = div().flex().flex_wrap().gap_1().px_3().py_2();
     let hidden = files.len().saturating_sub(FILE_CHIP_CAP);
@@ -418,6 +424,42 @@ fn render_detail(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoEl
                 .text_color(DIM)
                 .child(format!("… {} more files", hidden)),
         );
+    }
+    // A selected file beyond the rendered cap must still be visible
+    // somewhere: render its chip (highlighted) after the trailer.
+    if store.selected_file.is_some_and(|i| i >= FILE_CHIP_CAP) {
+        if let Some(file) = store
+            .files
+            .as_ref()
+            .and_then(|files| files.get(store.selected_file.unwrap()))
+        {
+            chips = chips.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(ROW_SELECTED)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(letter_color(file.letter))
+                            .child(file.letter.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .min_w_0()
+                            .child(match &file.orig_path {
+                                Some(orig) => format!("{orig} → {}", file.path),
+                                None => file.path.clone(),
+                            }),
+                    ),
+            );
+        }
     }
     pane = pane.child(chips);
     match &store.file_diff {

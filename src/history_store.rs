@@ -278,7 +278,7 @@ impl HistoryStore {
                             // gained commits above it, shifting the skip
                             // window): refetch from the tip with a grown
                             // depth so `L` still makes progress.
-                            store.max_count += HISTORY_BATCH;
+                            store.max_count += store.batch;
                             store.refresh(cx);
                             return;
                         }
@@ -611,6 +611,12 @@ impl HistoryStore {
     /// Centralized so every caller explains the same state the same way —
     /// notably a FAILED first load is finished, not "loading", and must
     /// point at retrying instead.
+    /// Widest graph row in the loaded list (number of lanes at the
+    /// busiest commit) — the view sizes the commit column from it.
+    pub fn graph_width(&self) -> usize {
+        self.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0)
+    }
+
     pub fn action_blocker(&self) -> Option<String> {
         if self.busy() {
             return Some("Busy — wait for the current operation".into());
