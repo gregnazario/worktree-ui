@@ -1,11 +1,12 @@
 use crate::dialogs::{self, DialogState};
+use crate::history_store::HistoryStore;
 use crate::model::WorktreeEntry;
 use crate::model::WorktreeStatus;
 use crate::platform;
 use crate::store::WorktreeStore;
 use crate::terminal;
 use crate::text_field::TextField;
-use crate::views::working_copy;
+use crate::views::{history as history_view, working_copy};
 use crate::wc_store::{Pane, WorkingCopyStore};
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -62,6 +63,13 @@ pub(crate) fn open_terminal(path: &std::path::Path) {
     terminal::open_in_terminal(path);
 }
 
+/// Which section of the open detail view is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Section {
+    WorkingCopy,
+    History,
+}
+
 pub struct RootView {
     pub store: Entity<WorktreeStore>,
     pub search: Entity<TextField>,
@@ -80,6 +88,16 @@ pub struct RootView {
     pub detail_focus: FocusHandle,
     pub detail_list_focus: FocusHandle,
     pub detail_diff_focus: FocusHandle,
+    /// Active section of the open detail view.
+    pub section: Section,
+    /// History section store (created on first entry, dropped with the
+    /// drill-in).
+    pub history: Option<Entity<HistoryStore>>,
+    /// Observation of the history store: checkout / worktree-add actions
+    /// flag `mutated`, which refreshes the home worktree list.
+    pub history_subscription: Option<gpui::Subscription>,
+    pub history_list_focus: FocusHandle,
+    pub history_files_focus: FocusHandle,
     /// Scroll position of the diff pane. Keyboard hunk movement scrolls
     /// the hovered hunk into view through it — without this, `down` on a
     /// tall diff moves the cursor to a hunk that is rendered but scrolled
@@ -181,6 +199,8 @@ impl RootView {
         let detail_focus = cx.focus_handle();
         let detail_list_focus = cx.focus_handle();
         let detail_diff_focus = cx.focus_handle();
+        let history_list_focus = cx.focus_handle();
+        let history_files_focus = cx.focus_handle();
         let diff_scroll = gpui::ScrollHandle::new();
         // Forced mismatch: the first detail land of any drill-in runs the
         // reset branch, so no previous session's scroll offset can leak in.
@@ -199,6 +219,11 @@ impl RootView {
             detail_focus,
             detail_list_focus,
             detail_diff_focus,
+            section: Section::WorkingCopy,
+            history: None,
+            history_subscription: None,
+            history_list_focus,
+            history_files_focus,
             diff_scroll,
             diff_scroll_generation,
             diff_scroll_key,
@@ -464,6 +489,9 @@ impl RootView {
         let Some(entry) = self.store.read(cx).selected_entry().cloned() else {
             return;
         };
+        self.section = Section::WorkingCopy;
+        self.history = None;
+        self.history_subscription = None;
         let wc = WorkingCopyStore::new(entry.path.clone(), cx);
         // One successful mutation inside the detail view must refresh the home
         // worktree list (status, ahead/behind, dirty badge all change). The
@@ -505,6 +533,9 @@ impl RootView {
         }
         // Drop the observer first: a dropped Subscription unsubscribes.
         self.detail_subscription = None;
+        self.history = None;
+        self.history_subscription = None;
+        self.section = Section::WorkingCopy;
         self.detail = None;
         // Re-arm the diff-pane scroll bookkeeping: each store's detail
         // generation restarts at 0, so a later drill-in could otherwise
@@ -523,6 +554,12 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Route by section FIRST: the History section's focused handles
+        // (history_list/history_files) are not the working-copy handles
+        // checked below, and its container is a different subtree.
+        if self.section == Section::History {
+            return self.history_keydown(ks, window, cx);
+        }
         let list_focused = self.detail_list_focus.is_focused(window);
         let diff_focused = self.detail_diff_focus.is_focused(window);
         let container_focused = self.detail_focus.is_focused(window);
@@ -631,8 +668,89 @@ impl RootView {
                     wc.update(cx, |store, cx| store.stage_hunk(cx));
                 }
             }
+            // Section switching: 2 opens History (1 is a no-op here).
+            "2" => self.open_history(window, cx),
             _ => {}
         }
+    }
+
+    /// Key routing for the History section (see `open_history`).
+    fn history_keydown(
+        &mut self,
+        ks: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let list_focused = self.history_list_focus.is_focused(window);
+        let files_focused = self.history_files_focus.is_focused(window);
+        if !list_focused && !files_focused {
+            return;
+        }
+        let Some(hs) = self.history.clone() else {
+            return;
+        };
+        match ks.key.as_str() {
+            "escape" => self.close_detail(window, cx),
+            "1" => {
+                self.section = Section::WorkingCopy;
+                window.focus(&self.detail_list_focus);
+                cx.notify();
+            }
+            "2" => {}
+            "t" => {
+                let path = hs.read(cx).worktree.clone();
+                open_terminal(&path);
+            }
+            "r" => hs.update(cx, |h, cx| h.refresh(cx)),
+            "up" if list_focused => hs.update(cx, |h, cx| h.select_prev(cx)),
+            "down" if list_focused => hs.update(cx, |h, cx| h.select_next(cx)),
+            "up" if files_focused => hs.update(cx, |h, cx| h.select_file_prev(cx)),
+            "down" if files_focused => hs.update(cx, |h, cx| h.select_file_next(cx)),
+            "tab" if list_focused => {
+                hs.update(cx, |h, cx| h.toggle_pane(cx));
+                window.focus(&self.history_files_focus);
+            }
+            "tab" if files_focused => {
+                hs.update(cx, |h, cx| h.toggle_pane(cx));
+                window.focus(&self.history_list_focus);
+            }
+            "y" if list_focused => hs.update(cx, |h, cx| h.copy_hash(cx)),
+            "x" if list_focused => hs.update(cx, |h, cx| h.checkout(cx)),
+            "w" if list_focused => hs.update(cx, |h, cx| h.open_worktree(cx)),
+            // gpui normalizes capitals to lowercase + shift.
+            "l" if list_focused && ks.modifiers.shift => {
+                hs.update(cx, |h, cx| h.load_more(cx));
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens (or re-focuses) the History section of the open detail view.
+    pub fn open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_open() {
+            return;
+        }
+        self.section = Section::History;
+        if let Some(hs) = &self.history {
+            window.focus(&self.history_list_focus);
+            let _ = hs;
+            cx.notify();
+            return;
+        }
+        let Some(entry) = self.store.read(cx).selected_entry().cloned() else {
+            self.section = Section::WorkingCopy;
+            return;
+        };
+        let hs = HistoryStore::new(entry.path.clone(), cx);
+        self.history_subscription = Some(cx.observe(&hs, move |this, hs, cx| {
+            if hs.update(cx, |store, _cx| store.take_mutated()) {
+                this.store.update(cx, |store, cx| store.refresh(cx));
+            }
+            cx.notify();
+        }));
+        self.history = Some(hs);
+        window.focus(&self.history_list_focus);
+        cx.notify();
     }
 }
 
@@ -856,7 +974,13 @@ impl Render for RootView {
             );
 
             if self.detail.is_some() {
-                main.child(working_copy::render(self, window, cx).into_any_element())
+                let section = match self.section {
+                    Section::WorkingCopy => {
+                        working_copy::render(self, window, cx).into_any_element()
+                    }
+                    Section::History => history_view::render(self, window, cx).into_any_element(),
+                };
+                main.child(section)
             } else {
                 main.child(
                     div()
@@ -1594,6 +1718,84 @@ mod tests {
         vcx.run_until_parked();
         view.update(&mut vcx.cx, |root, _cx| {
             assert!(root.detail.is_none(), "idle detail closes normally");
+        });
+    }
+
+    #[gpui::test]
+    fn two_opens_history_one_returns_to_working_copy(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "changed").unwrap();
+        sh(&repo, &["git", "add", "f.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "second commit"]);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert_eq!(root.section, Section::WorkingCopy);
+            assert!(root.history.is_none());
+        });
+        vcx.simulate_keystrokes("2");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            assert_eq!(root.section, Section::History);
+            let hs = root.history.as_ref().expect("history store created");
+            assert!(!hs.read(cx).commits.is_empty(), "log loaded");
+        });
+        // The history list has focus; down moves the commit selection.
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let hs = root.history.as_ref().unwrap().read(cx);
+            assert_eq!(hs.selected, Some(1), "down moved the commit selection");
+        });
+        vcx.simulate_keystrokes("1");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert_eq!(root.section, Section::WorkingCopy);
+            assert!(root.detail.is_some(), "still drilled in");
+        });
+    }
+
+    #[gpui::test]
+    fn history_files_pane_loads_the_commit_diff(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("h.txt"), "one").unwrap();
+        sh(&repo, &["git", "add", "h.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "add h"]);
+        std::fs::write(repo.join("h.txt"), "two").unwrap();
+        sh(&repo, &["git", "add", "h.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "edit h"]);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("2");
+        vcx.run_until_parked();
+        // Newest commit ("edit h") is pre-selected; tab to the files pane
+        // and walk to its only file.
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let hs = root.history.as_ref().unwrap().read(cx);
+            assert_eq!(hs.pane, crate::history_store::Pane::Files);
+            let files = hs.files.as_ref().expect("files loaded");
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].letter, 'M');
+            assert_eq!(files[0].path, "h.txt");
+            let diff = hs.file_diff.as_ref().expect("diff loaded");
+            assert!(diff
+                .hunks
+                .iter()
+                .any(|h| h.lines.iter().any(
+                    |l| l.kind == crate::engine::diff::DiffLineKind::Add && l.content == "two"
+                )));
         });
     }
 

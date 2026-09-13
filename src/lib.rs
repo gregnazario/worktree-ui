@@ -3,6 +3,7 @@ pub mod dialogs;
 pub mod engine;
 pub mod feedback;
 pub mod git;
+pub mod history_store;
 pub mod model;
 pub mod platform;
 pub mod store;
