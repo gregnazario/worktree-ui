@@ -805,8 +805,10 @@ impl RootView {
         }
         self.section = Section::History;
         if let Some(hs) = &self.history {
+            // Re-entering after commits made in section 1: revalidate the
+            // log instead of showing a stale history.
+            hs.update(cx, |h, cx| h.refresh(cx));
             window.focus(&self.history_list_focus);
-            let _ = hs;
             cx.notify();
             return;
         }

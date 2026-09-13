@@ -242,6 +242,15 @@ impl HistoryStore {
                         let known: std::collections::HashSet<String> =
                             store.commits.iter().map(|c| c.hash.clone()).collect();
                         fetched.retain(|c| !known.contains(&c.hash));
+                        if fetched.is_empty() {
+                            // The whole window was already known (the repo
+                            // gained commits above it, shifting the skip
+                            // window): refetch from the tip with a grown
+                            // depth so `L` still makes progress.
+                            store.max_count += HISTORY_BATCH;
+                            store.refresh(cx);
+                            return;
+                        }
                         let mut commits = std::mem::take(&mut store.commits);
                         commits.append(&mut fetched);
                         store.rows = history::assign_lanes(&mut commits);

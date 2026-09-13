@@ -305,14 +305,21 @@ pub fn open_worktree_at(worktree: &Path, sha: &str, short: &str) -> Result<PathB
     // worktree still REGISTERED in .git/worktrees whose directory was
     // deleted by hand (git refuses to reuse the name). Both advance the
     // suffix.
-    let registered = engine::run_trimmed(worktree, &["worktree", "list", "--porcelain"])
-        .unwrap_or_default()
-        .replace('\\', "/");
+    let registered: Vec<String> =
+        engine::run_trimmed(worktree, &["worktree", "list", "--porcelain"])
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .map(|p| p.replace('\\', "/"))
+            .collect();
     let mut path = parent.join(format!("{name}-{short}"));
     let mut n = 2u32;
     loop {
         let candidate = path.display().to_string().replace('\\', "/");
-        if !path.exists() && !registered.contains(&candidate) {
+        // Exact match: substring probing false-positives on
+        // prefix-colliding names (repo-sha vs repo-sha-2).
+        let taken = path.exists() || registered.contains(&candidate);
+        if !taken {
             break;
         }
         path = parent.join(format!("{name}-{short}-{n}"));
