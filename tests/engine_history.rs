@@ -269,8 +269,11 @@ fn open_worktree_at_creates_a_registered_detached_worktree() {
         "path names the commit: {created:?}"
     );
     let list = sh_out(tmp.path(), &["git", "worktree", "list", "--porcelain"]);
-    let created = created.display().to_string().replace('\\', "/");
-    assert!(list.contains(&created), "list: {list}");
+    // Compare by DIRECTORY NAME: git registers the path with symlinks and
+    // 8.3 short-name components resolved (RUNNER~1 vs runneradmin), so a
+    // full-path comparison is environment-dependent.
+    let name = created.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(list.contains(&name), "list: {list}");
 }
 
 #[test]
