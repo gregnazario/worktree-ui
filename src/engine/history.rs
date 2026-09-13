@@ -62,6 +62,7 @@ pub fn log(worktree: &Path, skip: usize, max_count: usize) -> Result<Vec<LogComm
             "--topo-order",
             "--decorate=short",
             "--no-color",
+            "--no-color",
             // Machine-parsed output must be immune to the user's
             // log.showSignature config, which interleaves gpg lines
             // between records.
@@ -98,7 +99,8 @@ pub fn parse_log(bytes: &[u8]) -> Vec<LogCommit> {
         // commit object or a corrupt repo), splitting a record mid-field
         // and minting a phantom "commit" whose hash is subject text.
         // Validate the shape before accepting the record.
-        if hash.len() != 40 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        // Accept both SHA-1 (40) and SHA-256 (64) object IDs.
+        if !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             continue;
         }
         let timestamp = field(4).parse::<i64>().unwrap_or(0);

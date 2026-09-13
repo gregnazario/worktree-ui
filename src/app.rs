@@ -823,46 +823,48 @@ impl RootView {
             // Actions explain themselves when swallowed: busy (an action
             // in flight), still loading, a failed first load, or an empty
             // repo — each state gets its own accurate message.
-            "y" if list_focused => hs.update(cx, |h, cx| {
+            // Action keys work from any history-section surface; when the
+            // preconditions aren't met, the blocker explains why instead
+            // of silently dropping the key.
+            "y" => hs.update(cx, |h, cx| {
                 if let Some(blocked) = h.action_blocker() {
                     h.message = Some(blocked);
                     h.note_transient_hint();
-                    cx.notify();
                 } else {
                     h.copy_hash(cx);
                 }
+                cx.notify();
             }),
-            "x" if list_focused => hs.update(cx, |h, cx| {
+            "x" => hs.update(cx, |h, cx| {
                 if let Some(blocked) = h.action_blocker() {
                     h.message = Some(blocked);
                     h.note_transient_hint();
-                    cx.notify();
                 } else {
                     h.checkout(cx);
                 }
+                cx.notify();
             }),
-            "w" if list_focused => hs.update(cx, |h, cx| {
+            "w" => hs.update(cx, |h, cx| {
                 if let Some(blocked) = h.action_blocker() {
                     h.message = Some(blocked);
                     h.note_transient_hint();
-                    cx.notify();
                 } else {
                     h.open_worktree(cx);
                 }
+                cx.notify();
             }),
             // gpui normalizes capitals to lowercase + shift.
-            "l" if list_focused && ks.modifiers.shift => hs.update(cx, |h, cx| {
+            "l" if ks.modifiers.shift => hs.update(cx, |h, cx| {
                 if let Some(blocked) = h.action_blocker() {
                     h.message = Some(blocked);
                     h.note_transient_hint();
-                    cx.notify();
                 } else if !h.has_more {
                     h.message = Some("No older commits to load".into());
                     h.note_transient_hint();
-                    cx.notify();
                 } else {
                     h.load_more(cx);
                 }
+                cx.notify();
             }),
             _ => {}
         }
