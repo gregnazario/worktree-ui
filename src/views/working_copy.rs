@@ -400,15 +400,18 @@ fn render_diff_pane(
         return pane;
     };
     let store = wc.read(cx);
-    // A new detail load (selection change, refresh) invalidates the old
-    // scroll position: without this, a pane left deep-scrolled on a tall
-    // diff opens the next file equally deep-scrolled while the cursor and
-    // its highlight sit on hunk 0 off-screen — `s` would stage content the
-    // user cannot see.
-    let detail_generation = store.detail_generation();
-    if detail_generation != this.diff_scroll_generation {
-        this.diff_scroll_generation = detail_generation;
-        this.diff_scroll.set_offset(gpui::point(px(0.), px(0.)));
+    // Reset the scroll only when the DISPLAYED FILE changes (keyed on
+    // detail_of's path, not the detail generation): same-file reloads —
+    // the post-mutation one, where the cursor deliberately stays on the
+    // next hunk — must not snap the pane to the top, while a different
+    // file must never open at the previous file's offset (its cursor and
+    // highlight sit on hunk 0, off-screen — `s` would stage what the user
+    // cannot see). Drill-ins reset in `open_detail`.
+    if let Some(path) = store.detail_path() {
+        if this.diff_scroll_file.as_deref() != Some(path) {
+            this.diff_scroll_file = Some(path.to_string());
+            this.diff_scroll.set_offset(gpui::point(px(0.), px(0.)));
+        }
     }
     let Some(detail) = &store.detail else {
         return pane.child(
@@ -438,6 +441,7 @@ fn render_diff_pane(
             let mut rendered = 0usize;
             pane = pane.child(
                 div()
+                    .id("diff-summary")
                     .px_3()
                     .py_2()
                     .text_size(px(11.))

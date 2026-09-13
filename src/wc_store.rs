@@ -584,11 +584,10 @@ impl WorkingCopyStore {
         self.hunk_cursor.min(self.hunk_bound().saturating_sub(1))
     }
 
-    /// Generation of the currently-loading-or-loaded detail; the view
-    /// watches it to reset the diff pane's scroll position when the
-    /// displayed file changes.
-    pub fn detail_generation(&self) -> u64 {
-        self.detail_generation
+    /// Path of the currently-loaded diff; the view keys the diff pane's
+    /// scroll reset on it (reset when the displayed FILE changes).
+    pub fn detail_path(&self) -> Option<&str> {
+        self.detail_of.as_ref().map(|(p, _)| p.as_str())
     }
 
     /// True when the hovered-hunk flow is fully live: the selected row is
@@ -642,26 +641,31 @@ impl WorkingCopyStore {
         }
     }
 
-    pub fn hunk_next(&mut self, cx: &mut Context<Self>) {
-        // Dead on non-unstaged rows and pre-load diffs — the footer
-        // advertises no hunk keys there, and the highlight follows.
+    /// Moves the cursor down; returns false when it could not (dead on
+    /// non-unstaged rows and pre-load diffs, or already at the bound) —
+    /// callers must not scroll on a no-op.
+    pub fn hunk_next(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.hunk_stageable() {
-            return;
+            return false;
         }
         if self.hunk_cursor + 1 < self.hunk_bound() {
             self.hunk_cursor += 1;
             cx.notify();
+            return true;
         }
+        false
     }
 
-    pub fn hunk_prev(&mut self, cx: &mut Context<Self>) {
+    pub fn hunk_prev(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.hunk_stageable() {
-            return;
+            return false;
         }
         if self.hunk_cursor > 0 {
             self.hunk_cursor -= 1;
             cx.notify();
+            return true;
         }
+        false
     }
 
     /// `s` with the diff pane focused: stages the hovered hunk. The patch —

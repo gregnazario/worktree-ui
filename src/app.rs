@@ -85,9 +85,12 @@ pub struct RootView {
     /// tall diff moves the cursor to a hunk that is rendered but scrolled
     /// off-screen, and `s` stages content the user cannot see.
     pub diff_scroll: gpui::ScrollHandle,
-    /// Detail generation the diff pane last saw; a change resets
-    /// `diff_scroll` so a new file never opens deep-scrolled.
-    pub diff_scroll_generation: u64,
+    /// File the diff pane last scrolled for; a different (path, kind)
+    /// resets `diff_scroll` so a new file never opens deep-scrolled. NOT
+    /// keyed on the detail generation: same-file reloads (post-mutation,
+    /// where the cursor deliberately stays on the next hunk) must not
+    /// snap the pane back to the top.
+    pub diff_scroll_file: Option<String>,
 }
 
 fn status_badge(status: &WorktreeStatus) -> (String, gpui::Rgba) {
@@ -176,7 +179,7 @@ impl RootView {
         let detail_list_focus = cx.focus_handle();
         let detail_diff_focus = cx.focus_handle();
         let diff_scroll = gpui::ScrollHandle::new();
-        let diff_scroll_generation = 0u64;
+        let diff_scroll_file = None;
         window.focus(&root_focus);
         let view = cx.new(|_| Self {
             store,
@@ -191,7 +194,7 @@ impl RootView {
             detail_list_focus,
             detail_diff_focus,
             diff_scroll,
-            diff_scroll_generation,
+            diff_scroll_file,
         });
         view.update(cx, |this, cx| {
             // Typing in the search field drives the store filter; the
@@ -467,6 +470,9 @@ impl RootView {
             cx.notify();
         }));
         self.detail = Some(wc);
+        self.diff_scroll_file = None;
+        self.diff_scroll
+            .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
         window.focus(&self.detail_list_focus);
         cx.notify();
     }
@@ -579,20 +585,27 @@ impl RootView {
             "up" if diff_focused => {
                 if let Some(wc) = &self.detail {
                     let hovered = wc.update(cx, |store, cx| {
-                        store.hunk_prev(cx);
-                        store.hunk_cursor()
+                        let moved = store.hunk_prev(cx);
+                        (moved, store.hunk_cursor())
                     });
-                    // +1: the file-header summary is the pane's child 0.
-                    self.diff_scroll.scroll_to_item(hovered + 1);
+                    // Scroll only on actual movement: a no-op key (staged
+                    // row, loading diff, at the bound) must not jump the
+                    // pane to another hunk.
+                    if let (true, hovered) = hovered {
+                        // +1: the file-header summary is the pane's child 0.
+                        self.diff_scroll.scroll_to_item(hovered + 1);
+                    }
                 }
             }
             "down" if diff_focused => {
                 if let Some(wc) = &self.detail {
-                    let hovered = wc.update(cx, |store, cx| {
-                        store.hunk_next(cx);
-                        store.hunk_cursor()
+                    let (moved, hovered) = wc.update(cx, |store, cx| {
+                        let moved = store.hunk_next(cx);
+                        (moved, store.hunk_cursor())
                     });
-                    self.diff_scroll.scroll_to_item(hovered + 1);
+                    if moved {
+                        self.diff_scroll.scroll_to_item(hovered + 1);
+                    }
                 }
             }
             // Same capital-normalization as the list pane: shift+s must
@@ -1614,6 +1627,61 @@ mod tests {
                 root.diff_scroll.offset().y < gpui::px(0.),
                 "the pane must scroll the hovered hunk into view, got {:?}",
                 root.diff_scroll.offset()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn hunk_movement_reveals_the_hovered_middle_hunk(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        // Three hunks: tall (h1), small (h2), small (h3). Hovering the
+        // MIDDLE hunk must reveal h2 — if scroll_to_item resolved the
+        // child after the hovered one (or missed entirely), h2 would sit
+        // off-screen above or below the viewport.
+        let lines: Vec<String> = (1..=1500).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("m.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["git", "add", "m.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "m"]);
+        let mut edited = lines.clone();
+        for (i, l) in edited.iter_mut().enumerate().take(250) {
+            *l = format!("edited {i}");
+        }
+        edited[699] = "line 700 edited".into();
+        edited[1399] = "line 1400 edited".into();
+        std::fs::write(repo.join("m.txt"), edited.join("\n") + "\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("down"); // hover hunk 2 (the middle one)
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(wc.hunk_cursor(), 1);
+            let handle = &root.diff_scroll;
+            // The hovered block is hunk 2: child index 2 (file-header
+            // summary is child 0). Its TOP must be on screen — if
+            // scroll_to_item resolved the child AFTER the hovered one (or
+            // nothing), hunk 2's top would sit above the viewport.
+            let bounds = handle
+                .bounds_for_item(2)
+                .expect("hunk 2 block has recorded bounds");
+            let offset = handle.offset().y;
+            let viewport = handle.bounds().size.height;
+            assert!(
+                bounds.top() + offset < viewport - gpui::px(10.),
+                "hunk 2's top must be on screen (top {:#?} + offset {offset:#?} vs viewport {viewport:#?})",
+                bounds.top()
+            );
+            assert!(
+                bounds.bottom() + offset > gpui::px(0.),
+                "hunk 2 must not be scrolled past (bottom {:#?} + offset {offset:#?})",
+                bounds.bottom()
             );
         });
     }
