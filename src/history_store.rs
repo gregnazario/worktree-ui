@@ -45,6 +45,9 @@ pub struct HistoryStore {
     detail_generation: u64,
     /// Guards log loads (refresh / load-more).
     pub load_generation: u64,
+    /// A load-more fetch is in flight; extra presses get a hint instead
+    /// of re-requesting the same window.
+    load_more_in_flight: bool,
     /// True when the FIRST log load failed; the view shows the error
     /// instead of an eternal "Loading history…".
     pub load_failed: bool,
@@ -83,6 +86,7 @@ impl HistoryStore {
             mutated: false,
             detail_generation: 0,
             load_generation: 0,
+            load_more_in_flight: false,
             load_failed: false,
             action_in_flight: false,
             has_more: false,
@@ -191,6 +195,16 @@ impl HistoryStore {
             cx.notify();
             return;
         }
+        if self.load_more_in_flight {
+            // The fetch is already running: extra presses must not
+            // re-request the same window (the generation check would
+            // silently drop them).
+            self.message = Some("Already loading older commits…".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        self.load_more_in_flight = true;
         self.load_generation += 1;
         let gen = self.load_generation;
         let worktree = self.worktree.clone();
@@ -208,6 +222,7 @@ impl HistoryStore {
                 if gen != store.load_generation {
                     return;
                 }
+                store.load_more_in_flight = false;
                 match result {
                     Ok(mut fetched) => {
                         store.load_failed = false;

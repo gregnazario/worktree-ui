@@ -688,6 +688,9 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.dialog.is_open() {
+            return; // dialogs handle their own keys (same as detail_keydown)
+        }
         let Some(hs) = self.history.clone() else {
             return;
         };
@@ -815,6 +818,12 @@ impl RootView {
         self.history_subscription = Some(cx.observe(&hs, move |this, hs, cx| {
             if hs.update(cx, |store, _cx| store.take_mutated()) {
                 this.store.update(cx, |store, cx| store.refresh(cx));
+                // A checkout rewrote THIS worktree's files: the Working
+                // Copy section's cached status and diffs are stale until
+                // refreshed, and section 1 would show pre-checkout state.
+                if let Some(wc) = &this.detail {
+                    wc.update(cx, |store, cx| store.refresh(cx));
+                }
             }
             cx.notify();
         }));
