@@ -559,6 +559,7 @@ impl RootView {
         // A fresh handle: the next drill-in's History opens at the top
         // instead of inheriting this session's scroll offset.
         self.history_list_scroll = gpui::UniformListScrollHandle::new();
+        self.history_stale = false;
         self.detail = None;
         // Re-arm the diff-pane scroll bookkeeping: each store's detail
         // generation restarts at 0, so a later drill-in could otherwise
@@ -692,7 +693,17 @@ impl RootView {
                 }
             }
             // Section switching: 2 opens History (1 is a no-op here).
-            "2" => self.open_history(window, cx),
+            "2" => {
+                self.open_history(window, cx);
+                // Focus the History section's remembered pane.
+                if let Some(hs) = &self.history {
+                    if hs.read(cx).pane == crate::history_store::Pane::Files {
+                        window.focus(&self.history_files_focus);
+                    } else {
+                        window.focus(&self.history_list_focus);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -721,7 +732,17 @@ impl RootView {
             "escape" => return self.close_detail(window, cx),
             "1" => {
                 self.section = Section::WorkingCopy;
-                window.focus(&self.detail_list_focus);
+                // Restore the Working Copy section's remembered pane focus.
+                if let Some(wc) = &self.detail {
+                    let pane = wc.read(cx).pane;
+                    if pane == crate::wc_store::Pane::Diff {
+                        window.focus(&self.detail_diff_focus);
+                    } else {
+                        window.focus(&self.detail_list_focus);
+                    }
+                } else {
+                    window.focus(&self.detail_list_focus);
+                }
                 cx.notify();
                 return;
             }
@@ -829,7 +850,12 @@ impl RootView {
             if stale {
                 hs.update(cx, |h, cx| h.refresh(cx));
             }
-            window.focus(&self.history_list_focus);
+            // Restore the section's remembered pane focus.
+            if hs.read(cx).pane == crate::history_store::Pane::Files {
+                window.focus(&self.history_files_focus);
+            } else {
+                window.focus(&self.history_list_focus);
+            }
             cx.notify();
             return;
         }

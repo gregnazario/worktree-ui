@@ -607,10 +607,6 @@ impl HistoryStore {
         self.action_in_flight
     }
 
-    /// Why an action key currently cannot run, or None when it can.
-    /// Centralized so every caller explains the same state the same way —
-    /// notably a FAILED first load is finished, not "loading", and must
-    /// point at retrying instead.
     /// Widest graph row in the loaded list (number of lanes at the
     /// busiest commit) — the view sizes the commit column from it.
     pub fn graph_width(&self) -> usize {
