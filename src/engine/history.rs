@@ -312,20 +312,38 @@ pub fn open_worktree_at(worktree: &Path, sha: &str, short: &str) -> Result<PathB
     // worktree still REGISTERED in .git/worktrees whose directory was
     // deleted by hand (git refuses to reuse the name). Both advance the
     // suffix.
+    fn normalize(path: &Path) -> String {
+        // Canonicalize existing paths (git registers them with symlinks
+        // and 8.3 short-name components resolved); deleted worktrees fall
+        // back to their raw form, with the directory name as the
+        // remaining signal.
+        match std::fs::canonicalize(path) {
+            Ok(c) => c.display().to_string().replace('\\', "/"),
+            Err(_) => path.display().to_string().replace('\\', "/"),
+        }
+    }
     let registered: Vec<String> =
         engine::run_trimmed(worktree, &["worktree", "list", "--porcelain"])
             .unwrap_or_default()
             .lines()
             .filter_map(|l| l.strip_prefix("worktree "))
-            .map(|p| p.replace('\\', "/"))
+            .map(|p| normalize(Path::new(p)))
             .collect();
     let mut path = parent.join(format!("{name}-{short}"));
     let mut n = 2u32;
     loop {
-        let candidate = path.display().to_string().replace('\\', "/");
+        let candidate = normalize(&path);
         // Exact match: substring probing false-positives on
         // prefix-colliding names (repo-sha vs repo-sha-2).
-        let taken = path.exists() || registered.contains(&candidate);
+        let candidate_name = path.file_name().map(|f| f.to_string_lossy().into_owned());
+        let taken = path.exists()
+            || registered.iter().any(|r| {
+                *r == candidate
+                    || Path::new(r)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        == candidate_name
+            });
         if !taken {
             break;
         }

@@ -109,6 +109,16 @@ impl HistoryStore {
     /// Re-fetches the log (keeping the batch size), preserving the
     /// selection by commit hash.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        // A retry of a failed first load must SHOW that it is running:
+        // clear the failed state up front (the pane flips from the error
+        // to loading, and the action blocker stops answering "press r"
+        // while the retry is already in flight).
+        if self.load_failed {
+            self.load_failed = false;
+            self.load_error = None;
+            self.message = Some("Retrying…".into());
+            self.note_transient_hint();
+        }
         self.load_generation += 1;
         let gen = self.load_generation;
         let worktree = self.worktree.clone();
