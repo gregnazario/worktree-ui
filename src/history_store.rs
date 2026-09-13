@@ -617,6 +617,10 @@ impl HistoryStore {
         self.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0)
     }
 
+    /// Why an action key currently cannot run, or None when it can.
+    /// Centralized so every caller explains the same state the same way —
+    /// notably a FAILED first load is finished, not "loading", and must
+    /// point at retrying instead.
     pub fn action_blocker(&self) -> Option<String> {
         if self.busy() {
             return Some("Busy — wait for the current operation".into());

@@ -369,8 +369,9 @@ fn render_detail(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoEl
     }
     // Files strip: capped like every other list — a mass-rename commit
     // with thousands of files would otherwise lay them all out per frame.
-    // File navigation is clamped to this same cap, so the selection is
-    // always on a rendered, visible chip.
+    // Navigation is NOT clamped to the cap: a selected file beyond it is
+    // rendered as a highlighted chip after the trailer, so the selection
+    // always has a visible anchor.
     const FILE_CHIP_CAP: usize = 200;
     let mut chips = div().flex().flex_wrap().gap_1().px_3().py_2();
     let hidden = files.len().saturating_sub(FILE_CHIP_CAP);
