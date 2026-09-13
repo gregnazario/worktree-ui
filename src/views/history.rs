@@ -143,10 +143,12 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
     };
     let (count, loading, no_commits, load_failed, has_more, selected) = {
         let s = hs.read(cx);
+        // `retrying` counts as loading: the pane must not claim "No
+        // commits yet" while the retry is still in flight.
         (
             s.commits.len(),
-            s.commits.is_empty() && !s.initial_load_done,
-            s.commits.is_empty() && s.initial_load_done,
+            (s.commits.is_empty() && !s.initial_load_done) || s.retrying,
+            s.commits.is_empty() && s.initial_load_done && !s.retrying,
             s.load_failed,
             s.has_more,
             s.selected,
@@ -361,9 +363,12 @@ fn render_detail(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoEl
             .child(placeholder("Empty commit — no files changed"))
             .into_any_element();
     }
-    // Files strip: horizontal chips keep the diff beside the list.
+    // Files strip: capped like every other list — a mass-rename commit
+    // with thousands of files would otherwise lay them all out per frame.
+    const FILE_CHIP_CAP: usize = 200;
     let mut chips = div().flex().flex_wrap().gap_1().px_3().py_2();
-    for (i, file) in files.iter().enumerate() {
+    let hidden = files.len().saturating_sub(FILE_CHIP_CAP);
+    for (i, file) in files.iter().enumerate().take(FILE_CHIP_CAP) {
         let is_selected = store.selected_file == Some(i);
         chips = chips.child(
             div()
@@ -402,6 +407,16 @@ fn render_detail(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoEl
                             None => file.path.clone(),
                         }),
                 ),
+        );
+    }
+    if hidden > 0 {
+        chips = chips.child(
+            div()
+                .px_2()
+                .py_0p5()
+                .text_size(px(11.))
+                .text_color(DIM)
+                .child(format!("… {} more files", hidden)),
         );
     }
     pane = pane.child(chips);

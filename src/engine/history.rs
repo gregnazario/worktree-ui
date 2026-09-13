@@ -61,6 +61,7 @@ pub fn log(worktree: &Path, skip: usize, max_count: usize) -> Result<Vec<LogComm
             "log",
             "--topo-order",
             "--decorate=short",
+            "--no-color",
             // Machine-parsed output must be immune to the user's
             // log.showSignature config, which interleaves gpg lines
             // between records.
@@ -353,7 +354,7 @@ pub fn open_worktree_at(worktree: &Path, sha: &str, short: &str) -> Result<PathB
     let path_str = path.to_string_lossy().into_owned();
     engine::run_trimmed(
         worktree,
-        &["worktree", "add", "-q", "--detach", &path_str, sha],
+        &["worktree", "add", "-q", "--detach", "--", &path_str, sha],
     )?;
     Ok(path)
 }

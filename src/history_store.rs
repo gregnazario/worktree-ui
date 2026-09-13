@@ -48,6 +48,12 @@ pub struct HistoryStore {
     /// A load-more fetch is in flight; extra presses get a hint instead
     /// of re-requesting the same window.
     load_more_in_flight: bool,
+    /// True while a retry of a failed first load is in flight: the view
+    /// shows loading (not "No commits yet") and the action blocker
+    /// reports the retry.
+    pub retrying: bool,
+    /// Configured batch size (injectable for tests).
+    batch: usize,
     /// True when the FIRST log load failed; the view shows the error
     /// instead of an eternal "Loading history…".
     pub load_failed: bool,
@@ -91,6 +97,8 @@ impl HistoryStore {
             load_generation: 0,
             load_more_in_flight: false,
             load_failed: false,
+            retrying: false,
+            batch,
             action_in_flight: false,
             has_more: false,
             initial_load_done: false,
@@ -116,6 +124,7 @@ impl HistoryStore {
         if self.load_failed {
             self.load_failed = false;
             self.load_error = None;
+            self.retrying = true;
             self.message = Some("Retrying…".into());
             self.note_transient_hint();
         }
@@ -143,6 +152,7 @@ impl HistoryStore {
                 // completion will hit this stale generation and bail, so
                 // the in-flight flag is released HERE or `L` stays off.
                 store.load_more_in_flight = false;
+                store.retrying = false;
                 match result {
                     Ok(mut fetched) => {
                         store.load_failed = false;
@@ -236,14 +246,15 @@ impl HistoryStore {
         let gen = self.load_generation;
         let worktree = self.worktree.clone();
         let skip = self.commits.len();
-        self.message = Some(format!("Loading {} older commits…", HISTORY_BATCH));
+        let batch = self.batch;
+        self.message = Some(format!("Loading {} older commits…", self.batch));
         self.note_transient_hint();
         cx.notify();
         cx.spawn(async move |this, cx| {
             // Batch + 1 distinguishes truncation from exhaustion.
             let result = cx
                 .background_executor()
-                .spawn(async move { history::log(&worktree, skip, HISTORY_BATCH + 1) })
+                .spawn(async move { history::log(&worktree, skip, batch + 1) })
                 .await;
             this.update(cx, |store, cx| {
                 if gen != store.load_generation {
@@ -253,8 +264,8 @@ impl HistoryStore {
                 match result {
                     Ok(mut fetched) => {
                         store.load_failed = false;
-                        store.has_more = fetched.len() > HISTORY_BATCH;
-                        fetched.truncate(HISTORY_BATCH);
+                        store.has_more = fetched.len() > batch;
+                        fetched.truncate(batch);
                         // The repo may have gained commits above the
                         // window between loads (commit in a terminal,
                         // come back, press L): the skip window shifts and
@@ -603,6 +614,9 @@ impl HistoryStore {
     pub fn action_blocker(&self) -> Option<String> {
         if self.busy() {
             return Some("Busy — wait for the current operation".into());
+        }
+        if self.retrying {
+            return Some("Retrying…".into());
         }
         if self.commits.is_empty() {
             if !self.initial_load_done {
