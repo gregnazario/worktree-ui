@@ -361,6 +361,10 @@ impl WorkingCopyStore {
                     Err(e) => FileDetail::Failed(e.message),
                 });
                 store.detail_of = Some((loaded_path, kind));
+                // Landing is a new detail revision: the view watches this
+                // counter and scrolls the (re-clamped) hovered hunk into
+                // view on it.
+                store.detail_generation += 1;
                 // The new diff may have fewer hunks than the one the cursor
                 // was hovering.
                 if let Some(FileDetail::Diff(ud)) = &store.detail {
@@ -584,13 +588,12 @@ impl WorkingCopyStore {
         self.hunk_cursor.min(self.hunk_bound().saturating_sub(1))
     }
 
-    /// Stable identity of the currently-loaded diff ("kind:path"); the
-    /// view keys the diff pane's scroll reset on it. Kind matters: one
-    /// path can back TWO diffs (a file with staged and unstaged rows),
-    /// and switching surfaces is a different diff that must reset the
-    /// scroll like any other file change.
-    pub fn detail_key(&self) -> Option<String> {
-        self.detail_of.as_ref().map(|(p, k)| format!("{k:?}:{p}"))
+    /// Revision of the currently-loading-or-loaded detail. Bumped when a
+    /// load STARTS (cancelling in-flight loads) and when one LANDS — the
+    /// view watches it to scroll the hovered hunk into view on every new
+    /// detail revision.
+    pub fn detail_generation(&self) -> u64 {
+        self.detail_generation
     }
 
     /// True when the hovered-hunk flow is fully live: the selected row is

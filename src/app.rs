@@ -85,12 +85,14 @@ pub struct RootView {
     /// tall diff moves the cursor to a hunk that is rendered but scrolled
     /// off-screen, and `s` stages content the user cannot see.
     pub diff_scroll: gpui::ScrollHandle,
-    /// Diff identity ("kind:path") the pane last scrolled for; any change
-    /// resets `diff_scroll` so a new diff never opens deep-scrolled. NOT
-    /// keyed on the detail generation: same-file same-surface reloads
-    /// (post-mutation, where the cursor deliberately stays on the next
-    /// hunk) must not snap the pane back to the top.
-    pub diff_scroll_file: Option<String>,
+    /// Detail revision the diff pane last revealed the hovered hunk for.
+    /// Every detail (re)load bumps the store's counter — on the new
+    /// revision the pane scrolls the hovered hunk into view, which covers
+    /// file switches (hunk 0 is already at the top: no scroll), surface
+    /// switches, and the post-mutation reload (the shrunken diff's
+    /// newly-hovered hunk is revealed instead of the pane keeping the
+    /// stale offset).
+    pub diff_scroll_generation: u64,
 }
 
 fn status_badge(status: &WorktreeStatus) -> (String, gpui::Rgba) {
@@ -179,7 +181,9 @@ impl RootView {
         let detail_list_focus = cx.focus_handle();
         let detail_diff_focus = cx.focus_handle();
         let diff_scroll = gpui::ScrollHandle::new();
-        let diff_scroll_file = None;
+        // Forced mismatch: the first detail land of any drill-in reveals
+        // hunk 0, so no previous session's scroll offset can leak in.
+        let diff_scroll_generation = u64::MAX;
         window.focus(&root_focus);
         let view = cx.new(|_| Self {
             store,
@@ -194,7 +198,7 @@ impl RootView {
             detail_list_focus,
             detail_diff_focus,
             diff_scroll,
-            diff_scroll_file,
+            diff_scroll_generation,
         });
         view.update(cx, |this, cx| {
             // Typing in the search field drives the store filter; the
@@ -470,9 +474,6 @@ impl RootView {
             cx.notify();
         }));
         self.detail = Some(wc);
-        self.diff_scroll_file = None;
-        self.diff_scroll
-            .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
         window.focus(&self.detail_list_focus);
         cx.notify();
     }

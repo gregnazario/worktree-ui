@@ -400,18 +400,17 @@ fn render_diff_pane(
         return pane;
     };
     let store = wc.read(cx);
-    // Reset the scroll only when the DISPLAYED FILE changes (keyed on
-    // detail_of's path, not the detail generation): same-file reloads —
-    // the post-mutation one, where the cursor deliberately stays on the
-    // next hunk — must not snap the pane to the top, while a different
-    // file must never open at the previous file's offset (its cursor and
-    // highlight sit on hunk 0, off-screen — `s` would stage what the user
-    // cannot see). Drill-ins reset in `open_detail`.
-    if let Some(key) = store.detail_key() {
-        if this.diff_scroll_file.as_deref() != Some(key.as_str()) {
-            this.diff_scroll_file = Some(key);
-            this.diff_scroll.set_offset(gpui::point(px(0.), px(0.)));
-        }
+    // Every detail (re)load reveals the hovered hunk — one rule for file
+    // switches (hunk 0 sits at the top, so this is a no-op), surface
+    // switches, and the post-mutation reload (the shrunken diff's hovered
+    // hunk is scrolled into view instead of the pane keeping the stale
+    // offset). Without it, `s` stages a hunk the user cannot see. The
+    // store bumps its revision when a load lands; `open_detail` seeds a
+    // forced mismatch so a drill-in always reveals too.
+    let detail_generation = store.detail_generation();
+    if detail_generation != this.diff_scroll_generation {
+        this.diff_scroll_generation = detail_generation;
+        this.diff_scroll.scroll_to_item(store.hunk_cursor() + 1);
     }
     let Some(detail) = &store.detail else {
         return pane.child(
@@ -456,9 +455,11 @@ fn render_diff_pane(
                     ),
             );
             // `hunk_bound` is the store's authority on how many hunks the
-            // pane renders (headers before the line cap) — one walk, shared
-            // with the cursor/stage clamp, so they can never drift apart.
-            // The per-line cap still truncates INSIDE the last hunk.
+            // pane renders — only hunks that fit ENTIRELY under the line
+            // cap — shared with the cursor/stage clamp so they can never
+            // drift apart. Every rendered hunk is therefore fully drawn
+            // (modulo vertical scrolling); the per-line check below is a
+            // defensive backstop only.
             // Each hunk is ONE stateful child of the scroll container, so
             // `diff_scroll.scroll_to_item(hunk + 1)` (the file-header
             // summary is child 0) maps directly to the hovered hunk.
