@@ -577,7 +577,7 @@ fn letter_color(letter: char) -> gpui::Rgba {
 }
 
 /// Rough relative age for the commit list: "now", "5m", "3h", "2d",
-/// "6w", else the date.
+/// "6w", else "Ny" (years).
 fn age_label(timestamp: i64, now: i64) -> String {
     let secs = (now - timestamp).max(0);
     const MIN: i64 = 60;

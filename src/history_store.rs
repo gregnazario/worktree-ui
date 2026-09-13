@@ -39,6 +39,9 @@ pub struct HistoryStore {
     /// One successful worktree-affecting action (checkout, worktree add) →
     /// one home-list refresh.
     mutated: bool,
+    /// The action rewrote THIS worktree's tracked files (checkout) —
+    /// section 1's cached status/diffs must refresh.
+    worktree_files_changed: bool,
     /// Guards detail loads (files/diff), independent per load kind is not
     /// needed here: files and diff both belong to (commit, file) and are
     /// re-issued together on every selection change.
@@ -93,6 +96,7 @@ impl HistoryStore {
             message: None,
             busy_hint: false,
             mutated: false,
+            worktree_files_changed: false,
             detail_generation: 0,
             load_generation: 0,
             load_more_in_flight: false,
@@ -112,6 +116,13 @@ impl HistoryStore {
     /// refresh), mirroring `wc_store::take_mutated`.
     pub fn take_mutated(&mut self) -> bool {
         std::mem::take(&mut self.mutated)
+    }
+
+    /// True when the action rewrote THIS worktree's files (checkout) —
+    /// the Working Copy section must refresh. `w` (worktree add) touches
+    /// a different directory and must not churn section 1's state.
+    pub fn take_worktree_files_changed(&mut self) -> bool {
+        std::mem::take(&mut self.worktree_files_changed)
     }
 
     /// Re-fetches the log (keeping the batch size), preserving the
@@ -272,7 +283,18 @@ impl HistoryStore {
                         // the boundary commit would be appended twice.
                         let known: std::collections::HashSet<String> =
                             store.commits.iter().map(|c| c.hash.clone()).collect();
+                        let raw_len = fetched.len();
                         fetched.retain(|c| !known.contains(&c.hash));
+                        if fetched.len() < raw_len {
+                            // Part of the window was already known — the
+                            // repo gained commits above it and the skip
+                            // window shifted, so appending would present a
+                            // stale tip (or even miss the real tip).
+                            // Refetch from the tip with a grown depth.
+                            store.max_count += store.batch;
+                            store.refresh(cx);
+                            return;
+                        }
                         if fetched.is_empty() {
                             // The whole window was already known (the repo
                             // gained commits above it, shifting the skip
@@ -543,6 +565,7 @@ impl HistoryStore {
                     Ok(()) => {
                         store.message = Some(format!("Checked out {short} (detached HEAD)"));
                         store.mutated = true;
+                        store.worktree_files_changed = true;
                         store.busy_hint = false;
                         // HEAD moved: the list (reachability, decorations)
                         // must reflect the detached state, not just the

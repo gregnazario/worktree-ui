@@ -500,6 +500,7 @@ impl RootView {
         self.section = Section::WorkingCopy;
         self.history = None;
         self.history_subscription = None;
+        self.history_stale = false;
         let wc = WorkingCopyStore::new(entry.path.clone(), cx);
         // One successful mutation inside the detail view must refresh the home
         // worktree list (status, ahead/behind, dirty badge all change). The
@@ -865,13 +866,17 @@ impl RootView {
         };
         let hs = HistoryStore::new(entry.path.clone(), cx);
         self.history_subscription = Some(cx.observe(&hs, move |this, hs, cx| {
-            if hs.update(cx, |store, _cx| store.take_mutated()) {
+            let mutated = hs.update(cx, |store, _cx| store.take_mutated());
+            let files_changed = hs.update(cx, |store, _cx| store.take_worktree_files_changed());
+            if mutated {
                 this.store.update(cx, |store, cx| store.refresh(cx));
-                // A checkout rewrote THIS worktree's files: the Working
-                // Copy section's cached status and diffs are stale until
-                // refreshed, and section 1 would show pre-checkout state.
-                if let Some(wc) = &this.detail {
-                    wc.update(cx, |store, cx| store.refresh(cx));
+                // Only a CHECKOUT rewrites this worktree's files (worktree
+                // add touches a different directory) — refresh section 1
+                // selectively so its in-progress state isn't churned.
+                if files_changed {
+                    if let Some(wc) = &this.detail {
+                        wc.update(cx, |store, cx| store.refresh(cx));
+                    }
                 }
                 this.history_stale = false;
             }
