@@ -125,6 +125,10 @@ impl HistoryStore {
                 if gen != store.load_generation {
                     return;
                 }
+                // A refresh supersedes any in-flight load-more: that
+                // completion will hit this stale generation and bail, so
+                // the in-flight flag is released HERE or `L` stays off.
+                store.load_more_in_flight = false;
                 match result {
                     Ok(mut fetched) => {
                         store.load_failed = false;

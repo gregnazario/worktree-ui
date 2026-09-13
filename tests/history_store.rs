@@ -131,6 +131,29 @@ fn has_more_tracks_truncation_and_load_more_fills(cx: &mut TestAppContext) {
     });
 }
 
+/// A refresh (r, or the auto-refresh after checkout) supersedes an
+/// in-flight load-more: the flag must be released so `L` still works
+/// afterwards — otherwise the stranded flag permanently disables it.
+#[gpui::test]
+fn refresh_releases_a_superseded_load_more(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    four_commit_repo(tmp.path());
+    let store = cx.update(|cx| HistoryStore::new_with_batch(tmp.path().to_path_buf(), 2, cx));
+    cx.run_until_parked();
+    // Start a load-more and supersede it with a refresh before it lands.
+    store.update(cx, |hs, cx| hs.load_more(cx));
+    store.update(cx, |hs, cx| hs.refresh(cx));
+    cx.run_until_parked();
+    store.update(cx, |hs, cx| {
+        assert!(hs.has_more, "refresh kept has_more (2 of 4 commits)");
+        hs.load_more(cx);
+    });
+    cx.run_until_parked();
+    store.update(cx, |hs, _cx| {
+        assert_eq!(hs.commits.len(), 4, "L works after the superseding refresh");
+    });
+}
+
 #[gpui::test]
 fn checkout_flags_a_home_mutation_and_moves_head(cx: &mut TestAppContext) {
     let tmp = tempfile::tempdir().unwrap();

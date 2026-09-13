@@ -339,6 +339,12 @@ fn render_detail(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoEl
         return pane.into_any_element();
     };
     let store = hs.read(cx);
+    if store.selected.is_none() {
+        // Empty repo / failed first load: there is no commit to detail.
+        return pane
+            .child(placeholder("No commit selected"))
+            .into_any_element();
+    }
     if let Some(error) = &store.files_error {
         return pane.child(placeholder(error)).into_any_element();
     }
