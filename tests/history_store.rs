@@ -127,6 +127,7 @@ fn has_more_tracks_truncation_and_load_more_fills(cx: &mut TestAppContext) {
     store.update(cx, |hs, _cx| {
         assert_eq!(hs.commits.len(), 4, "load_more fetched the rest");
         assert!(!hs.has_more, "exhausted: no more to load");
+        assert_eq!(hs.max_count, 4, "loaded depth synced for refreshes");
     });
 }
 

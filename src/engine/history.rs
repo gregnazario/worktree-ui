@@ -180,14 +180,14 @@ pub fn commit_files(worktree: &Path, sha: &str, first_parent: bool) -> Result<Ve
     } else {
         None
     };
-    // `-p` is REQUIRED for rename detection with --name-status: without
-    // patch generation, diff-tree reports renames as delete + add even
-    // under `-M` (the records are parsed instead of the patch).
     let mut args = vec![
         "--no-optional-locks",
         "diff-tree",
+        // Rename pairing runs in diffcore independent of output format —
+        // do NOT add `-p` here: with both --name-status and patch output,
+        // git emits the patch text after the NUL records, which would be
+        // consumed as path data by the parser below.
         "-M",
-        "-p",
         "--no-commit-id",
         "--name-status",
         "-r",

@@ -217,6 +217,9 @@ impl HistoryStore {
                         commits.append(&mut fetched);
                         store.rows = history::assign_lanes(&mut commits);
                         store.commits = commits;
+                        // Sync the loaded depth so a later `r` re-fetches
+                        // everything `L` loaded instead of truncating.
+                        store.max_count = store.commits.len();
                         if store.busy_hint {
                             store.message = None;
                             store.busy_hint = false;
@@ -335,6 +338,9 @@ impl HistoryStore {
     /// (a file selection re-issues it).
     pub fn load_commit_files(&mut self, cx: &mut Context<Self>) {
         self.detail_generation += 1;
+        // Every (re)issue starts from the loading state: a stale error
+        // from a previous transient failure must not mask fresh files.
+        self.files_error = None;
         let Some(selected) = self.selected else {
             self.files = None;
             return;
