@@ -218,14 +218,14 @@ pub fn render(
                                 format!("hunk {}/{}", wc.read(cx).hunk_cursor() + 1, bound)
                             };
                             format!(
-                                "{range} · ↑↓ hunk · s stage hunk · tab back to files · r refresh · t terminal · esc back"
+                                "{range} · ↑↓ hunk · s stage hunk · S stage all · tab back to files · r refresh · t terminal · esc back"
                             )
                         } else if diff_focused {
                             // Zero-hunk diff focused (mode-only change,
                             // loading, failed): neither the hunk keys nor
                             // the file-list `s` apply here — the footer
                             // never advertises a key that would only hint.
-                            "tab back to files · r refresh · t terminal · esc back".to_string()
+                            "S stage all · tab back to files · r refresh · t terminal · esc back".to_string()
                         } else {
                             "↑↓ move · s stage/unstage · S stage all · d discard · c commit · tab pane · r refresh · t terminal · esc back".to_string()
                         },

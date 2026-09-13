@@ -506,6 +506,12 @@ impl RootView {
         // Drop the observer first: a dropped Subscription unsubscribes.
         self.detail_subscription = None;
         self.detail = None;
+        // Re-arm the diff-pane scroll bookkeeping: each store's detail
+        // generation restarts at 0, so a later drill-in could otherwise
+        // collide with the generation cached here and skip the reveal,
+        // leaking this session's scroll offset into the next diff.
+        self.diff_scroll_generation = u64::MAX;
+        self.diff_scroll_key = None;
         window.focus(&self.root_focus);
         self.store.update(cx, |store, cx| store.refresh(cx));
         cx.notify();
