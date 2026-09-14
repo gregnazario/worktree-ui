@@ -557,14 +557,12 @@ impl HistoryStore {
         })
         .detach();
     }
-
-    /// Loads the selected file's unified diff. Skipped while a history
-    /// action is in flight: a concurrent `git show` would read half-
-    /// written index/worktree state from the checkout.
+    /// Loads the selected file's unified diff. Debounced (background
+    /// timer + generation re-check) so key-repeat navigation doesn't
+    /// burst `git show` processes; skipped while a working-copy
+    /// mutation is in flight.
     pub fn load_file_diff(&mut self, cx: &mut Context<Self>) {
-        if self.wc_mutating {
-            return;
-        }
+        // Any re-issue (or skip) cancels the predecessor: bump first.
         self.detail_generation += 1;
         let Some(commit) = self.selected.and_then(|i| self.commits.get(i)) else {
             return;
@@ -581,21 +579,11 @@ impl HistoryStore {
         let worktree = self.worktree.clone();
         let sha = commit.hash.clone();
         let rel_path = file.path.clone();
+        let orig_path = file.orig_path.clone();
         cx.spawn(async move |this, cx| {
-            // Same debounce as commit-files: settle, check, and only then
-            // spawn `git show` if this load is still the current one.
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(60))
-                .await;
-            let still_current = this.update(cx, |store, _cx| {
-                gen == store.detail_generation && !store.wc_mutating
-            });
-            let still_current = still_current.unwrap_or_default();
-            if !still_current {
-                return;
-            }
-            // Same debounce as commit-files: settle, re-check, then spawn
-            // `git show` only if this load is still the current one.
+            // Settle briefly on the background executor (never the UI
+            // thread), then re-check before spawning git: key-repeat
+            // navigation must not burst `git show` processes.
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(60))
                 .await;
@@ -609,7 +597,9 @@ impl HistoryStore {
             }
             let result = cx
                 .background_executor()
-                .spawn(async move { history::commit_diff(&worktree, &sha, &rel_path) })
+                .spawn(async move {
+                    history::commit_diff(&worktree, &sha, &rel_path, orig_path.as_deref())
+                })
                 .await;
             this.update(cx, |store, cx| {
                 if gen != store.detail_generation {

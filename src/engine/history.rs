@@ -274,32 +274,43 @@ pub fn commit_files(worktree: &Path, sha: &str, first_parent: bool) -> Result<Ve
 /// The unified diff of one file in one commit, against its first parent
 /// (`--first-parent` makes merge commits diff against parent 1 instead of
 /// emitting combined `@@@` diffs this parser cannot read; root commits
-/// are unaffected — `git show` diffs them against nothing).
-pub fn commit_diff(worktree: &Path, sha: &str, rel_path: &str) -> Result<UnifiedDiff> {
-    let out = engine::run_bytes(
-        worktree,
-        &[
-            "--no-optional-locks",
-            "show",
-            "--format=",
-            "--first-parent",
-            // Same show.showSignature immunity as the log command.
-            "--no-show-signature",
-            // Rename headers under a pathspec need explicit detection:
-            // without -M a pure rename renders as a full deletion.
-            "-M",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "-U3",
-            sha,
-            "--",
-            &format!(":(literal){rel_path}"),
-        ],
-    )?;
+/// are unaffected — `git show` diffs them against nothing). For renames,
+/// pass BOTH sides of the move so `-M` can pair them — limiting the
+/// pathspec to the post-image alone renders the diff as a wholesale
+/// addition.
+pub fn commit_diff(
+    worktree: &Path,
+    sha: &str,
+    rel_path: &str,
+    orig_path: Option<&str>,
+) -> Result<UnifiedDiff> {
+    let mut args = vec![
+        "--no-optional-locks",
+        "show",
+        "--format=",
+        "--first-parent",
+        "-M",
+        // Same show.showSignature immunity as the log command.
+        "--no-show-signature",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-U3",
+        sha,
+        "--",
+    ];
+    // For a rename, both sides of the move must be in the pathspec (git
+    // only pairs rename sides that both match; the post-image alone
+    // renders as a brand-new file).
+    let orig_spec = orig_path.map(|o| format!(":(literal){o}"));
+    if let Some(orig) = &orig_spec {
+        args.push(orig);
+    }
+    let rel_spec = format!(":(literal){rel_path}");
+    args.push(&rel_spec);
+    let out = engine::run_bytes(worktree, &args)?;
     Ok(engine::diff::parse_unified_diff(&out))
 }
-
 /// Checks out a commit in this worktree (detached HEAD). Refuses while the
 /// working copy has changes — the user's uncommitted work outranks the
 /// jump, and git's own carry-over behavior would be surprising here.

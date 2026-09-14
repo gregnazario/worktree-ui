@@ -270,7 +270,7 @@ fn commit_diff_renders_the_file_against_the_first_parent() {
     two_commit_repo(tmp.path());
     let second = sh_out(tmp.path(), &["git", "rev-parse", "main"]);
 
-    let ud = history::commit_diff(tmp.path(), &second, "f.txt").unwrap();
+    let ud = history::commit_diff(tmp.path(), &second, "f.txt", None).unwrap();
     assert!(!ud.binary);
     assert_eq!(ud.hunks.len(), 1);
     assert!(ud.hunks[0]
@@ -370,7 +370,7 @@ fn commit_files_detects_renames_with_both_paths() {
     // cleanly (a pure rename under a pathspec renders as an addition —
     // git pairs rename sides only when both match the pathspec; the
     // meaningful old → new display lives in the file chips' name-status).
-    let ud = history::commit_diff(tmp.path(), &sha, "renamed.txt").unwrap();
+    let ud = history::commit_diff(tmp.path(), &sha, "renamed.txt", None).unwrap();
     assert!(!ud.binary);
     assert!(ud.header.contains("renamed.txt"), "{:?}", ud.header);
 }
