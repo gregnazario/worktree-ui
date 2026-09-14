@@ -276,16 +276,21 @@ impl HistoryStore {
         self.load_generation += 1;
         let gen = self.load_generation;
         let worktree = self.worktree.clone();
-        let skip = self.commits.len();
+        // Overlap the fetch by ONE boundary commit: it must match our
+        // oldest loaded commit, or the history was rewritten/shrank above
+        // the window and appending would corrupt the list.
+        let boundary_hash = self.commits.last().map(|c| c.hash.clone());
+        let skip = self.commits.len().saturating_sub(1);
         let batch = self.batch;
         self.message = Some(format!("Loading {} older commits…", self.batch));
         self.note_transient_hint();
         cx.notify();
         cx.spawn(async move |this, cx| {
-            // Batch + 1 distinguishes truncation from exhaustion.
+            // Batch + 1 plus the overlap row distinguishes truncation
+            // from exhaustion.
             let result = cx
                 .background_executor()
-                .spawn(async move { history::log(&worktree, skip, batch + 1) })
+                .spawn(async move { history::log(&worktree, skip, batch + 2) })
                 .await;
             this.update(cx, |store, cx| {
                 if gen != store.load_generation {
@@ -294,37 +299,27 @@ impl HistoryStore {
                 store.load_more_in_flight = false;
                 match result {
                     Ok(mut fetched) => {
+                        // Boundary check: the FIRST fetched record must be
+                        // our oldest loaded commit (we overlapped by one).
+                        // If it isn't, the history changed above the
+                        // window (grew past the skip, shrank, or was
+                        // rewritten) — refetch from the tip instead of
+                        // appending a corrupted mixed list.
+                        let boundary_ok = match (&boundary_hash, fetched.first()) {
+                            (Some(b), Some(f)) => f.hash == *b,
+                            _ => true,
+                        };
+                        if !boundary_ok {
+                            store.max_count += store.batch;
+                            store.refresh(cx);
+                            return;
+                        }
+                        fetched.remove(0); // drop the boundary row itself
                         store.load_failed = false;
+                        // After the boundary removal, more rows than
+                        // `batch` means the history continues.
                         store.has_more = fetched.len() > batch;
                         fetched.truncate(batch);
-                        // The repo may have gained commits above the
-                        // window between loads (commit in a terminal,
-                        // come back, press L): the skip window shifts and
-                        // the boundary commit would be appended twice.
-                        let known: std::collections::HashSet<String> =
-                            store.commits.iter().map(|c| c.hash.clone()).collect();
-                        let raw_len = fetched.len();
-                        fetched.retain(|c| !known.contains(&c.hash));
-                        if fetched.len() < raw_len {
-                            // Part of the window was already known — the
-                            // repo changed above the window (gained commits,
-                            // or shrank via rebase) and the skip window
-                            // shifted, so appending would present a stale
-                            // tip, a mixed list, or a dangling boundary.
-                            // Refetch from the tip with a grown depth.
-                            store.max_count += store.batch;
-                            store.refresh(cx);
-                            return;
-                        }
-                        if fetched.is_empty() {
-                            // The whole window was already known (the repo
-                            // gained commits above it, shifting the skip
-                            // window): refetch from the tip with a grown
-                            // depth so `L` still makes progress.
-                            store.max_count += store.batch;
-                            store.refresh(cx);
-                            return;
-                        }
                         let mut commits = std::mem::take(&mut store.commits);
                         commits.append(&mut fetched);
                         store.rows = history::assign_lanes(&mut commits);
@@ -549,10 +544,11 @@ impl HistoryStore {
         let gen = self.detail_generation;
         let worktree = self.worktree.clone();
         let sha = commit.hash.clone();
+        let rel_path = file.path.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { history::commit_diff(&worktree, &sha, &file.path) })
+                .spawn(async move { history::commit_diff(&worktree, &sha, &rel_path) })
                 .await;
             this.update(cx, |store, cx| {
                 if gen != store.detail_generation {
