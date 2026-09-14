@@ -361,14 +361,14 @@ fn render_detail(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoEl
         return pane.into_any_element();
     };
     let store = hs.read(cx);
-    // Reset the files-pane scroll whenever the displayed commit detail
-    // changes (selection bumps detail_generation; refresh/load-more bump
-    // load_generation): without this, a long diff leaves the pane deep-
-    // scrolled and the next commit's detail opens mid-diff with its chip
-    // strip off-screen.
-    let files_generation = (store.detail_generation, store.load_generation);
-    if files_generation != this.history_files_scroll_generation {
-        this.history_files_scroll_generation = files_generation;
+    // Reset the files-pane scroll only when the COMMIT changes (not on
+    // every file re-selection, which also bumps detail_generation via
+    // load_file_diff — that would fight the chip scroll_to_item calls):
+    // without this, a long diff leaves the pane deep-scrolled and the
+    // next commit's detail opens mid-diff with its chip strip off-screen.
+    let files_key = (store.selected, store.load_generation);
+    if files_key != this.history_files_scroll_generation {
+        this.history_files_scroll_generation = files_key;
         this.history_files_scroll
             .set_offset(gpui::point(px(0.), px(0.)));
     }
