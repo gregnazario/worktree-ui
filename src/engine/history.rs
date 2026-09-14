@@ -375,7 +375,6 @@ pub fn open_worktree_at(worktree: &Path, sha: &str, short: &str) -> Result<PathB
     let mut path = parent.join(format!("{name}-{short}"));
     let mut n = 2u32;
     loop {
-        let candidate_raw = path.display().to_string().replace('\\', "/");
         let candidate_canonical = normalize(&path);
         let candidate_name = path.file_name().map(|f| f.to_string_lossy().into_owned());
         let taken = path.exists()
