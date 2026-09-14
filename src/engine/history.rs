@@ -366,9 +366,12 @@ pub fn open_worktree_at(worktree: &Path, sha: &str, short: &str) -> Result<PathB
             .filter_map(|l| l.strip_prefix("worktree "))
             .map(|p| {
                 let raw = p.to_string();
-                let canonical = std::fs::canonicalize(Path::new(p))
-                    .ok()
-                    .map(|c| c.display().to_string().replace('\\', "/"));
+                let canonical = std::fs::canonicalize(Path::new(p)).ok().map(|c| {
+                    let s = c.display().to_string().replace('\\', "/");
+                    // Match normalize(): strip the Windows verbatim prefix
+                    // so both sides string-compare.
+                    s.strip_prefix("//?/").unwrap_or(&s).to_string()
+                });
                 (raw, canonical)
             })
             .collect();

@@ -148,6 +148,9 @@ impl HistoryStore {
             self.retrying = true;
             self.message = Some("Retrying…".into());
             self.note_transient_hint();
+            // Synchronous notify: the retry must be VISIBLE immediately
+            // (error pane → loading), not stale until the fetch lands.
+            cx.notify();
         }
         self.load_generation += 1;
         let gen = self.load_generation;
