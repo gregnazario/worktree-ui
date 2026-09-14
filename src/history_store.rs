@@ -484,16 +484,26 @@ impl HistoryStore {
         let sha = commit.hash.clone();
         let is_merge = commit.parents.len() > 1;
         cx.spawn(async move |this, cx| {
+            // Debounce key-repeat navigation: settle briefly on a
+            // background worker (never the UI thread), then check the
+            // generation BEFORE spawning git — only the settled selection
+            // spawns diff-tree/git-show.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(60))
+                .await;
+            let still_current = this.update(cx, |store, _cx| {
+                gen == store.detail_generation && !store.wc_mutating
+            });
+            let still_current = match still_current {
+                Ok(v) => v,
+                Err(_) => false,
+            };
+            if !still_current {
+                return;
+            }
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    // Debounce key-repeat navigation: settle briefly on a
-                    // background worker (never the UI thread), then the
-                    // generation check below bails if superseded — only
-                    // the settled selection spawns diff-tree/git-show.
-                    std::thread::sleep(std::time::Duration::from_millis(60));
-                    history::commit_files(&worktree, &sha, is_merge)
-                })
+                .spawn(async move { history::commit_files(&worktree, &sha, is_merge) })
                 .await;
             this.update(cx, |store, cx| {
                 if gen != store.detail_generation {
@@ -561,14 +571,24 @@ impl HistoryStore {
         let sha = commit.hash.clone();
         let rel_path = file.path.clone();
         cx.spawn(async move |this, cx| {
+            // Same debounce as commit-files: settle, check, and only then
+            // spawn `git show` if this load is still the current one.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(60))
+                .await;
+            let still_current = this.update(cx, |store, _cx| {
+                gen == store.detail_generation && !store.wc_mutating
+            });
+            let still_current = match still_current {
+                Ok(v) => v,
+                Err(_) => false,
+            };
+            if !still_current {
+                return;
+            }
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    // Same debounce as commit-files: key-repeat file
-                    // navigation must not burst `git show` processes.
-                    std::thread::sleep(std::time::Duration::from_millis(60));
-                    history::commit_diff(&worktree, &sha, &rel_path)
-                })
+                .spawn(async move { history::commit_diff(&worktree, &sha, &rel_path) })
                 .await;
             this.update(cx, |store, cx| {
                 if gen != store.detail_generation {
