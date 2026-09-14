@@ -778,7 +778,9 @@ impl RootView {
             _ => {}
         }
         match ks.key.as_str() {
-            "2" => {}
+            // Re-entry retries a pending revalidation skipped while an
+            // action was in flight (open_history is idempotent here).
+            "2" => self.open_history(window, cx),
             // r is gated like every other history key: a mid-flight
             // checkout must not spawn a redundant concurrent log, and the
             // refresh's success cleanup would erase the in-flight

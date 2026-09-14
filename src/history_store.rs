@@ -230,8 +230,12 @@ impl HistoryStore {
                             // later keystrokes (the footer message does not).
                             store.load_error = Some(text.clone());
                         }
-                        store.message = Some(text);
-                        store.busy_hint = true;
+                        // A later-list failure while an action is in flight
+                        // must not erase the action's progress hint.
+                        if !(store.action_in_flight && !first) {
+                            store.message = Some(text);
+                            store.busy_hint = true;
+                        }
                     }
                 }
                 cx.notify();
@@ -328,12 +332,16 @@ impl HistoryStore {
                         }
                     }
                     Err(e) => {
-                        store.message = Some(if e.is_lock_error() {
-                            "another git process may be using this worktree — retry".into()
-                        } else {
-                            e.message
-                        });
-                        store.busy_hint = true;
+                        // Same in-flight-action hazard as the success arm:
+                        // don't erase the action's progress hint.
+                        if !store.action_in_flight {
+                            store.message = Some(if e.is_lock_error() {
+                                "another git process may be using this worktree — retry".into()
+                            } else {
+                                e.message
+                            });
+                            store.busy_hint = true;
+                        }
                     }
                 }
                 cx.notify();
