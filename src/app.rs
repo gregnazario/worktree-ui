@@ -649,11 +649,9 @@ impl RootView {
         // staging post-checkout content): refuse with an explanation.
         if let Some(hs) = &self.history {
             if hs.read(cx).busy() {
-                // Pure navigation stays live; only worktree-MUTATING keys
-                // refuse. `t` runs straight through (the terminal needs no
-                // store access); `2` re-dispatches through open_history,
-                // which is idempotent and ignores focus; `escape` falls
-                // through to close_detail below.
+                // Navigation/terminal/section-switch stay live (none run a
+                // git command); only worktree-MUTATING keys (s / discard /
+                // commit / r) are refused while the action finishes.
                 match ks.key.as_str() {
                     "t" => {
                         if let Some(wc) = &self.detail {
@@ -666,7 +664,24 @@ impl RootView {
                         self.open_history(window, cx);
                         return;
                     }
-                    _ => {}
+                    "up" | "down" | "tab" | "escape" | "n" => {
+                        // Pure UI navigation: handle in the normal router
+                        // (which doesn't run git commands for these keys).
+                    }
+                    _ => {
+                        // Everything else this section binds mutates the
+                        // worktree (s/S/d/c) or re-runs git (r): refuse.
+                        if let Some(wc) = &self.detail {
+                            wc.update(cx, |store, cx| {
+                                store.message = Some(
+                                    "Busy — a history action is finishing in this worktree".into(),
+                                );
+                                store.note_transient_hint();
+                                cx.notify();
+                            });
+                        }
+                        return;
+                    }
                 }
                 if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| {
@@ -996,6 +1011,14 @@ impl RootView {
         };
         let hs = HistoryStore::new(entry.path.clone(), cx);
         self.history_subscription = Some(cx.observe(&hs, move |this, hs, cx| {
+            // Mirror the history action state into the wc store BOTH ways:
+            // its mutating entry points must refuse while a checkout/
+            // worktree-add runs, regardless of which entry point (keys,
+            // mouse, future callers) launched them.
+            let busy = hs.read(cx).busy();
+            if let Some(wc) = &this.detail {
+                wc.update(cx, |store, _cx| store.history_busy = busy);
+            }
             let mutated = hs.update(cx, |store, _cx| store.take_mutated());
             let files_changed = hs.update(cx, |store, _cx| store.take_worktree_files_changed());
             if mutated {

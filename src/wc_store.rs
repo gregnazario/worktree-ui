@@ -52,6 +52,11 @@ pub struct WorkingCopyStore {
     /// history (stage/unstage/discard only move things between the index
     /// and the worktree).
     history_changed: bool,
+    /// Mirrored from the sibling HistoryStore while the detail view is
+    /// open: a history action (checkout / worktree add) is in flight, and
+    /// this store's mutating entry points must not race it in the same
+    /// worktree. Set by the shell observer regardless of entry point.
+    pub history_busy: bool,
     /// The current `message` is the transient "Busy" hint (set by a
     /// mutating entry point that was swallowed while busy). Completions
     /// clear it so the hint never outlives the operation.
@@ -107,6 +112,7 @@ impl WorkingCopyStore {
             message: None,
             mutated: false,
             history_changed: false,
+            history_busy: false,
             load_failed: false,
             busy_hint: false,
             pending_notice: None,
@@ -865,6 +871,12 @@ impl WorkingCopyStore {
         path: String,
         cx: &mut Context<Self>,
     ) {
+        if self.history_busy {
+            self.message = Some("Busy — a history action is finishing in this worktree".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
         if self.mutating {
             self.busy_message(cx);
             return;

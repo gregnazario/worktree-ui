@@ -304,9 +304,10 @@ impl HistoryStore {
                         fetched.retain(|c| !known.contains(&c.hash));
                         if fetched.len() < raw_len {
                             // Part of the window was already known — the
-                            // repo gained commits above it and the skip
-                            // window shifted, so appending would present a
-                            // stale tip (or even miss the real tip).
+                            // repo changed above the window (gained commits,
+                            // or shrank via rebase) and the skip window
+                            // shifted, so appending would present a stale
+                            // tip, a mixed list, or a dangling boundary.
                             // Refetch from the tip with a grown depth.
                             store.max_count += store.batch;
                             store.refresh(cx);
