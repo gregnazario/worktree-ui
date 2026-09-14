@@ -104,9 +104,10 @@ pub struct RootView {
     /// Scroll position of the history files chip strip, so keyboard file
     /// selection keeps the selected chip visible.
     pub history_files_scroll: gpui::ScrollHandle,
-    /// (selected commit, load generation) the files pane last saw; a
-    /// change resets `history_files_scroll`.
-    pub history_files_scroll_generation: (Option<usize>, u64),
+    /// Selected commit the files pane last saw; a change (different
+    /// commit) resets `history_files_scroll`. Load-more appends don't
+    /// change the selected row and must not reset the scroll.
+    pub history_files_scroll_generation: Option<usize>,
     /// Scroll position of the history commit list (virtualized).
     pub history_list_scroll: gpui::UniformListScrollHandle,
     /// Scroll position of the diff pane. Keyboard hunk movement scrolls
@@ -213,7 +214,7 @@ impl RootView {
         let history_list_focus = cx.focus_handle();
         let history_files_focus = cx.focus_handle();
         let history_files_scroll = gpui::ScrollHandle::new();
-        let history_files_scroll_generation = (None, 0u64);
+        let history_files_scroll_generation = None;
         let history_list_scroll = gpui::UniformListScrollHandle::new();
         let diff_scroll = gpui::ScrollHandle::new();
         // Forced mismatch: the first detail land of any drill-in runs the
@@ -630,7 +631,7 @@ impl RootView {
         // instead of inheriting this session's scroll offset.
         self.history_list_scroll = gpui::UniformListScrollHandle::new();
         self.history_files_scroll = gpui::ScrollHandle::new();
-        self.history_files_scroll_generation = (None, 0u64);
+        self.history_files_scroll_generation = None;
         self.history_stale = false;
         self.detail = None;
         // Re-arm the diff-pane scroll bookkeeping: each store's detail

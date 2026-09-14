@@ -366,7 +366,7 @@ fn render_detail(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoEl
     // load_file_diff — that would fight the chip scroll_to_item calls):
     // without this, a long diff leaves the pane deep-scrolled and the
     // next commit's detail opens mid-diff with its chip strip off-screen.
-    let files_key = (store.selected, store.load_generation);
+    let files_key = store.selected;
     if files_key != this.history_files_scroll_generation {
         this.history_files_scroll_generation = files_key;
         this.history_files_scroll
