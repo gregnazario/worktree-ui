@@ -649,6 +649,11 @@ impl RootView {
         // staging post-checkout content): refuse with an explanation.
         if let Some(hs) = &self.history {
             if hs.read(cx).busy() {
+                // Pure navigation stays live (mirrors the unguarded `1`
+                // in history_keydown); only worktree-MUTATING keys refuse.
+                if matches!(ks.key.as_str(), "2" | "t" | "escape") {
+                    return self.history_keydown(ks, window, cx);
+                }
                 if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| {
                         store.message =
