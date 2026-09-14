@@ -664,7 +664,7 @@ impl RootView {
                         self.open_history(window, cx);
                         return;
                     }
-                    "up" | "down" | "tab" | "escape" | "n" => {
+                    "up" | "down" | "tab" | "escape" | "n" | "1" => {
                         // Pure UI navigation: handle in the normal router
                         // (which doesn't run git commands for these keys).
                     }

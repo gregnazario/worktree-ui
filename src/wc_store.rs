@@ -711,6 +711,12 @@ impl WorkingCopyStore {
     /// file. Binary, untracked, conflict, and non-UTF-8-named rows are
     /// file-level only.
     pub fn stage_hunk(&mut self, cx: &mut Context<Self>) {
+        if self.history_busy {
+            self.message = Some("Busy — a history action is finishing in this worktree".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
         if self.mutating {
             self.busy_message(cx);
             return;
@@ -990,6 +996,12 @@ impl WorkingCopyStore {
     /// routes to `abandon_commit` (via the shell's close_detail) instead of
     /// being swallowed.
     pub fn commit_with_editor(&mut self, cx: &mut Context<Self>) {
+        if self.history_busy {
+            self.message = Some("Busy — a history action is finishing in this worktree".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
         if self.mutating {
             self.busy_message(cx);
             return;
