@@ -370,18 +370,6 @@ impl HistoryStore {
                             store.busy_hint = false;
                         }
                     }
-                    Err(e) => {
-                        // Same in-flight-action hazard as the success arm:
-                        // don't erase the action's progress hint.
-                        if !store.action_in_flight {
-                            store.message = Some(if e.is_lock_error() {
-                                "another git process may be using this worktree — retry".into()
-                            } else {
-                                e.message
-                            });
-                            store.busy_hint = true;
-                        }
-                    }
                 }
                 cx.notify();
             })
