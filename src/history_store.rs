@@ -158,7 +158,7 @@ impl HistoryStore {
         // Fetch one extra row so truncation (more history exists) is
         // distinguishable from exhaustion.
         let skip = 0;
-        let max_count = self.max_count + 1;
+        let fetch_count = self.max_count + 1;
         // keep_hash is resolved AGAIN inside the completion (from the
         // CURRENT selection) so mid-flight navigation wins over the
         // stale position this refresh started from.
@@ -169,9 +169,17 @@ impl HistoryStore {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut commits = history::log(&worktree, skip, max_count)?;
+                    // Fetch one probe row beyond max_count so exhaustion
+                    // (has_more = false) is distinguishable from a full
+                    // window. Lanes are assigned over the truncated set so
+                    // rows and commits stay aligned.
+                    let mut commits = history::log(&worktree, skip, fetch_count)?;
+                    // Full probe window fetched (fetch_count = max_count
+                    // + 1 probe row) means there are possibly more.
+                    let has_more = commits.len() >= fetch_count;
+                    commits.truncate(fetch_count);
                     let rows = history::assign_lanes(&mut commits);
-                    Ok::<_, engine::GitError>((commits, rows))
+                    Ok::<_, engine::GitError>((commits, rows, has_more))
                 })
                 .await;
             this.update(cx, |store, cx| {
@@ -191,12 +199,12 @@ impl HistoryStore {
                     .and_then(|i| store.commits.get(i))
                     .map(|c| c.hash.clone());
                 match result {
-                    Ok((mut commits, rows)) => {
+                    Ok((mut commits, rows, has_more)) => {
                         store.load_failed = false;
                         store.initial_load_done = true;
                         // A transient hint ("Loading N commits…") from the
                         // load that just landed must not outlive it.
-                        store.has_more = commits.len() > store.max_count;
+                        store.has_more = has_more;
                         commits.truncate(store.max_count);
                         store.rows = rows;
                         store.commits = commits;
@@ -334,13 +342,17 @@ impl HistoryStore {
                 }
                 store.load_more_in_flight = false;
                 match result {
-                    Ok((mut fetched, rows, has_more)) => {
+                    Ok((mut fetched, _window_rows, has_more)) => {
                         store.load_failed = false;
                         store.has_more = has_more;
                         fetched.truncate(batch);
+                        // Append to the FULL existing list, then assign
+                        // lanes over it: the appended rows' lanes depend
+                        // on the wires of the commits before them, so the
+                        // sweep must cover everything.
                         let mut commits = std::mem::take(&mut store.commits);
                         commits.append(&mut fetched);
-                        store.rows = rows;
+                        store.rows = history::assign_lanes(&mut commits);
                         store.commits = commits;
                         // Sync the loaded depth so a later `r` re-fetches
                         // everything `L` loaded instead of truncating.
