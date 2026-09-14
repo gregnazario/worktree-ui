@@ -682,16 +682,21 @@ impl RootView {
                         }
                         return;
                     }
+                    _ => {
+                        // Worktree-mutating keys (s / discard / commit / r):
+                        // refuse with an explanation.
+                        if let Some(wc) = &self.detail {
+                            wc.update(cx, |store, cx| {
+                                store.message = Some(
+                                    "Busy — a history action is finishing in this worktree".into(),
+                                );
+                                store.note_transient_hint();
+                                cx.notify();
+                            });
+                        }
+                        return;
+                    }
                 }
-                if let Some(wc) = &self.detail {
-                    wc.update(cx, |store, cx| {
-                        store.message =
-                            Some("Busy — a history action is finishing in this worktree".into());
-                        store.note_transient_hint();
-                        cx.notify();
-                    });
-                }
-                return;
             }
         }
         let list_focused = self.detail_list_focus.is_focused(window);
@@ -864,7 +869,7 @@ impl RootView {
             // says "press r to retry" — that would block the very key it
             // advertises). Gate only on busy/retrying: a mid-flight
             // checkout must not spawn a redundant concurrent log.
-            "r" if list_focused || files_focused => hs.update(cx, |h, cx| {
+            "r" => hs.update(cx, |h, cx| {
                 if h.busy() || h.retrying {
                     h.busy_message(cx);
                     cx.notify();
