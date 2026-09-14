@@ -401,6 +401,10 @@ impl HistoryStore {
         if self.pane == Pane::Commits {
             self.pane = Pane::Files;
         }
+        // Drop the previous file's diff immediately: rendering it under
+        // the NEW chip attributes the old content to the wrong file while
+        // the fetch is in flight.
+        self.file_diff = Err(String::new());
         self.load_file_diff(cx);
         cx.notify();
     }

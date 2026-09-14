@@ -62,7 +62,6 @@ pub fn log(worktree: &Path, skip: usize, max_count: usize) -> Result<Vec<LogComm
             "--topo-order",
             "--decorate=short",
             "--no-color",
-            "--no-color",
             // Machine-parsed output must be immune to the user's
             // log.showSignature config, which interleaves gpg lines
             // between records.

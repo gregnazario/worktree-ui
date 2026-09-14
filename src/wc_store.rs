@@ -48,6 +48,10 @@ pub struct WorkingCopyStore {
     /// Consumed by the app shell: one successful mutation → one home-list
     /// refresh.
     mutated: bool,
+    /// The mutation was a COMMIT — the only one that changes reachable
+    /// history (stage/unstage/discard only move things between the index
+    /// and the worktree).
+    history_changed: bool,
     /// The current `message` is the transient "Busy" hint (set by a
     /// mutating entry point that was swallowed while busy). Completions
     /// clear it so the hint never outlives the operation.
@@ -102,6 +106,7 @@ impl WorkingCopyStore {
             mutating: false,
             message: None,
             mutated: false,
+            history_changed: false,
             load_failed: false,
             busy_hint: false,
             pending_notice: None,
@@ -143,6 +148,12 @@ impl WorkingCopyStore {
             .iter()
             .filter(|(g, _)| matches!(g, eng::Group::Staged))
             .count()
+    }
+
+    /// True when the last mutation was a COMMIT (the only wc mutation
+    /// that changes reachable history — the History section's log).
+    pub fn take_history_changed(&mut self) -> bool {
+        std::mem::take(&mut self.history_changed)
     }
 
     pub fn take_mutated(&mut self) -> bool {
@@ -1018,6 +1029,7 @@ impl WorkingCopyStore {
                         store.detail_of = None;
                         store.message = Some("Committed".into());
                         store.mutated = true;
+                        store.history_changed = true;
                     }
                     Ok(commit::CommitOutcome::AbortedEmpty { draft }) => {
                         store.message = Some(match draft {

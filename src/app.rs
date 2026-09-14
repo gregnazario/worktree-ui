@@ -510,9 +510,12 @@ impl RootView {
         self.detail_subscription = Some(cx.observe(&wc, move |this, wc, cx| {
             if wc.update(cx, |store, _cx| store.take_mutated()) {
                 this.store.update(cx, |store, cx| store.refresh(cx));
-                // A commit/stage changes reachable history: re-entry into
-                // the History section must revalidate its log.
-                this.history_stale = true;
+                // Only a COMMIT changes reachable history (stage/unstage/
+                // discard move things between index and worktree): only
+                // that makes the History section's log stale.
+                if wc.update(cx, |store, _cx| store.take_history_changed()) {
+                    this.history_stale = true;
+                }
             }
             cx.notify();
         }));
@@ -882,7 +885,9 @@ impl RootView {
             // full-depth log run for nothing.
             let stale = self.history_stale;
             self.history_stale = false;
-            if stale {
+            if stale && !hs.read(cx).busy() {
+                // A mid-flight action (checkout) races a redundant log —
+                // the action's own completion refreshes instead.
                 hs.update(cx, |h, cx| h.refresh(cx));
             }
             // Restore the section's remembered pane focus.
