@@ -649,10 +649,24 @@ impl RootView {
         // staging post-checkout content): refuse with an explanation.
         if let Some(hs) = &self.history {
             if hs.read(cx).busy() {
-                // Pure navigation stays live (mirrors the unguarded `1`
-                // in history_keydown); only worktree-MUTATING keys refuse.
-                if matches!(ks.key.as_str(), "2" | "t" | "escape") {
-                    return self.history_keydown(ks, window, cx);
+                // Pure navigation stays live; only worktree-MUTATING keys
+                // refuse. `t` runs straight through (the terminal needs no
+                // store access); `2` re-dispatches through open_history,
+                // which is idempotent and ignores focus; `escape` falls
+                // through to close_detail below.
+                match ks.key.as_str() {
+                    "t" => {
+                        if let Some(wc) = &self.detail {
+                            let path = wc.read(cx).worktree.clone();
+                            open_terminal(&path);
+                        }
+                        return;
+                    }
+                    "2" => {
+                        self.open_history(window, cx);
+                        return;
+                    }
+                    _ => {}
                 }
                 if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| {
