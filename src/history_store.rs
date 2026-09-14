@@ -261,10 +261,10 @@ impl HistoryStore {
         .detach();
     }
 
-    /// Loads the next batch of OLDER commits and appends it. Only the new
-    /// window is fetched (`--skip`); lanes are re-assigned over the whole
-    /// list in memory — a forward-only sweep, so already-rendered lanes
-    /// can never change. Selection is untouched.
+    /// Loads the next batch of OLDER commits and appends it. The fetch,
+    /// drift check, and lane assignment all run on the background
+    /// executor over the FULL appended list; the completion applies the
+    /// result atomically.
     pub fn load_more(&mut self, cx: &mut Context<Self>) {
         if !self.has_more {
             self.message = Some("No older commits to load".into());
@@ -296,8 +296,7 @@ impl HistoryStore {
         cx.notify();
         cx.spawn(async move |this, cx| {
             // Batch + 1 plus the overlap row distinguishes truncation
-            // from exhaustion. Lanes are assigned on the background
-            // executor with the fetch (same rationale as refresh).
+            // from exhaustion.
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -335,23 +334,6 @@ impl HistoryStore {
                 }
                 store.load_more_in_flight = false;
                 match result {
-                    Err(e) if e.message == "__drift__" => {
-                        // Drift: refetch from the tip at greater depth.
-                        store.max_count += store.batch;
-                        store.refresh(cx);
-                    }
-                    Err(e) => {
-                        // Same in-flight-action hazard as the success arm:
-                        // don't erase the action's progress hint.
-                        if !store.action_in_flight {
-                            store.message = Some(if e.is_lock_error() {
-                                "another git process may be using this worktree — retry".into()
-                            } else {
-                                e.message
-                            });
-                            store.busy_hint = true;
-                        }
-                    }
                     Ok((mut fetched, rows, has_more)) => {
                         store.load_failed = false;
                         store.has_more = has_more;
@@ -368,6 +350,18 @@ impl HistoryStore {
                         if store.busy_hint && !store.action_in_flight {
                             store.message = None;
                             store.busy_hint = false;
+                        }
+                    }
+                    Err(e) => {
+                        // Same in-flight-action hazard as the success arm:
+                        // don't erase the action's progress hint.
+                        if !store.action_in_flight {
+                            store.message = Some(if e.is_lock_error() {
+                                "another git process may be using this worktree — retry".into()
+                            } else {
+                                e.message
+                            });
+                            store.busy_hint = true;
                         }
                     }
                 }
