@@ -85,6 +85,13 @@ fn selecting_a_commit_loads_files_and_the_first_diff(cx: &mut TestAppContext) {
         assert_eq!(files[0].path, "b.txt");
         assert_eq!(hs.selected_file, Some(0));
         // The first file's diff auto-loaded.
+    });
+    // The per-file diff load runs after its own debounce timer:
+    // advance the clock past it and park again.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
+    cx.run_until_parked();
+    store.update(cx, |hs, _cx| {
         let diff = hs.file_diff.as_ref().expect("diff loaded");
         assert!(!diff.binary);
         assert!(diff.hunks.iter().any(|h| {
