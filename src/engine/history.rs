@@ -359,27 +359,40 @@ pub fn open_worktree_at(worktree: &Path, sha: &str, short: &str) -> Result<PathB
             Err(_) => path.display().to_string().replace('\\', "/"),
         }
     }
-    let registered: Vec<String> =
+    let registered: Vec<(String, Option<String>)> =
         engine::run_trimmed(worktree, &["worktree", "list", "--porcelain"])
             .unwrap_or_default()
             .lines()
             .filter_map(|l| l.strip_prefix("worktree "))
-            .map(|p| normalize(Path::new(p)))
+            .map(|p| {
+                let raw = p.to_string();
+                let canonical = std::fs::canonicalize(Path::new(p))
+                    .ok()
+                    .map(|c| c.display().to_string().replace('\\', "/"));
+                (raw, canonical)
+            })
             .collect();
     let mut path = parent.join(format!("{name}-{short}"));
     let mut n = 2u32;
     loop {
-        let candidate = normalize(&path);
-        // Exact match: substring probing false-positives on
-        // prefix-colliding names (repo-sha vs repo-sha-2).
+        let candidate_raw = path.display().to_string().replace('\\', "/");
+        let candidate_canonical = normalize(&path);
         let candidate_name = path.file_name().map(|f| f.to_string_lossy().into_owned());
         let taken = path.exists()
-            || registered.iter().any(|r| {
-                *r == candidate
-                    || Path::new(r)
-                        .file_name()
-                        .map(|f| f.to_string_lossy().into_owned())
-                        == candidate_name
+            || registered.iter().any(|(raw, canonical)| {
+                // Canonicalized entries compare by full path; entries that
+                // failed canonicalization (deleted but registered) compare
+                // by directory name only — that's the case the name check
+                // was scoped to.
+                match canonical {
+                    Some(c) => *c == candidate_canonical,
+                    None => {
+                        Path::new(raw)
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            == candidate_name
+                    }
+                }
             });
         if !taken {
             break;

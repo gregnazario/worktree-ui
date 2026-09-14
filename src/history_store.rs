@@ -305,9 +305,21 @@ impl HistoryStore {
                         // window (grew past the skip, shrank, or was
                         // rewritten) — refetch from the tip instead of
                         // appending a corrupted mixed list.
-                        // An empty window means exhaustion — nothing to
-                        // append and no boundary row to drop.
+                        // An empty window with a KNOWN boundary means
+                        // drift (the boundary commit vanished — rebase/
+                        // reset): refetch from the tip. A genuinely empty
+                        // window with no boundary is exhaustion: terminal,
+                        // clear the hint, mark done.
                         if fetched.is_empty() {
+                            let drifting = boundary_hash.is_some();
+                            if drifting {
+                                store.max_count += store.batch;
+                                store.refresh(cx);
+                            } else {
+                                store.has_more = false;
+                                store.busy_hint = false;
+                            }
+                            cx.notify();
                             return;
                         }
                         let boundary_ok = match (&boundary_hash, fetched.first()) {
