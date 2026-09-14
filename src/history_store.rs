@@ -44,8 +44,9 @@ pub struct HistoryStore {
     worktree_files_changed: bool,
     /// Guards detail loads (files/diff), independent per load kind is not
     /// needed here: files and diff both belong to (commit, file) and are
-    /// re-issued together on every selection change.
-    detail_generation: u64,
+    /// re-issued together on every selection change. Read by the view
+    /// (`detail_generation()`) to detect commit-detail changes.
+    pub detail_generation: u64,
     /// Guards log loads (refresh / load-more). Bumped when a load lands
     /// too — the view watches it to reset the files-pane scroll whenever
     /// the displayed commit-detail changes.
