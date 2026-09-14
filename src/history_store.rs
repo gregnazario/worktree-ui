@@ -496,9 +496,15 @@ impl HistoryStore {
                             e.message
                         };
                         store.files = None;
+                        // The detail pane should always show the load
+                        // failure...
                         store.files_error = Some(text.clone());
-                        store.message = Some(text);
-                        store.busy_hint = true;
+                        // ...but the footer hint must not erase an
+                        // in-flight action's progress message.
+                        if !store.action_in_flight {
+                            store.message = Some(text);
+                            store.busy_hint = true;
+                        }
                     }
                 }
                 cx.notify();

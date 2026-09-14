@@ -795,6 +795,18 @@ impl RootView {
                 }
             }),
             "up" if list_focused => {
+                // First load still in flight (or failed): explain instead
+                // of silently no-oping.
+                if hs.read(cx).commits.is_empty() {
+                    if let Some(blocked) = hs.read(cx).action_blocker() {
+                        hs.update(cx, |h, cx| {
+                            h.message = Some(blocked);
+                            h.note_transient_hint();
+                            cx.notify();
+                        });
+                    }
+                    return;
+                }
                 let pos = hs.update(cx, |h, cx| {
                     h.select_prev(cx);
                     h.selected
@@ -806,6 +818,16 @@ impl RootView {
                 }
             }
             "down" if list_focused => {
+                if hs.read(cx).commits.is_empty() {
+                    if let Some(blocked) = hs.read(cx).action_blocker() {
+                        hs.update(cx, |h, cx| {
+                            h.message = Some(blocked);
+                            h.note_transient_hint();
+                            cx.notify();
+                        });
+                    }
+                    return;
+                }
                 let pos = hs.update(cx, |h, cx| {
                     h.select_next(cx);
                     h.selected
