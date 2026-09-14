@@ -322,6 +322,15 @@ pub fn checkout(worktree: &Path, sha: &str) -> Result<()> {
 /// Returns the created path. The caller flags a home-list mutation so the
 /// new worktree appears without a manual refresh.
 pub fn open_worktree_at(worktree: &Path, sha: &str, short: &str) -> Result<PathBuf> {
+    // The short hash comes from parse_log output and is used in a PATH.
+    // A crafted commit's `%h` is derived from the real hash by git, but
+    // this function also accepts values from other sources — validate the
+    // shape so path construction can never traverse.
+    if short.is_empty() || !short.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(GitError {
+            message: "invalid commit reference".into(),
+        });
+    }
     let name = worktree
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

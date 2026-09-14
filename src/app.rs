@@ -975,6 +975,10 @@ impl RootView {
         // The fresh store just loaded the current log: a stale flag set
         // by an earlier working-copy mutation no longer applies.
         self.history_stale = false;
+        // Mirror the Working Copy store's mutation state for the new
+        // store too (the re-entry path syncs it for existing stores).
+        let wc_mutating = self.detail.as_ref().is_some_and(|wc| wc.read(cx).mutating);
+        hs.update(cx, |store, _cx| store.wc_mutating = wc_mutating);
         self.history = Some(hs);
         window.focus(&self.history_list_focus);
         cx.notify();
