@@ -101,6 +101,9 @@ pub struct RootView {
     pub history_stale: bool,
     pub history_list_focus: FocusHandle,
     pub history_files_focus: FocusHandle,
+    /// Scroll position of the history files chip strip, so keyboard file
+    /// selection keeps the selected chip visible.
+    pub history_files_scroll: gpui::ScrollHandle,
     /// Scroll position of the history commit list (virtualized).
     pub history_list_scroll: gpui::UniformListScrollHandle,
     /// Scroll position of the diff pane. Keyboard hunk movement scrolls
@@ -206,6 +209,7 @@ impl RootView {
         let detail_diff_focus = cx.focus_handle();
         let history_list_focus = cx.focus_handle();
         let history_files_focus = cx.focus_handle();
+        let history_files_scroll = gpui::ScrollHandle::new();
         let history_list_scroll = gpui::UniformListScrollHandle::new();
         let diff_scroll = gpui::ScrollHandle::new();
         // Forced mismatch: the first detail land of any drill-in runs the
@@ -231,6 +235,7 @@ impl RootView {
             history_stale: false,
             history_list_focus,
             history_files_focus,
+            history_files_scroll,
             history_list_scroll,
             diff_scroll,
             diff_scroll_generation,
@@ -906,8 +911,18 @@ impl RootView {
                         .scroll_to_item(pos, gpui::ScrollStrategy::Center);
                 }
             }
-            "up" if files_focused => hs.update(cx, |h, cx| h.select_file_prev(cx)),
-            "down" if files_focused => hs.update(cx, |h, cx| h.select_file_next(cx)),
+            "up" if files_focused => {
+                hs.update(cx, |h, cx| h.select_file_prev(cx));
+                if let Some(i) = hs.read(cx).selected_file {
+                    self.history_files_scroll.scroll_to_item(i);
+                }
+            }
+            "down" if files_focused => {
+                hs.update(cx, |h, cx| h.select_file_next(cx));
+                if let Some(i) = hs.read(cx).selected_file {
+                    self.history_files_scroll.scroll_to_item(i);
+                }
+            }
             "tab" if list_focused => {
                 hs.update(cx, |h, cx| h.toggle_pane(cx));
                 window.focus(&self.history_files_focus);

@@ -345,6 +345,7 @@ fn render_detail(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoEl
     let mut pane = div()
         .id("history-detail")
         .track_focus(&files_focus)
+        .track_scroll(&this.history_files_scroll)
         .flex_1()
         .min_w_0()
         .flex()

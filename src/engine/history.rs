@@ -102,19 +102,21 @@ pub fn parse_log(bytes: &[u8]) -> Vec<LogCommit> {
         if !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             continue;
         }
-        let timestamp = field(4).parse::<i64>().unwrap_or(0);
-        let parents: Vec<String> = field(2).split_whitespace().map(str::to_string).collect();
-        // Corrupt/hand-crafted records can garble middle fields (an SOH
-        // in the author shifts parents/timestamp): drop instead of
-        // rendering a garbled row.
-        if field(2)
+        // Corrupt/hand-crafted records can garble the middle fields (an
+        // SOH in the author shifts parents/timestamp). DROPPING the record
+        // would leave its children's parent wires unconsumed — a dangling
+        // lane for the rest of the list — so keep it with sanitized
+        // fields instead: the row renders with a placeholder and consumes
+        // its wires.
+        let mut timestamp = field(4).parse::<i64>().unwrap_or(0);
+        let mut parents: Vec<String> = field(2).split_whitespace().map(str::to_string).collect();
+        let malformed = !field(2)
             .bytes()
-            .any(|b| !b.is_ascii_hexdigit() && !b.is_ascii_whitespace())
-        {
-            continue;
-        }
-        if timestamp == 0 && !field(4).trim().is_empty() && field(4).trim() != "0" {
-            continue;
+            .all(|b| b.is_ascii_hexdigit() || b.is_ascii_whitespace())
+            || field(4).trim().is_empty();
+        if malformed {
+            timestamp = 0;
+            parents.clear();
         }
         commits.push(LogCommit {
             short: field(1),
