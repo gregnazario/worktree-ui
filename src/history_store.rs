@@ -496,20 +496,6 @@ impl HistoryStore {
         let sha = commit.hash.clone();
         let is_merge = commit.parents.len() > 1;
         cx.spawn(async move |this, cx| {
-            // Debounce key-repeat navigation: settle briefly on a
-            // background worker (never the UI thread), then check the
-            // generation BEFORE spawning git — only the settled selection
-            // spawns diff-tree/git-show.
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(60))
-                .await;
-            let still_current = this.update(cx, |store, _cx| {
-                gen == store.detail_generation && !store.wc_mutating
-            });
-            let still_current = still_current.unwrap_or_default();
-            if !still_current {
-                return;
-            }
             // Debounce key-repeat navigation: settle briefly on the
             // background executor, then re-check before spawning git —
             // only the settled selection spawns processes.
