@@ -609,6 +609,18 @@ impl RootView {
                 if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| store.abandon_commit(cx));
                 }
+                // Mirror the abandon feedback into the History store when
+                // the user is in the History section.
+                if self.section == Section::History {
+                    if let Some(hs) = &self.history {
+                        hs.update(cx, |store, cx| {
+                            store.message =
+                                Some("Commit editor abandoned — press r to refresh".into());
+                            store.note_transient_hint();
+                            cx.notify();
+                        });
+                    }
+                }
                 return;
             }
             // Write the hint to the VISIBLE section's store: a user

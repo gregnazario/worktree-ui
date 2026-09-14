@@ -206,6 +206,8 @@ impl HistoryStore {
                         // load that just landed must not outlive it.
                         store.has_more = has_more;
                         commits.truncate(store.max_count);
+                        let mut rows = rows;
+                        rows.truncate(commits.len());
                         store.rows = rows;
                         store.commits = commits;
                         // Keep the selection on the same commit; clamp to

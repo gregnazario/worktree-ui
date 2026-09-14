@@ -113,6 +113,7 @@ pub fn parse_log(bytes: &[u8]) -> Vec<LogCommit> {
         let malformed = !field(2)
             .bytes()
             .all(|b| b.is_ascii_hexdigit() || b.is_ascii_whitespace())
+            || !field(4).trim().bytes().all(|b| b.is_ascii_digit())
             || field(4).trim().is_empty();
         if malformed {
             timestamp = 0;
