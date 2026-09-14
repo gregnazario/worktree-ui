@@ -498,6 +498,20 @@ impl HistoryStore {
             if !still_current {
                 return;
             }
+            // Debounce key-repeat navigation: settle briefly on the
+            // background executor, then re-check before spawning git —
+            // only the settled selection spawns processes.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(60))
+                .await;
+            let still_current = this
+                .update(cx, |store, _cx| {
+                    gen == store.detail_generation && !store.wc_mutating
+                })
+                .unwrap_or_default();
+            if !still_current {
+                return;
+            }
             let result = cx
                 .background_executor()
                 .spawn(async move { history::commit_files(&worktree, &sha, is_merge) })
@@ -577,6 +591,19 @@ impl HistoryStore {
                 gen == store.detail_generation && !store.wc_mutating
             });
             let still_current = still_current.unwrap_or_default();
+            if !still_current {
+                return;
+            }
+            // Same debounce as commit-files: settle, re-check, then spawn
+            // `git show` only if this load is still the current one.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(60))
+                .await;
+            let still_current = this
+                .update(cx, |store, _cx| {
+                    gen == store.detail_generation && !store.wc_mutating
+                })
+                .unwrap_or_default();
             if !still_current {
                 return;
             }

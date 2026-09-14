@@ -2105,6 +2105,15 @@ mod tests {
             assert_eq!(files.len(), 1);
             assert_eq!(files[0].letter, 'M');
             assert_eq!(files[0].path, "h.txt");
+        });
+        // The per-file diff load runs after ANOTHER debounce timer:
+        // advance the clock again, then assert on the loaded diff.
+        vcx.cx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let hs = root.history.as_ref().unwrap().read(cx);
             let diff = hs.file_diff.as_ref().expect("diff loaded");
             assert!(diff
                 .hunks
