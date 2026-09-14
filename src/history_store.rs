@@ -469,6 +469,18 @@ impl HistoryStore {
         let sha = commit.hash.clone();
         let is_merge = commit.parents.len() > 1;
         cx.spawn(async move |this, cx| {
+            // Debounce key-repeat navigation: wait out a short window and
+            // bail if a newer load was issued — only the settled selection
+            // spawns its diff-tree/git-show processes.
+            // Real wall-clock sleep: works under the test executor too
+            // (its run_until_parked doesn't advance timers, but the tests
+            // exercise only the settled path).
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            let still_current = this.update(cx, |store, _cx| gen == store.detail_generation);
+            match still_current {
+                Ok(true) => {}
+                _ => return, // superseded during the debounce window
+            }
             let result = cx
                 .background_executor()
                 .spawn(async move { history::commit_files(&worktree, &sha, is_merge) })
