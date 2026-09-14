@@ -83,9 +83,9 @@ pub fn parse_log(bytes: &[u8]) -> Vec<LogCommit> {
             continue; // the format's leading NUL leaves an empty first record
         }
         // splitn(7): the subject is the LAST field, so SOH bytes inside
-        // the subject can't truncate it. (An SOH in an *earlier* field —
-        // author/refs — would still shift those; that record is dropped
-        // by the shape validation below.)
+        // the subject can't truncate it. An SOH in an *earlier* field
+        // (author/refs) shifts the timestamp/refs — those records are
+        // kept with sanitized parents/timestamp instead of dropped.
         let fields: Vec<&[u8]> = record.splitn(7, |b| *b == 1u8).collect();
         let field = |i: usize| -> String {
             fields

@@ -253,7 +253,7 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
                 // for — but the commit's own cell always survives (a row
                 // without its `*` loses its semantic anchor): extend to
                 // the commit's lane when it sits beyond the budget.
-                let budget = cells.len().min(lane + 1).min(16);
+                let budget = cells.len().max(lane + 1);
                 let mut padded = cells.clone();
                 padded.resize(graph_width.max(cells.len()).min(budget), GraphCell::Empty);
                 for (i, cell) in padded.iter().enumerate() {
