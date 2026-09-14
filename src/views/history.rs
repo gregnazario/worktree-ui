@@ -157,7 +157,9 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
     // The column grows with the lane count: fixed-width graph cells are
     // non-shrinking, so a deep history with many open branches would
     // otherwise paint past the border and squeeze the subject away.
-    let lane_extra = hs.read(cx).graph_width().saturating_sub(6);
+    // Cap the growth: an exotic 40-lane topology must not push the
+    // layout off-screen; extreme rows clip instead.
+    let lane_extra = hs.read(cx).graph_width().saturating_sub(6).min(10);
     let mut wrap = div()
         .id("history-commits-wrap")
         .track_focus(&this.history_list_focus)

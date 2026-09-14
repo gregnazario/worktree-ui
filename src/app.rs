@@ -566,7 +566,13 @@ impl RootView {
         // forgotten editor can never keyboard-lock the view until quit.
         let busy = self.detail.as_ref().is_some_and(|wc| wc.read(cx).mutating);
         if busy {
-            if let Some(wc) = &self.detail {
+            // Write the hint to the VISIBLE section's store: a user
+            // sitting in History would otherwise see nothing.
+            if self.section == Section::History {
+                if let Some(hs) = &self.history {
+                    hs.update(cx, |store, cx| store.busy_message(cx));
+                }
+            } else if let Some(wc) = &self.detail {
                 if wc.read(cx).commit_editor_active() {
                     wc.update(cx, |store, cx| store.abandon_commit(cx));
                 } else {
@@ -717,17 +723,9 @@ impl RootView {
                 }
             }
             // Section switching: 2 opens History (1 is a no-op here).
-            "2" => {
-                self.open_history(window, cx);
-                // Focus the History section's remembered pane.
-                if let Some(hs) = &self.history {
-                    if hs.read(cx).pane == crate::history_store::Pane::Files {
-                        window.focus(&self.history_files_focus);
-                    } else {
-                        window.focus(&self.history_list_focus);
-                    }
-                }
-            }
+            // open_history is idempotent for an existing store and
+            // already focuses the remembered pane.
+            "2" => self.open_history(window, cx),
             _ => {}
         }
     }
@@ -785,10 +783,12 @@ impl RootView {
             // checkout must not spawn a redundant concurrent log, and the
             // refresh's success cleanup would erase the in-flight
             // action's progress hint.
+            // r retries a failed load and reloads an empty repo — gate
+            // ONLY on busy/retrying (the blocker's "press r to retry"
+            // message must never block the key that advertises it).
             "r" if list_focused || files_focused => hs.update(cx, |h, cx| {
-                if let Some(blocked) = h.action_blocker() {
-                    h.message = Some(blocked);
-                    h.note_transient_hint();
+                if h.busy() || h.retrying {
+                    h.busy_message(cx);
                     cx.notify();
                 } else {
                     h.refresh(cx);

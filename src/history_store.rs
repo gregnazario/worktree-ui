@@ -351,13 +351,6 @@ impl HistoryStore {
         .detach();
     }
 
-    /// Transient hint for keys swallowed while the log is still loading.
-    pub fn loading_message(&mut self, cx: &mut Context<Self>) {
-        self.message = Some("Loading history…".into());
-        self.note_transient_hint();
-        cx.notify();
-    }
-
     /// Transient "busy" hint for keys swallowed while an action runs.
     pub fn busy_message(&mut self, cx: &mut Context<Self>) {
         self.message = Some("Busy — wait for the current operation".into());
