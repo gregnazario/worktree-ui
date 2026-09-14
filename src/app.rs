@@ -682,20 +682,6 @@ impl RootView {
                         }
                         return;
                     }
-                    _ => {
-                        // Worktree-mutating keys (s / discard / commit / r):
-                        // refuse with an explanation.
-                        if let Some(wc) = &self.detail {
-                            wc.update(cx, |store, cx| {
-                                store.message = Some(
-                                    "Busy — a history action is finishing in this worktree".into(),
-                                );
-                                store.note_transient_hint();
-                                cx.notify();
-                            });
-                        }
-                        return;
-                    }
                 }
             }
         }
