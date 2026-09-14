@@ -305,6 +305,11 @@ impl HistoryStore {
                         // window (grew past the skip, shrank, or was
                         // rewritten) — refetch from the tip instead of
                         // appending a corrupted mixed list.
+                        // An empty window means exhaustion — nothing to
+                        // append and no boundary row to drop.
+                        if fetched.is_empty() {
+                            return;
+                        }
                         let boundary_ok = match (&boundary_hash, fetched.first()) {
                             (Some(b), Some(f)) => f.hash == *b,
                             _ => true,
