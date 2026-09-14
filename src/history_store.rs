@@ -494,10 +494,7 @@ impl HistoryStore {
             let still_current = this.update(cx, |store, _cx| {
                 gen == store.detail_generation && !store.wc_mutating
             });
-            let still_current = match still_current {
-                Ok(v) => v,
-                Err(_) => false,
-            };
+            let still_current = still_current.unwrap_or_default();
             if !still_current {
                 return;
             }
@@ -579,10 +576,7 @@ impl HistoryStore {
             let still_current = this.update(cx, |store, _cx| {
                 gen == store.detail_generation && !store.wc_mutating
             });
-            let still_current = match still_current {
-                Ok(v) => v,
-                Err(_) => false,
-            };
+            let still_current = still_current.unwrap_or_default();
             if !still_current {
                 return;
             }

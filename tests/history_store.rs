@@ -42,7 +42,6 @@ fn settle(cx: &mut TestAppContext) {
     cx.executor()
         .advance_clock(std::time::Duration::from_millis(200));
     cx.run_until_parked();
-    settle(cx);
 }
 
 #[gpui::test]
