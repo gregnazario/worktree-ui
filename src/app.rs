@@ -779,13 +779,11 @@ impl RootView {
             // Re-entry retries a pending revalidation skipped while an
             // action was in flight (open_history is idempotent here).
             "2" => self.open_history(window, cx),
-            // r is gated like every other history key: a mid-flight
-            // checkout must not spawn a redundant concurrent log, and the
-            // refresh's success cleanup would erase the in-flight
-            // action's progress hint.
-            // r retries a failed load and reloads an empty repo — gate
-            // ONLY on busy/retrying (the blocker's "press r to retry"
-            // message must never block the key that advertises it).
+            // r retries failed loads and reloads empty repos, so it must
+            // NOT be gated by action_blocker (whose failed-load message
+            // says "press r to retry" — that would block the very key it
+            // advertises). Gate only on busy/retrying: a mid-flight
+            // checkout must not spawn a redundant concurrent log.
             "r" if list_focused || files_focused => hs.update(cx, |h, cx| {
                 if h.busy() || h.retrying {
                     h.busy_message(cx);

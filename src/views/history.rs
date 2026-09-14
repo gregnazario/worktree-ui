@@ -210,13 +210,9 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
     // Rows trim trailing freed lanes; the RENDER pads every row to the
     // widest lane so hash/subject columns align across the fork/merge
     // raggedness the graph exists to show.
-    let graph_width = hs
-        .read(cx)
-        .rows
-        .iter()
-        .map(|r| r.cells.len())
-        .max()
-        .unwrap_or(0);
+    // Same store accessor the wrap width uses — one derivation, so
+    // padding and column width can't drift.
+    let graph_width = hs.read(cx).graph_width();
     let list = uniform_list("history-commits", count, move |range, _window, cx| {
         range
             .filter(|pos| *pos < count)
