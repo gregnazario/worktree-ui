@@ -37,12 +37,21 @@ fn four_commit_repo(dir: &std::path::Path) {
     }
 }
 
+/// Advance the test clock past the 60ms commit-detail debounce, then park.
+fn settle(cx: &mut TestAppContext) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
+    cx.run_until_parked();
+    settle(cx);
+}
+
 #[gpui::test]
 fn log_loads_commits_and_lanes(cx: &mut TestAppContext) {
     let tmp = tempfile::tempdir().unwrap();
     four_commit_repo(tmp.path());
     let store = cx.update(|cx| HistoryStore::new(tmp.path().to_path_buf(), cx));
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, _cx| {
         assert_eq!(hs.commits.len(), 4);
         assert_eq!(hs.rows.len(), 4);
@@ -58,6 +67,7 @@ fn selecting_a_commit_loads_files_and_the_first_diff(cx: &mut TestAppContext) {
     four_commit_repo(tmp.path());
     let store = cx.update(|cx| HistoryStore::new(tmp.path().to_path_buf(), cx));
     cx.run_until_parked();
+    settle(cx);
     // Select the "commit b" row (b.txt was added, f.txt/init untouched).
     store.update(cx, |hs, cx| {
         let pos = hs
@@ -68,6 +78,7 @@ fn selecting_a_commit_loads_files_and_the_first_diff(cx: &mut TestAppContext) {
         hs.select(Some(pos), cx);
     });
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, _cx| {
         let files = hs.files.as_ref().expect("files loaded");
         assert_eq!(files.len(), 1);
@@ -91,6 +102,7 @@ fn refresh_keeps_the_selection_by_hash_and_reload_files(cx: &mut TestAppContext)
     four_commit_repo(tmp.path());
     let store = cx.update(|cx| HistoryStore::new(tmp.path().to_path_buf(), cx));
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, cx| {
         let pos = hs
             .commits
@@ -100,8 +112,10 @@ fn refresh_keeps_the_selection_by_hash_and_reload_files(cx: &mut TestAppContext)
         hs.select(Some(pos), cx);
     });
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, cx| hs.refresh(cx));
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, _cx| {
         let sel = hs.selected.expect("selection kept");
         assert_eq!(hs.commits[sel].subject, "commit b");
@@ -115,6 +129,7 @@ fn has_more_tracks_truncation_and_load_more_fills(cx: &mut TestAppContext) {
     four_commit_repo(tmp.path());
     let store = cx.update(|cx| HistoryStore::new_with_batch(tmp.path().to_path_buf(), 2, cx));
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, _cx| {
         assert_eq!(hs.commits.len(), 2, "batch honored");
         assert!(hs.has_more, "4 commits > batch of 2");
@@ -124,6 +139,7 @@ fn has_more_tracks_truncation_and_load_more_fills(cx: &mut TestAppContext) {
         hs.load_more(cx);
     });
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, _cx| {
         assert_eq!(hs.commits.len(), 4, "load_more fetched the rest");
         assert!(!hs.has_more, "exhausted: no more to load");
@@ -140,15 +156,18 @@ fn refresh_releases_a_superseded_load_more(cx: &mut TestAppContext) {
     four_commit_repo(tmp.path());
     let store = cx.update(|cx| HistoryStore::new_with_batch(tmp.path().to_path_buf(), 2, cx));
     cx.run_until_parked();
+    settle(cx);
     // Start a load-more and supersede it with a refresh before it lands.
     store.update(cx, |hs, cx| hs.load_more(cx));
     store.update(cx, |hs, cx| hs.refresh(cx));
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, cx| {
         assert!(hs.has_more, "refresh kept has_more (2 of 4 commits)");
         hs.load_more(cx);
     });
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, _cx| {
         assert_eq!(hs.commits.len(), 4, "L works after the superseding refresh");
     });
@@ -160,6 +179,7 @@ fn checkout_flags_a_home_mutation_and_moves_head(cx: &mut TestAppContext) {
     four_commit_repo(tmp.path());
     let store = cx.update(|cx| HistoryStore::new(tmp.path().to_path_buf(), cx));
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, cx| {
         let pos = hs
             .commits
@@ -170,6 +190,7 @@ fn checkout_flags_a_home_mutation_and_moves_head(cx: &mut TestAppContext) {
         hs.checkout(cx);
     });
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, _cx| {
         assert!(hs.take_mutated(), "checkout flags the home refresh");
         assert!(
@@ -193,10 +214,12 @@ fn checkout_refuses_when_dirty(cx: &mut TestAppContext) {
     std::fs::write(tmp.path().join("c.txt"), "dirty").unwrap();
     let store = cx.update(|cx| HistoryStore::new(tmp.path().to_path_buf(), cx));
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, cx| {
         hs.checkout(cx);
     });
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, _cx| {
         assert!(
             hs.message
@@ -216,10 +239,12 @@ fn open_worktree_flags_a_home_mutation_and_registers_the_worktree(cx: &mut TestA
     four_commit_repo(tmp.path());
     let store = cx.update(|cx| HistoryStore::new(tmp.path().to_path_buf(), cx));
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, cx| {
         hs.open_worktree(cx);
     });
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, _cx| {
         assert!(hs.take_mutated(), "worktree add flags the home refresh");
         assert!(
@@ -245,6 +270,7 @@ fn actions_are_gated_while_one_is_in_flight(cx: &mut TestAppContext) {
     four_commit_repo(tmp.path());
     let store = cx.update(|cx| HistoryStore::new(tmp.path().to_path_buf(), cx));
     cx.run_until_parked();
+    settle(cx);
     // Kick off a checkout WITHOUT letting it land: the action must gate.
     store.update(cx, |hs, cx| {
         hs.checkout(cx);
@@ -262,6 +288,7 @@ fn actions_are_gated_while_one_is_in_flight(cx: &mut TestAppContext) {
         );
     });
     cx.run_until_parked();
+    settle(cx);
     store.update(cx, |hs, _cx| {
         assert!(!hs.busy(), "busy clears when the action lands");
     });

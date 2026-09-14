@@ -2092,6 +2092,11 @@ mod tests {
         // Newest commit ("edit h") is pre-selected; tab to the files pane
         // and walk to its only file.
         vcx.simulate_keystrokes("tab");
+        // The commit-files load debounces on a 60ms background timer:
+        // advance the test clock past it, then let the chain complete.
+        vcx.cx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(200));
         vcx.run_until_parked();
         view.update(&mut vcx.cx, |root, cx| {
             let hs = root.history.as_ref().unwrap().read(cx);
