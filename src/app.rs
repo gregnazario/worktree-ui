@@ -514,7 +514,20 @@ impl RootView {
                 // discard move things between index and worktree): only
                 // that makes the History section's log stale.
                 if wc.update(cx, |store, _cx| store.take_history_changed()) {
-                    this.history_stale = true;
+                    // If History is already on screen, refresh the log
+                    // NOW instead of leaving it stale until re-entry.
+                    if this.section == Section::History {
+                        if let Some(hs) = &this.history {
+                            let busy = hs.read(cx).busy();
+                            if !busy {
+                                hs.update(cx, |h, cx| h.refresh(cx));
+                            } else {
+                                this.history_stale = true;
+                            }
+                        }
+                    } else {
+                        this.history_stale = true;
+                    }
                 }
             }
             cx.notify();
@@ -566,6 +579,19 @@ impl RootView {
         // forgotten editor can never keyboard-lock the view until quit.
         let busy = self.detail.as_ref().is_some_and(|wc| wc.read(cx).mutating);
         if busy {
+            // A commit editor waits on the USER (an editor that can run
+            // for minutes) — esc abandons it regardless of which section
+            // is showing.
+            let editor_active = self
+                .detail
+                .as_ref()
+                .is_some_and(|wc| wc.read(cx).commit_editor_active());
+            if editor_active {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.abandon_commit(cx));
+                }
+                return;
+            }
             // Write the hint to the VISIBLE section's store: a user
             // sitting in History would otherwise see nothing.
             if self.section == Section::History {
@@ -573,11 +599,7 @@ impl RootView {
                     hs.update(cx, |store, cx| store.busy_message(cx));
                 }
             } else if let Some(wc) = &self.detail {
-                if wc.read(cx).commit_editor_active() {
-                    wc.update(cx, |store, cx| store.abandon_commit(cx));
-                } else {
-                    wc.update(cx, |store, cx| store.busy_message(cx));
-                }
+                wc.update(cx, |store, cx| store.busy_message(cx));
             }
             return;
         }

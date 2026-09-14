@@ -164,6 +164,7 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
         .id("history-commits-wrap")
         .track_focus(&this.history_list_focus)
         .w(px(430. + 14. * lane_extra as f32))
+        .overflow_hidden()
         .flex()
         .flex_col()
         .flex_shrink_0()
@@ -248,8 +249,11 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
                             hs.update(cx, |store, cx| store.select(Some(pos), cx));
                         }
                     });
+                // Clamp to the lane budget the column width was sized
+                // for (lane_extra cap): exotic rows clip at the wrap.
+                let budget = graph_width.min(16);
                 let mut padded = cells.clone();
-                padded.resize(graph_width.max(cells.len()), GraphCell::Empty);
+                padded.resize(graph_width.max(cells.len()).min(budget), GraphCell::Empty);
                 for (i, cell) in padded.iter().enumerate() {
                     let (ch, color) = match cell {
                         GraphCell::Commit => ("*", if i == lane { ACCENT } else { DIM }),
