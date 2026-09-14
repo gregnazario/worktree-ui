@@ -250,8 +250,10 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
                         }
                     });
                 // Clamp to the lane budget the column width was sized
-                // for (lane_extra cap): exotic rows clip at the wrap.
-                let budget = graph_width.min(16);
+                // for — but the commit's own cell always survives (a row
+                // without its `*` loses its semantic anchor): extend to
+                // the commit's lane when it sits beyond the budget.
+                let budget = graph_width.min(16).max(cells.len().min(lane + 1));
                 let mut padded = cells.clone();
                 padded.resize(graph_width.max(cells.len()).min(budget), GraphCell::Empty);
                 for (i, cell) in padded.iter().enumerate() {

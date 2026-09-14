@@ -940,6 +940,10 @@ impl RootView {
             } else {
                 window.focus(&self.history_list_focus);
             }
+            // Mirror the Working Copy store's mutation state: history
+            // actions must not race an in-flight stage/discard/commit.
+            let wc_mutating = self.detail.as_ref().is_some_and(|wc| wc.read(cx).mutating);
+            hs.update(cx, |store, _cx| store.wc_mutating = wc_mutating);
             cx.notify();
             return;
         }

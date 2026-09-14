@@ -66,6 +66,9 @@ pub struct HistoryStore {
     /// A worktree-affecting action (checkout / worktree add) is in flight;
     /// blocks further actions until its completion lands.
     action_in_flight: bool,
+    /// Set by the shell when the sibling WorkingCopyStore has a mutation
+    /// in flight: history actions must not race it in the same worktree.
+    pub wc_mutating: bool,
     /// Which action is running — the busy message names it accurately.
     action_kind: Option<&'static str>,
     /// True when the log fetch returned the full batch — older commits
@@ -106,6 +109,7 @@ impl HistoryStore {
             retrying: false,
             batch,
             action_in_flight: false,
+            wc_mutating: false,
             action_kind: None,
             has_more: false,
             initial_load_done: false,
@@ -566,6 +570,12 @@ impl HistoryStore {
             self.busy_message(cx);
             return;
         }
+        if self.wc_mutating {
+            self.message = Some("Busy — finish the working-copy operation first".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
         let Some(commit) = self.selected.and_then(|i| self.commits.get(i)) else {
             return;
         };
@@ -612,6 +622,12 @@ impl HistoryStore {
     pub fn open_worktree(&mut self, cx: &mut Context<Self>) {
         if self.busy() {
             self.busy_message(cx);
+            return;
+        }
+        if self.wc_mutating {
+            self.message = Some("Busy — finish the working-copy operation first".into());
+            self.note_transient_hint();
+            cx.notify();
             return;
         }
         let Some(commit) = self.selected.and_then(|i| self.commits.get(i)) else {
