@@ -883,11 +883,11 @@ impl RootView {
             // Revalidate only when the working copy mutated since the last
             // visit — an unconditional refetch on every tab press costs a
             // full-depth log run for nothing.
-            let stale = self.history_stale;
-            self.history_stale = false;
-            if stale && !hs.read(cx).busy() {
-                // A mid-flight action (checkout) races a redundant log —
-                // the action's own completion refreshes instead.
+            // Clear the flag only when the refresh actually runs; while
+            // an action is in flight the pending revalidation must stay
+            // pending, not vanish.
+            if self.history_stale && !hs.read(cx).busy() {
+                self.history_stale = false;
                 hs.update(cx, |h, cx| h.refresh(cx));
             }
             // Restore the section's remembered pane focus.

@@ -320,7 +320,9 @@ impl HistoryStore {
                         // Sync the loaded depth so a later `r` re-fetches
                         // everything `L` loaded instead of truncating.
                         store.max_count = store.commits.len();
-                        if store.busy_hint {
+                        // Don't clobber an in-flight action's progress
+                        // hint (checkout started while this load ran).
+                        if store.busy_hint && !store.action_in_flight {
                             store.message = None;
                             store.busy_hint = false;
                         }
