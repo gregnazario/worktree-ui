@@ -508,6 +508,14 @@ impl RootView {
         // observer would otherwise accumulate (dropped stores make old observers
         // inert but never remove their subscription entries).
         self.detail_subscription = Some(cx.observe(&wc, move |this, wc, cx| {
+            // Mirror the mutation state FIRST (success or failure): an
+            // already-open History section must release its `wc_mutating`
+            // refusal as soon as the working-copy operation ends, not
+            // only when the user re-enters the section.
+            let mutating = wc.read(cx).mutating;
+            if let Some(hs) = &this.history {
+                hs.update(cx, |store, _cx| store.wc_mutating = mutating);
+            }
             if wc.update(cx, |store, _cx| store.take_mutated()) {
                 this.store.update(cx, |store, cx| store.refresh(cx));
                 // Only a COMMIT changes reachable history (stage/unstage/
@@ -635,6 +643,22 @@ impl RootView {
         // checked below, and its container is a different subtree.
         if self.section == Section::History {
             return self.history_keydown(ks, window, cx);
+        }
+        // A history action (checkout / worktree add) in flight races the
+        // Working Copy keys in the same worktree (index.lock contention,
+        // staging post-checkout content): refuse with an explanation.
+        if let Some(hs) = &self.history {
+            if hs.read(cx).busy() {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| {
+                        store.message =
+                            Some("Busy — a history action is finishing in this worktree".into());
+                        store.note_transient_hint();
+                        cx.notify();
+                    });
+                }
+                return;
+            }
         }
         let list_focused = self.detail_list_focus.is_focused(window);
         let diff_focused = self.detail_diff_focus.is_focused(window);

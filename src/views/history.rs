@@ -566,7 +566,7 @@ fn render_diff(ud: &UnifiedDiff) -> impl IntoElement {
     let total: usize = ud.hunks.iter().map(|h| h.lines.len()).sum();
     if total > DIFF_RENDER_CAP {
         pane = pane.child(placeholder(&format!(
-            "… {} more lines — open the file in your editor",
+            "… {} more lines not shown — press t for a terminal",
             total - DIFF_RENDER_CAP
         )));
     }
