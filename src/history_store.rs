@@ -205,7 +205,7 @@ impl HistoryStore {
                         store.files = None;
                         store.selected_file = None;
                         store.file_diff = Err(String::new());
-                        if store.busy_hint {
+                        if store.busy_hint && !store.action_in_flight {
                             store.message = None;
                             store.busy_hint = false;
                         }

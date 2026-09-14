@@ -916,8 +916,11 @@ impl RootView {
                     if let Some(wc) = &this.detail {
                         wc.update(cx, |store, cx| store.refresh(cx));
                     }
+                    // Checkout's completion re-ran the log: the flag is
+                    // satisfied. A worktree add did NOT re-run it, so a
+                    // pending revalidation must stay pending.
+                    this.history_stale = false;
                 }
-                this.history_stale = false;
             }
             cx.notify();
         }));

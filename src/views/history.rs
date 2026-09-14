@@ -286,19 +286,28 @@ fn render_commit_list(this: &mut RootView, cx: &mut Context<RootView>) -> impl I
                             .truncate()
                             .child(subject),
                     )
+                    // Bounded decorations/author chips: a many-decoration
+                    // commit would otherwise squeeze the subject to zero
+                    // and paint past the column border.
                     .child(
                         div()
                             .flex_shrink_0()
+                            .max_w(px(120.))
+                            .min_w_0()
                             .text_size(px(11.))
                             .text_color(DIM)
+                            .truncate()
                             .child(format!("{} · {}", author, age_label(timestamp, now))),
                     );
                 if !refs.is_empty() {
                     row = row.child(
                         div()
                             .flex_shrink_0()
+                            .max_w(px(140.))
+                            .min_w_0()
                             .text_size(px(10.))
                             .text_color(ACCENT)
+                            .truncate()
                             .child(refs),
                     );
                 }
