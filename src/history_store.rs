@@ -5,7 +5,7 @@
 //! the background executor, loads are guarded by a detail-generation
 //! counter, and every refusal explains itself.
 
-use crate::engine::{diff, history};
+use crate::engine::{self, diff, history};
 use gpui::{App, AppContext, Context, Entity};
 use std::path::PathBuf;
 
@@ -163,9 +163,16 @@ impl HistoryStore {
         // CURRENT selection) so mid-flight navigation wins over the
         // stale position this refresh started from.
         cx.spawn(async move |this, cx| {
+            // Lane assignment runs on the background executor with the
+            // fetch: the sweep is O(loaded depth × lanes) and must not run
+            // on the UI thread.
             let result = cx
                 .background_executor()
-                .spawn(async move { history::log(&worktree, skip, max_count) })
+                .spawn(async move {
+                    let mut commits = history::log(&worktree, skip, max_count)?;
+                    let rows = history::assign_lanes(&mut commits);
+                    Ok::<_, engine::GitError>((commits, rows))
+                })
                 .await;
             this.update(cx, |store, cx| {
                 if gen != store.load_generation {
@@ -184,15 +191,14 @@ impl HistoryStore {
                     .and_then(|i| store.commits.get(i))
                     .map(|c| c.hash.clone());
                 match result {
-                    Ok(mut fetched) => {
+                    Ok((mut commits, rows)) => {
                         store.load_failed = false;
                         store.initial_load_done = true;
                         // A transient hint ("Loading N commits…") from the
                         // load that just landed must not outlive it.
-                        store.has_more = fetched.len() > store.max_count;
-                        fetched.truncate(store.max_count);
-                        let mut commits = fetched;
-                        store.rows = history::assign_lanes(&mut commits);
+                        store.has_more = commits.len() > store.max_count;
+                        commits.truncate(store.max_count);
+                        store.rows = rows;
                         store.commits = commits;
                         // Keep the selection on the same commit; clamp to
                         // the list otherwise.
@@ -290,10 +296,38 @@ impl HistoryStore {
         cx.notify();
         cx.spawn(async move |this, cx| {
             // Batch + 1 plus the overlap row distinguishes truncation
-            // from exhaustion.
+            // from exhaustion. Lanes are assigned on the background
+            // executor with the fetch (same rationale as refresh).
             let result = cx
                 .background_executor()
-                .spawn(async move { history::log(&worktree, skip, batch + 2) })
+                .spawn(async move {
+                    let mut fetched = history::log(&worktree, skip, batch + 2)?;
+                    // An empty window with a KNOWN boundary means drift
+                    // (the boundary commit vanished — rebase/reset):
+                    // refetch from the tip. A genuinely empty window with
+                    // no boundary is exhaustion: terminal, clear the hint,
+                    // mark done.
+                    if fetched.is_empty() {
+                        let drifting = boundary_hash.is_some();
+                        if drifting {
+                            return Err(engine::GitError {
+                                message: "__drift__".into(),
+                            });
+                        }
+                        return Ok((fetched, Vec::new(), false));
+                    }
+                    let boundary_ok = fetched.first().map(|c| c.hash.clone()).as_deref()
+                        == boundary_hash.as_deref();
+                    if !boundary_ok {
+                        return Err(engine::GitError {
+                            message: "__drift__".into(),
+                        });
+                    }
+                    fetched.remove(0); // drop the boundary row itself
+                    let has_more = fetched.len() > batch;
+                    let rows = history::assign_lanes(&mut fetched);
+                    Ok((fetched, rows, has_more))
+                })
                 .await;
             this.update(cx, |store, cx| {
                 if gen != store.load_generation {
@@ -301,48 +335,30 @@ impl HistoryStore {
                 }
                 store.load_more_in_flight = false;
                 match result {
-                    Ok(mut fetched) => {
-                        // Boundary check: the FIRST fetched record must be
-                        // our oldest loaded commit (we overlapped by one).
-                        // If it isn't, the history changed above the
-                        // window (grew past the skip, shrank, or was
-                        // rewritten) — refetch from the tip instead of
-                        // appending a corrupted mixed list.
-                        // An empty window with a KNOWN boundary means
-                        // drift (the boundary commit vanished — rebase/
-                        // reset): refetch from the tip. A genuinely empty
-                        // window with no boundary is exhaustion: terminal,
-                        // clear the hint, mark done.
-                        if fetched.is_empty() {
-                            let drifting = boundary_hash.is_some();
-                            if drifting {
-                                store.max_count += store.batch;
-                                store.refresh(cx);
+                    Err(e) if e.message == "__drift__" => {
+                        // Drift: refetch from the tip at greater depth.
+                        store.max_count += store.batch;
+                        store.refresh(cx);
+                    }
+                    Err(e) => {
+                        // Same in-flight-action hazard as the success arm:
+                        // don't erase the action's progress hint.
+                        if !store.action_in_flight {
+                            store.message = Some(if e.is_lock_error() {
+                                "another git process may be using this worktree — retry".into()
                             } else {
-                                store.has_more = false;
-                                store.busy_hint = false;
-                            }
-                            cx.notify();
-                            return;
+                                e.message
+                            });
+                            store.busy_hint = true;
                         }
-                        let boundary_ok = match (&boundary_hash, fetched.first()) {
-                            (Some(b), Some(f)) => f.hash == *b,
-                            _ => true,
-                        };
-                        if !boundary_ok {
-                            store.max_count += store.batch;
-                            store.refresh(cx);
-                            return;
-                        }
-                        fetched.remove(0); // drop the boundary row itself
+                    }
+                    Ok((mut fetched, rows, has_more)) => {
                         store.load_failed = false;
-                        // After the boundary removal, more rows than
-                        // `batch` means the history continues.
-                        store.has_more = fetched.len() > batch;
+                        store.has_more = has_more;
                         fetched.truncate(batch);
                         let mut commits = std::mem::take(&mut store.commits);
                         commits.append(&mut fetched);
-                        store.rows = history::assign_lanes(&mut commits);
+                        store.rows = rows;
                         store.commits = commits;
                         // Sync the loaded depth so a later `r` re-fetches
                         // everything `L` loaded instead of truncating.
