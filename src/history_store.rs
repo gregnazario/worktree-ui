@@ -46,7 +46,9 @@ pub struct HistoryStore {
     /// needed here: files and diff both belong to (commit, file) and are
     /// re-issued together on every selection change.
     detail_generation: u64,
-    /// Guards log loads (refresh / load-more).
+    /// Guards log loads (refresh / load-more). Bumped when a load lands
+    /// too — the view watches it to reset the files-pane scroll whenever
+    /// the displayed commit-detail changes.
     pub load_generation: u64,
     /// A load-more fetch is in flight; extra presses get a hint instead
     /// of re-requesting the same window.
@@ -512,8 +514,13 @@ impl HistoryStore {
         .detach();
     }
 
-    /// Loads the selected file's unified diff.
+    /// Loads the selected file's unified diff. Skipped while a history
+    /// action is in flight: a concurrent `git show` would read half-
+    /// written index/worktree state from the checkout.
     pub fn load_file_diff(&mut self, cx: &mut Context<Self>) {
+        if self.wc_mutating {
+            return;
+        }
         self.detail_generation += 1;
         let Some(commit) = self.selected.and_then(|i| self.commits.get(i)) else {
             return;

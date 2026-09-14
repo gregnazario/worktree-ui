@@ -104,6 +104,9 @@ pub struct RootView {
     /// Scroll position of the history files chip strip, so keyboard file
     /// selection keeps the selected chip visible.
     pub history_files_scroll: gpui::ScrollHandle,
+    /// History load generation the files pane last saw; a change resets
+    /// `history_files_scroll`.
+    pub history_files_scroll_generation: u64,
     /// Scroll position of the history commit list (virtualized).
     pub history_list_scroll: gpui::UniformListScrollHandle,
     /// Scroll position of the diff pane. Keyboard hunk movement scrolls
@@ -210,6 +213,7 @@ impl RootView {
         let history_list_focus = cx.focus_handle();
         let history_files_focus = cx.focus_handle();
         let history_files_scroll = gpui::ScrollHandle::new();
+        let history_files_scroll_generation = 0u64;
         let history_list_scroll = gpui::UniformListScrollHandle::new();
         let diff_scroll = gpui::ScrollHandle::new();
         // Forced mismatch: the first detail land of any drill-in runs the
@@ -236,6 +240,7 @@ impl RootView {
             history_list_focus,
             history_files_focus,
             history_files_scroll,
+            history_files_scroll_generation,
             history_list_scroll,
             diff_scroll,
             diff_scroll_generation,
