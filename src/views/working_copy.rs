@@ -7,15 +7,13 @@ use crate::app::{
 };
 use crate::engine::diff::{self, DiffLineKind};
 use crate::engine::working_copy::Group;
-use crate::wc_store::{FileDetail, Pane};
+use crate::wc_store::{FileDetail, DIFF_RENDER_CAP};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, rgba, Context, InteractiveElement, IntoElement, MouseButton, ParentElement,
     SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
-/// Caps rendered diff lines in the detail view's diff pane.
-const DIFF_RENDER_CAP: usize = 5000;
 /// Caps the interactive file-list rows: every row is a stateful element,
 /// and monorepo-scale lists would make each keystroke rebuild thousands of
 /// them. Truncated lists show a trailer pointing at the terminal.
@@ -38,12 +36,13 @@ type FileRow = (Group, usize, bool, char, String, Option<(u64, u64)>);
 /// `on_key_down` and silently killing `detail_keydown` routing.
 pub fn render(
     this: &mut RootView,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let Some(wc) = this.detail.clone() else {
         return div().id("detail-view").into_any_element();
     };
+    let diff_focused = this.detail_diff_focus.is_focused(window);
     let (branch_label, arrows, path) = {
         let store = wc.read(cx);
         let branch = store
@@ -132,7 +131,7 @@ pub fn render(
             load_failed,
             load_error,
         ))
-        .child(render_diff_pane(this, cx));
+        .child(render_diff_pane(this, diff_focused, cx));
 
     div()
         .id("detail-view")
@@ -196,8 +195,37 @@ pub fn render(
                 .bg(PANEL)
                 .child(
                     div().text_size(px(11.)).text_color(DIM).child(
-                        if wc.read(cx).pane == Pane::Diff {
-                            "tab back to files · r refresh · t terminal · esc back".to_string()
+                        // Hints must key off the same signal as key routing
+                        // (window focus), not `store.pane`: a selection made
+                        // by mouse-click flips `pane` back to Files without
+                        // moving focus, and the two would then disagree
+                        // about whether `s` stages a hunk or a file. A
+                        // zero-hunk diff (mode-only change, binary
+                        // preview, still loading) or a STAGED row's diff
+                        // advertises no `s` at all — the footer never
+                        // offers a key that would only hint.
+                        if diff_focused && wc.read(cx).hunk_stageable() {
+                            // The position indicator doubles as the render
+                            // cap's honesty marker: the cursor never leaves
+                            // the rendered range, and when truncation hides
+                            // hunks the denominator says "of T" instead of
+                            // implying the bound is the whole file.
+                            let bound = wc.read(cx).hunk_bound();
+                            let total = wc.read(cx).hunk_count().unwrap_or(bound);
+                            let range = if total > bound {
+                                format!("hunk {}/{} of {}", wc.read(cx).hunk_cursor() + 1, bound, total)
+                            } else {
+                                format!("hunk {}/{}", wc.read(cx).hunk_cursor() + 1, bound)
+                            };
+                            format!(
+                                "{range} · ↑↓ hunk · s stage hunk · S stage all · tab back to files · r refresh · t terminal · esc back"
+                            )
+                        } else if diff_focused {
+                            // Zero-hunk diff focused (mode-only change,
+                            // loading, failed): neither the hunk keys nor
+                            // the file-list `s` apply here — the footer
+                            // never advertises a key that would only hint.
+                            "S stage all · tab back to files · r refresh · t terminal · esc back".to_string()
                         } else {
                             "↑↓ move · s stage/unstage · S stage all · d discard · c commit · tab pane · r refresh · t terminal · esc back".to_string()
                         },
@@ -347,11 +375,16 @@ fn render_file_list(
 /// untracked/conflicted rows, placeholders for binary/missing/failed. Must
 /// keep tracking the diff focus handle so tab routing and `detail_keydown`
 /// keep dispatching.
-fn render_diff_pane(this: &mut RootView, cx: &mut Context<RootView>) -> impl IntoElement {
+fn render_diff_pane(
+    this: &mut RootView,
+    diff_focused: bool,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
     let diff_focus = this.detail_diff_focus.clone();
     let mut pane = div()
         .id("wc-diff")
         .track_focus(&diff_focus)
+        .track_scroll(&this.diff_scroll)
         .flex_1()
         .min_w_0()
         .flex()
@@ -376,12 +409,40 @@ fn render_diff_pane(this: &mut RootView, cx: &mut Context<RootView>) -> impl Int
                 .child("No selection"),
         );
     };
+
+    // On each new DETAIL revision (bumped when a load lands): a different
+    // diff (file switch, surface switch) resets to the top — its cursor
+    // sits on hunk 0 and the previous offset means nothing; the same diff
+    // reloaded post-mutation reveals the hovered hunk (the cursor
+    // deliberately waits on the shrunken diff's next hunk). Without this,
+    // `s` stages a hunk the user cannot see. Drill-ins seed a forced
+    // revision mismatch so the first land always reacts.
+    let detail_generation = store.detail_generation();
+    if detail_generation != this.diff_scroll_generation {
+        this.diff_scroll_generation = detail_generation;
+        // A None key (a load still in flight) must not clobber the
+        // remembered identity — only a landed, Some-key revision reacts.
+        if let Some(key) = store.detail_key() {
+            if Some(&key) != this.diff_scroll_key.as_ref() {
+                this.diff_scroll_key = Some(key);
+                this.diff_scroll.set_offset(gpui::point(px(0.), px(0.)));
+            } else {
+                this.diff_scroll.scroll_to_item(store.hunk_cursor() + 1);
+            }
+        }
+    }
     if matches!(store.selected_row(), Some((Group::Conflicts, _))) {
         pane = pane.child(placeholder(
             "Resolve in your editor, then press s to mark resolved",
         ));
     }
     let transparent = rgba(0x00000000);
+    // The hunk cursor is only visible while the diff pane has focus AND
+    // the hovered-hunk flow is live (unstaged row, current diff loaded) —
+    // otherwise a stale hover would highlight a hunk the keys can't act
+    // on (Staged/preview rows, a selection change still loading).
+    let hunk_stageable = wc.read(cx).hunk_stageable();
+    let hovered_hunk = wc.read(cx).hunk_cursor();
     match detail {
         FileDetail::Diff(ud) if ud.binary => pane.child(placeholder("Binary file — not shown")),
         FileDetail::Diff(ud) => {
@@ -389,6 +450,7 @@ fn render_diff_pane(this: &mut RootView, cx: &mut Context<RootView>) -> impl Int
             let mut rendered = 0usize;
             pane = pane.child(
                 div()
+                    .id("diff-summary")
                     .px_3()
                     .py_2()
                     .text_size(px(11.))
@@ -402,17 +464,29 @@ fn render_diff_pane(this: &mut RootView, cx: &mut Context<RootView>) -> impl Int
                             .join("  ·  "),
                     ),
             );
-            for hunk in &ud.hunks {
-                if rendered >= DIFF_RENDER_CAP {
-                    break;
-                }
-                pane = pane.child(
+            // `hunk_bound` is the store's authority on how many hunks the
+            // pane renders — only hunks that fit ENTIRELY under the line
+            // cap — shared with the cursor/stage clamp so they can never
+            // drift apart. Every rendered hunk is therefore fully drawn
+            // (modulo vertical scrolling); the per-line check below is a
+            // defensive backstop only.
+            // Each hunk is ONE stateful child of the scroll container, so
+            // `diff_scroll.scroll_to_item(hunk + 1)` (the file-header
+            // summary is child 0) maps directly to the hovered hunk.
+            for (hi, hunk) in ud.hunks.iter().enumerate().take(wc.read(cx).hunk_bound()) {
+                let hovered = diff_focused && hunk_stageable && hi == hovered_hunk;
+                let mut block = div().id(("hunk-block", hi as u64)).flex().flex_col().child(
                     div()
                         .px_3()
                         .py_0p5()
                         .text_size(px(11.))
-                        .text_color(DIM)
-                        .child(hunk.header.clone()),
+                        .text_color(if hovered { ACCENT } else { DIM })
+                        .when(hovered, |h| h.bg(ROW_SELECTED))
+                        .child(if hovered {
+                            format!("▸ {}", hunk.header)
+                        } else {
+                            hunk.header.clone()
+                        }),
                 );
                 for line in &hunk.lines {
                     if rendered >= DIFF_RENDER_CAP {
@@ -429,7 +503,7 @@ fn render_diff_pane(this: &mut RootView, cx: &mut Context<RootView>) -> impl Int
                         .px_3()
                         .text_size(px(12.))
                         .when(bg != transparent, |r| r.bg(bg));
-                    pane = pane.child(
+                    block = block.child(
                         row.child(
                             div()
                                 .w(px(14.))
@@ -449,6 +523,7 @@ fn render_diff_pane(this: &mut RootView, cx: &mut Context<RootView>) -> impl Int
                         ),
                     );
                 }
+                pane = pane.child(block);
             }
             if total > DIFF_RENDER_CAP {
                 pane = pane.child(placeholder(&format!(

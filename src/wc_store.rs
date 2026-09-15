@@ -24,6 +24,12 @@ pub enum FileDetail {
 /// view draws a trailer instead, and an undrawn row must never be
 /// selectable (actions on it would look like a frozen list).
 pub(crate) const MAX_VISIBLE_ROWS: usize = 1000;
+/// Upper bound on diff lines rendered in the detail pane's diff pane.
+/// Also bounds the hunk cursor: a hunk whose header the pane never
+/// renders (5000+ line diffs truncate) must not be stageable — acting on
+/// content the user cannot see is the invisible-action bug
+/// MAX_VISIBLE_ROWS fixed for rows.
+pub(crate) const DIFF_RENDER_CAP: usize = 5000;
 
 pub struct WorkingCopyStore {
     pub worktree: PathBuf,
@@ -66,6 +72,22 @@ pub struct WorkingCopyStore {
     /// `abandon_commit` kills a wedged or forgotten editor instead of
     /// keyboard-locking the detail view until the app quits.
     editor_handle: Option<commit::EditorHandle>,
+    /// Hovered hunk in the diff pane (Phase 1b). A bare index, clamped at
+    /// every use and re-clamped when a detail load lands — after staging a
+    /// hunk the diff shrinks and the cursor naturally points at the next
+    /// one. Reset to 0 on selection change.
+    hunk_cursor: usize,
+    /// What `detail` currently describes: (path, kind). Selection changes
+    /// kick off an async detail load, and until it lands `detail` still
+    /// holds the PREVIOUS selection's diff — `stage_hunk` must refuse when
+    /// the two disagree, or it would build its patch from stale/wrong
+    /// content: another FILE (git's preimage check cannot catch
+    /// pure-insertion hunks, which would be silently duplicated) or the
+    /// same file's OTHER surface (its staged diff applied against the
+    /// unstaged row's expectations). A successful mutation clears this
+    /// (see `after_mutation`), so post-mutation `s` also waits for the
+    /// fresh diff instead of re-reading a pre-mutation one.
+    detail_of: Option<(String, DetailKind)>,
 }
 
 impl WorkingCopyStore {
@@ -86,6 +108,8 @@ impl WorkingCopyStore {
             generation: 0,
             detail_generation: 0,
             editor_handle: None,
+            hunk_cursor: 0,
+            detail_of: None,
         });
         entity.update(cx, |store, cx| {
             store.refresh(cx);
@@ -130,6 +154,7 @@ impl WorkingCopyStore {
         if self.pane == Pane::Diff {
             self.pane = Pane::Files; // selection change returns focus target to files
         }
+        self.hunk_cursor = 0; // a new file's diff starts at its first hunk
         self.load_detail(cx);
         cx.notify();
     }
@@ -198,14 +223,20 @@ impl WorkingCopyStore {
                         // snap an Unstaged selection onto the Staged row,
                         // or the next `s` unstage/stages the wrong surface.
                         let rows = eng::group_rows(&wc);
+                        // Match (group, path) at ROW level: a path can have
+                        // TWO entries (separate staged + unstaged `1 M`
+                        // records), and resolving the entry first always
+                        // picks the staged record — snapping an unstaged
+                        // selection onto the Staged row on every refresh.
                         let resolve = |group: Option<eng::Group>, path: &str| -> Option<usize> {
-                            let entry = wc.entries.iter().position(|e| e.path == path)?;
                             match group {
                                 Some(g) => rows
                                     .iter()
-                                    .position(|(rg, i)| *i == entry && *rg == g)
-                                    .or_else(|| rows.iter().position(|(_, i)| *i == entry)),
-                                None => rows.iter().position(|(_, i)| *i == entry),
+                                    .position(|(rg, i)| *rg == g && wc.entries[*i].path == path)
+                                    .or_else(|| {
+                                        rows.iter().position(|(_, i)| wc.entries[*i].path == path)
+                                    }),
+                                None => rows.iter().position(|(_, i)| wc.entries[*i].path == path),
                             }
                         };
                         let selected = store
@@ -269,6 +300,7 @@ impl WorkingCopyStore {
             // clear and reinstates a detail for a row that's gone.
             self.detail_generation += 1;
             self.detail = None;
+            self.detail_of = None;
             return;
         };
         // Detail loads use their own counter: a selection change must cancel
@@ -284,6 +316,7 @@ impl WorkingCopyStore {
             self.detail = Some(FileDetail::Failed(
                 "non-UTF-8 filename — view it in a terminal".into(),
             ));
+            self.detail_of = Some((entry.path.clone(), DetailKind::Preview));
             cx.notify();
             return;
         }
@@ -292,6 +325,16 @@ impl WorkingCopyStore {
             eng::Group::Unstaged => DetailKind::Unstaged,
             eng::Group::Conflicts | eng::Group::Untracked => DetailKind::Preview,
         };
+        // The cached diff is about to be replaced: drop the staging trust
+        // marker NOW, so an `s` landing between the refresh (`r`, or a
+        // mutation's post-completion reload) and the fresh detail refuses
+        // instead of patching from the pre-reload diff — if the index
+        // changed in that window (the usual reason to press `r`), a
+        // pure-insertion hunk with matching context would duplicate.
+        // `detail` itself stays visible: the pane keeps showing the old
+        // diff while the new one loads.
+        self.detail_of = None;
+        let loaded_path = path.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -317,6 +360,18 @@ impl WorkingCopyStore {
                     Ok(d) => d,
                     Err(e) => FileDetail::Failed(e.message),
                 });
+                store.detail_of = Some((loaded_path, kind));
+                // Landing is a new detail revision: the view watches this
+                // counter and scrolls the (re-clamped) hovered hunk into
+                // view on it.
+                store.detail_generation += 1;
+                // The new diff may have fewer hunks than the one the cursor
+                // was hovering.
+                if let Some(FileDetail::Diff(ud)) = &store.detail {
+                    store.hunk_cursor = store
+                        .hunk_cursor
+                        .min(Self::hunk_render_bound(ud).saturating_sub(1));
+                }
                 cx.notify();
             })
             .ok();
@@ -419,9 +474,15 @@ impl WorkingCopyStore {
                 paths.push(orig.clone());
             }
         }
-        // Bump to cancel in-flight snapshot loads; the mutation completion
-        // below applies regardless of generation (see `after_mutation`).
+        // Bump to cancel in-flight snapshot loads — and in-flight DETAIL
+        // loads: one that started before the apply would land after
+        // `after_mutation`'s invalidation with its generation still
+        // current, reinstating a diff computed from the pre-apply index
+        // (and re-recording a matching `detail_of`). The mutation
+        // completion below applies regardless of generation (see
+        // `after_mutation`).
         self.generation += 1;
+        self.detail_generation += 1;
         self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -504,6 +565,7 @@ impl WorkingCopyStore {
                 Some("Conflicts were skipped — resolve them, then stage with s".into());
         }
         self.generation += 1;
+        self.detail_generation += 1;
         self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -513,6 +575,267 @@ impl WorkingCopyStore {
                 .await;
             this.update(cx, |store, cx| store.after_mutation(result, cx))
                 .ok();
+        })
+        .detach();
+    }
+
+    /// Index of the hovered hunk, clamped to the number of hunks the diff
+    /// pane renders (`hunk_bound`) — never the raw hunk count, which the
+    /// render cap can truncate (0 when there is no diff). `saturating`
+    /// because a non-binary diff can legitimately have ZERO hunks — a
+    /// mode-only change or a 100%-similarity rename renders header-only —
+    /// and `n - 1` would underflow (panic in debug, usize::MAX in
+    /// release).
+    pub fn hunk_cursor(&self) -> usize {
+        self.hunk_cursor.min(self.hunk_bound().saturating_sub(1))
+    }
+
+    /// Revision of the currently-loading-or-loaded detail. Bumped when a
+    /// load STARTS (cancelling in-flight loads) and when one LANDS — the
+    /// view watches it to scroll the hovered hunk into view on every new
+    /// detail revision.
+    pub fn detail_generation(&self) -> u64 {
+        self.detail_generation
+    }
+
+    /// Stable identity of the currently-loaded diff ("kind:path"); the
+    /// view compares it across detail revisions to tell "a different diff
+    /// loaded" (reset to top) from "the same diff reloaded"
+    /// (reveal the hovered hunk — the post-mutation case).
+    pub fn detail_key(&self) -> Option<String> {
+        self.detail_of.as_ref().map(|(p, k)| format!("{k:?}:{p}"))
+    }
+
+    /// True when the hovered-hunk flow is fully live: the selected row is
+    /// an unstaged file whose diff is the one actually loaded (not a
+    /// selection change still in flight) and at least one hunk renders.
+    /// The footer gates its hunk hints on this; `stage_hunk`'s guards
+    /// enforce the same conditions.
+    pub fn hunk_stageable(&self) -> bool {
+        let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
+            return false;
+        };
+        if group != eng::Group::Unstaged {
+            return false;
+        }
+        self.detail_of.as_ref() == Some(&(entry.path, DetailKind::Unstaged))
+            && self.hunk_bound() > 0
+    }
+
+    /// Hunks the diff pane can actually render — only body lines count
+    /// toward the line cap: the ceiling for the cursor and for
+    /// `stage_hunk`. Zero-hunk
+    /// non-binary diffs (mode-only change, pure rename) yield 0 — the
+    /// clamp saturates rather than underflowing.
+    pub fn hunk_bound(&self) -> usize {
+        match self.detail.as_ref() {
+            Some(FileDetail::Diff(ud)) if !ud.binary => Self::hunk_render_bound(ud),
+            _ => 0,
+        }
+    }
+
+    fn hunk_render_bound(ud: &diff::UnifiedDiff) -> usize {
+        // Only hunks that fit ENTIRELY under the cap count as rendered:
+        // a hunk whose body truncates mid-way must not be stageable, its
+        // `raw` covers lines the user never saw.
+        let mut rendered = 0usize;
+        let mut n = 0usize;
+        for h in &ud.hunks {
+            if rendered + h.lines.len() > DIFF_RENDER_CAP {
+                break;
+            }
+            rendered += h.lines.len();
+            n += 1;
+        }
+        n
+    }
+
+    /// Number of hunks in the currently displayed diff, if any.
+    pub fn hunk_count(&self) -> Option<usize> {
+        match self.detail.as_ref() {
+            Some(FileDetail::Diff(ud)) if !ud.binary => Some(ud.hunks.len()),
+            _ => None,
+        }
+    }
+
+    /// Moves the cursor down; returns false when it could not (dead on
+    /// non-unstaged rows and pre-load diffs, or already at the bound) —
+    /// callers must not scroll on a no-op.
+    pub fn hunk_next(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.hunk_stageable() {
+            return false;
+        }
+        if self.hunk_cursor + 1 < self.hunk_bound() {
+            self.hunk_cursor += 1;
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    pub fn hunk_prev(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.hunk_stageable() {
+            return false;
+        }
+        if self.hunk_cursor > 0 {
+            self.hunk_cursor -= 1;
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    /// `s` with the diff pane focused: stages the hovered hunk. The patch —
+    /// the diff's byte-exact header plus the hovered hunk's `raw` — is
+    /// cloned from the current detail at keypress time and fed to
+    /// `git apply --cached`. A stale patch (the index moved since the diff
+    /// was rendered) fails git's preimage check cleanly: the index and
+    /// worktree are untouched, and the error suggests staging the whole
+    /// file. Binary, untracked, conflict, and non-UTF-8-named rows are
+    /// file-level only.
+    pub fn stage_hunk(&mut self, cx: &mut Context<Self>) {
+        if self.mutating {
+            self.busy_message(cx);
+            return;
+        }
+        if self.wc.is_none() {
+            // A FAILED first load keeps its error visible instead of a
+            // loading hint.
+            if !self.load_failed {
+                self.loading_message(cx);
+            }
+            return;
+        }
+        let Some((group, entry)) = self.selected_row().map(|(g, e)| (g, e.clone())) else {
+            return;
+        };
+        if entry.unsupported {
+            self.message = Some(
+                "filename contains characters git's output lost — stage this one in a terminal"
+                    .into(),
+            );
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        // No is_dir early return: directory rows are Untracked, and the
+        // group match below explains whole-file staging — a dead key where
+        // the footer advertises `s stage hunk` reads as a freeze.
+        match group {
+            eng::Group::Unstaged => {}
+            eng::Group::Staged => {
+                self.message = Some(
+                    "hunk staging applies to unstaged changes — select the file's unstaged row"
+                        .into(),
+                );
+                self.note_transient_hint();
+                cx.notify();
+                return;
+            }
+            // Conflicts get their own hint: S (stage-all) deliberately
+            // skips them, so recommending it would send the user in a loop.
+            eng::Group::Conflicts => {
+                self.message =
+                    Some("resolve conflicts in your editor, then press s to mark resolved".into());
+                self.note_transient_hint();
+                cx.notify();
+                return;
+            }
+            eng::Group::Untracked => {
+                self.message = Some("no hunks here — stage it with s on the file row".into());
+                self.note_transient_hint();
+                cx.notify();
+                return;
+            }
+        }
+        // The detail lags the selection: `select()` only STARTS an async
+        // load, and until it lands `self.detail` still describes the
+        // PREVIOUS selection — possibly another file, or the same file's
+        // OTHER surface (its staged diff). Building the patch from either
+        // would stage unverified content (git's preimage net cannot catch
+        // pure-insertion hunks — they'd be silently duplicated), so a
+        // mismatch refuses until the new diff arrives.
+        let wanted_kind = DetailKind::Unstaged;
+        if self.detail_of.as_ref() != Some(&(entry.path.clone(), wanted_kind)) {
+            self.message = Some("diff is loading — try again".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        // Never a silent no-op — the footer advertises `s stage hunk`, so
+        // a dead key must explain itself. A FAILED load is distinct from a
+        // genuinely hunk-less diff: "stage the whole file" is the wrong
+        // remedy for a transient git error; a retry is.
+        let Some(FileDetail::Diff(ud)) = self.detail.as_ref() else {
+            self.message = Some(
+                if matches!(self.detail.as_ref(), Some(FileDetail::Failed(_))) {
+                    "the diff failed to load — press r to retry".to_string()
+                } else {
+                    "no hunks in this diff — stage the whole file with s on the file row"
+                        .to_string()
+                },
+            );
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        };
+        if ud.binary {
+            self.message = Some("binary file — stage it whole with s on the file row".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        let cursor = self.hunk_cursor();
+        let Some(hunk) = ud.hunks.get(cursor).filter(|_| cursor < self.hunk_bound()) else {
+            // Zero-hunk non-binary diff (mode-only change, pure rename), or
+            // every hunk truncated by the render cap: nothing the pane
+            // actually shows is stageable hunk-wise.
+            self.message =
+                Some("no hunks in this diff — stage the whole file with s on the file row".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        };
+        let patch = mutate::content_patch(&ud.header_raw, &hunk.raw);
+        let pre_image = ud.index_pre_image.clone();
+        let path = entry.path.clone();
+        let worktree = self.worktree.clone();
+        // Bump to cancel in-flight snapshot loads — and in-flight DETAIL
+        // loads: one that started before the apply would land after
+        // `after_mutation`'s invalidation with its generation still
+        // current, reinstating a diff computed from the pre-apply index
+        // (and re-recording a matching `detail_of`). The mutation
+        // completion below applies regardless of generation (see
+        // `after_mutation`).
+        self.generation += 1;
+        self.detail_generation += 1;
+        self.mutating = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    mutate::apply_cached(&worktree, &path, patch, pre_image.as_deref())
+                })
+                .await;
+            this.update(cx, |store, cx| {
+                store.after_mutation(
+                    result.map_err(|e| engine::GitError {
+                        // The blanket whole-file hint fits a rejected
+                        // patch; the stale-index refusal's own remedy is a
+                        // refresh — appending both would offer
+                        // contradictory advice.
+                        message: match e {
+                            mutate::ApplyError::Git(git) => {
+                                format!("{git} — stage the whole file instead (s on the file row)")
+                            }
+                            stale => stale.to_string(),
+                        },
+                    }),
+                    cx,
+                );
+            })
+            .ok();
         })
         .detach();
     }
@@ -559,6 +882,7 @@ impl WorkingCopyStore {
         }
         let worktree = self.worktree.clone();
         self.generation += 1;
+        self.detail_generation += 1;
         self.mutating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -611,6 +935,14 @@ impl WorkingCopyStore {
         self.busy_hint = false;
         match result {
             Ok(()) => {
+                // The index just changed: every cached diff is stale, and
+                // `stage_hunk`'s (path, kind) guard would happily re-apply
+                // a pre-mutation hunk from it. Invalidate so the next `s`
+                // waits for the fresh post-mutation diff (the refresh below
+                // reloads it); the pane shows its loading placeholder for
+                // the sub-second reload.
+                self.detail = None;
+                self.detail_of = None;
                 // Surface a pending notice (e.g. skipped conflicts) instead
                 // of clearing; the mutation still counts for the home list.
                 self.message = self.pending_notice.take();
@@ -661,6 +993,7 @@ impl WorkingCopyStore {
         // Bump to cancel in-flight snapshot loads; the completion below
         // applies regardless of generation (see `after_mutation`).
         self.generation += 1;
+        self.detail_generation += 1;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -678,6 +1011,11 @@ impl WorkingCopyStore {
                 store.busy_hint = false;
                 match result {
                     Ok(commit::CommitOutcome::Committed) => {
+                        // The index changed (staged content is now history):
+                        // cached diffs are stale until the refresh below
+                        // reloads them.
+                        store.detail = None;
+                        store.detail_of = None;
                         store.message = Some("Committed".into());
                         store.mutated = true;
                     }
@@ -720,6 +1058,7 @@ impl WorkingCopyStore {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DetailKind {
     Staged,
     Unstaged,

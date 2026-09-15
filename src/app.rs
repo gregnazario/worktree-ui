@@ -80,6 +80,20 @@ pub struct RootView {
     pub detail_focus: FocusHandle,
     pub detail_list_focus: FocusHandle,
     pub detail_diff_focus: FocusHandle,
+    /// Scroll position of the diff pane. Keyboard hunk movement scrolls
+    /// the hovered hunk into view through it — without this, `down` on a
+    /// tall diff moves the cursor to a hunk that is rendered but scrolled
+    /// off-screen, and `s` stages content the user cannot see.
+    pub diff_scroll: gpui::ScrollHandle,
+    /// Detail revision the diff pane last reacted to. On every new
+    /// revision (the store bumps when a load lands) the pane either resets
+    /// to the top — when a DIFFERENT diff loaded (file switch, surface
+    /// switch) — or reveals the hovered hunk — when the SAME diff
+    /// reloaded (the post-mutation case, where the cursor deliberately
+    /// waits on the shrunken diff's next hunk).
+    pub diff_scroll_generation: u64,
+    /// Diff identity ("kind:path") seen at that revision.
+    pub diff_scroll_key: Option<String>,
 }
 
 fn status_badge(status: &WorktreeStatus) -> (String, gpui::Rgba) {
@@ -167,6 +181,11 @@ impl RootView {
         let detail_focus = cx.focus_handle();
         let detail_list_focus = cx.focus_handle();
         let detail_diff_focus = cx.focus_handle();
+        let diff_scroll = gpui::ScrollHandle::new();
+        // Forced mismatch: the first detail land of any drill-in runs the
+        // reset branch, so no previous session's scroll offset can leak in.
+        let diff_scroll_generation = u64::MAX;
+        let diff_scroll_key = None;
         window.focus(&root_focus);
         let view = cx.new(|_| Self {
             store,
@@ -180,6 +199,9 @@ impl RootView {
             detail_focus,
             detail_list_focus,
             detail_diff_focus,
+            diff_scroll,
+            diff_scroll_generation,
+            diff_scroll_key,
         });
         view.update(cx, |this, cx| {
             // Typing in the search field drives the store filter; the
@@ -484,6 +506,12 @@ impl RootView {
         // Drop the observer first: a dropped Subscription unsubscribes.
         self.detail_subscription = None;
         self.detail = None;
+        // Re-arm the diff-pane scroll bookkeeping: each store's detail
+        // generation restarts at 0, so a later drill-in could otherwise
+        // collide with the generation cached here and skip the reveal,
+        // leaking this session's scroll offset into the next diff.
+        self.diff_scroll_generation = u64::MAX;
+        self.diff_scroll_key = None;
         window.focus(&self.root_focus);
         self.store.update(cx, |store, cx| store.refresh(cx));
         cx.notify();
@@ -563,7 +591,46 @@ impl RootView {
                     wc.update(cx, |store, cx| store.commit_with_editor(cx));
                 }
             }
-            // Diff-pane hunk keys ("s" with diff focus) arrive in Phase 1b.
+            // ---- diff pane (hunk staging, Phase 1b) ----
+            "up" if diff_focused => {
+                if let Some(wc) = &self.detail {
+                    let hovered = wc.update(cx, |store, cx| {
+                        let moved = store.hunk_prev(cx);
+                        (moved, store.hunk_cursor())
+                    });
+                    // Scroll only on actual movement: a no-op key (staged
+                    // row, loading diff, at the bound) must not jump the
+                    // pane to another hunk.
+                    if let (true, hovered) = hovered {
+                        // +1: the file-header summary is the pane's child 0.
+                        self.diff_scroll.scroll_to_item(hovered + 1);
+                    }
+                }
+            }
+            "down" if diff_focused => {
+                if let Some(wc) = &self.detail {
+                    let (moved, hovered) = wc.update(cx, |store, cx| {
+                        let moved = store.hunk_next(cx);
+                        (moved, store.hunk_cursor())
+                    });
+                    if moved {
+                        self.diff_scroll.scroll_to_item(hovered + 1);
+                    }
+                }
+            }
+            // Same capital-normalization as the list pane: shift+s must
+            // stay "stage all" with the diff pane focused, or a user's
+            // muscle memory silently becomes a one-hunk index mutation.
+            "s" if diff_focused && ks.modifiers.shift => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.stage_all(cx));
+                }
+            }
+            "s" if diff_focused => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.stage_hunk(cx));
+                }
+            }
             _ => {}
         }
     }
@@ -1528,6 +1595,245 @@ mod tests {
         view.update(&mut vcx.cx, |root, _cx| {
             assert!(root.detail.is_none(), "idle detail closes normally");
         });
+    }
+
+    #[gpui::test]
+    fn hunk_movement_scrolls_the_hovered_hunk_into_view(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        // Hunk 1 is ~800 diff lines (taller than the viewport); hunk 2 sits
+        // far below it. Both fit the render cap — only SCROLLING puts hunk
+        // 2 on screen.
+        let lines: Vec<String> = (1..=3000).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("t.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["git", "add", "t.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "t"]);
+        let mut edited = lines.clone();
+        for (i, l) in edited.iter_mut().enumerate().take(400) {
+            *l = format!("edited {i}");
+        }
+        edited[2899] = "line 2900 edited".into();
+        std::fs::write(repo.join("t.txt"), edited.join("\n") + "\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(wc.hunk_count(), Some(2));
+            assert_eq!(root.diff_scroll.offset().y, gpui::px(0.), "starts at top");
+        });
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(wc.hunk_cursor(), 1, "cursor on the second hunk");
+            // gpui scrolls DOWN by making the content offset negative.
+            assert!(
+                root.diff_scroll.offset().y < gpui::px(0.),
+                "the pane must scroll the hovered hunk into view, got {:?}",
+                root.diff_scroll.offset()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn hunk_movement_reveals_the_hovered_middle_hunk(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        // Three hunks: tall (h1), small (h2), small (h3). Hovering the
+        // MIDDLE hunk must reveal h2 — if scroll_to_item resolved the
+        // child after the hovered one (or missed entirely), h2 would sit
+        // off-screen above or below the viewport.
+        let lines: Vec<String> = (1..=1500).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("m.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["git", "add", "m.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "m"]);
+        let mut edited = lines.clone();
+        for (i, l) in edited.iter_mut().enumerate().take(250) {
+            *l = format!("edited {i}");
+        }
+        edited[699] = "line 700 edited".into();
+        edited[1399] = "line 1400 edited".into();
+        std::fs::write(repo.join("m.txt"), edited.join("\n") + "\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("down"); // hover hunk 2 (the middle one)
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(wc.hunk_cursor(), 1);
+            let handle = &root.diff_scroll;
+            // The hovered block is hunk 2: child index 2 (file-header
+            // summary is child 0). Its TOP must be on screen — if
+            // scroll_to_item resolved the child AFTER the hovered one (or
+            // nothing), hunk 2's top would sit above the viewport.
+            let bounds = handle
+                .bounds_for_item(2)
+                .expect("hunk 2 block has recorded bounds");
+            let offset = handle.offset().y;
+            let viewport = handle.bounds().size.height;
+            assert!(
+                bounds.top() + offset < viewport - gpui::px(10.),
+                "hunk 2's top must be on screen (top {:#?} + offset {offset:#?} vs viewport {viewport:#?})",
+                bounds.top()
+            );
+            assert!(
+                bounds.bottom() + offset > gpui::px(0.),
+                "hunk 2 must not be scrolled past (bottom {:#?} + offset {offset:#?})",
+                bounds.bottom()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn staging_a_hunk_reveals_the_next_hovered_hunk(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        // Three hunks with a tall first hunk: after staging hunk 3 the
+        // cursor clamps onto hunk 2, which sits BELOW the viewport at the
+        // old scroll offset — the post-mutation reload must reveal it, or
+        // the next `s` stages content the user cannot see.
+        let lines: Vec<String> = (1..=1500).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("m.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["git", "add", "m.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "m"]);
+        let mut edited = lines.clone();
+        for (i, l) in edited.iter_mut().enumerate().take(250) {
+            *l = format!("edited {i}");
+        }
+        edited[699] = "line 700 edited".into();
+        edited[1399] = "line 1400 edited".into();
+        std::fs::write(repo.join("m.txt"), edited.join("\n") + "\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("down");
+        vcx.simulate_keystrokes("down"); // hover hunk 3 (the last one)
+        vcx.simulate_keystrokes("s"); // stage it
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(wc.hunk_count(), Some(2), "hunk 3 staged and gone");
+            assert_eq!(wc.hunk_cursor(), 1, "cursor clamped onto hunk 2");
+            let handle = &root.diff_scroll;
+            // The hovered block is hunk 2: child index 2 (file-header
+            // summary is child 0). Its TOP must be on screen after the
+            // post-mutation reload.
+            let bounds = handle
+                .bounds_for_item(2)
+                .expect("hunk 2 block has recorded bounds");
+            let offset = handle.offset().y;
+            let viewport = handle.bounds().size.height;
+            assert!(
+                bounds.top() + offset < viewport - gpui::px(10.)
+                    && bounds.bottom() + offset > gpui::px(0.),
+                "hunk 2 must be revealed after staging hunk 3 (top {:#?} + offset {offset:#?} vs viewport {viewport:#?})",
+                bounds.top()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn diff_pane_shift_s_still_stages_all(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let lines: Vec<String> = (1..=12).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("h.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["git", "add", "h.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "h"]);
+        std::fs::write(repo.join("h.txt"), "changed\n").unwrap();
+        std::fs::write(repo.join("u.txt"), "brand new").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        // Muscle memory: S means stage-ALL on every surface, never a
+        // one-hunk index mutation.
+        vcx.simulate_keystrokes("shift-s");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(
+                wc.staged_count(),
+                2,
+                "shift+s staged the whole working copy from the diff pane"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn diff_pane_hunk_keys_stage_the_hovered_hunk(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        // A committed 12-line file edited on lines 1 and 10 → an unstaged
+        // row with two hunks, plus an untracked file below it.
+        let lines: Vec<String> = (1..=12).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("h.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["git", "add", "h.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "h"]);
+        let mut edited = lines.clone();
+        edited[0] = "line 1 edited".into();
+        edited[9] = "line 10 edited".into();
+        std::fs::write(repo.join("h.txt"), edited.join("\n") + "\n").unwrap();
+        std::fs::write(repo.join("u.txt"), "brand new").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        // Row 0 is the unstaged h.txt. Tab to the diff pane, hover the
+        // second hunk, stage it.
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap();
+            assert_eq!(wc.read(cx).pane, Pane::Diff);
+            assert_eq!(wc.read(cx).hunk_count(), Some(2));
+        });
+        vcx.simulate_keystrokes("down");
+        vcx.simulate_keystrokes("s");
+        vcx.run_until_parked();
+
+        view.update(&mut vcx.cx, |root, cx| {
+            let wc = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(wc.hunk_count(), Some(1), "unstaged diff shrank to one hunk");
+            assert_eq!(wc.hunk_cursor(), 0, "cursor clamped after the stage");
+            assert_eq!(wc.staged_count(), 1, "h.txt gained a Staged row");
+        });
+        // git agrees: the index holds only the line-10 edit; the worktree
+        // still holds both.
+        let out = std::process::Command::new("git")
+            .args(["diff", "--cached", "--no-color", "-U3", "--", "h.txt"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let staged = String::from_utf8_lossy(&out.stdout);
+        assert!(staged.contains("line 10 edited"), "staged: {staged}");
+        assert!(!staged.contains("line 1 edited"), "staged: {staged}");
+        let on_disk = std::fs::read_to_string(repo.join("h.txt")).unwrap();
+        assert!(on_disk.contains("line 1 edited"));
     }
 
     #[gpui::test]

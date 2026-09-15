@@ -95,9 +95,9 @@ Detail view (per worktree):
 
 | Key | Action |
 | --- | --- |
-| `up` / `down` | Move file selection |
+| `up` / `down` | Move file selection (diff pane focused: move hunk cursor) |
 | `tab` | Toggle file list ↔ diff pane |
-| `s` | Stage / unstage selected file |
+| `s` | Stage / unstage selected file (diff pane focused: stage hovered hunk) |
 | `S` | Stage all remaining changes |
 | `d` | Discard selected file's changes (confirmation) |
 | `c` | Commit staged changes via your editor |
@@ -113,6 +113,10 @@ shows the selected file's unified diff. Stage or unstage with `s` (all at
 once with `S`), and discard a file's unstaged changes or an untracked file
 with `d` — always with a confirmation. Discarding the unstaged part never
 touches staged changes.
+
+With the diff pane focused, `↑`/`↓` move a cursor between the file's hunks
+and `s` stages just the hovered hunk (`git apply --cached` — the worktree
+file is never touched). Binary and untracked files stage whole-file only.
 
 Press `c` to write a commit: the app opens your editor exactly like
 `git commit` does, resolving it in git's own order — `$GIT_EDITOR`,

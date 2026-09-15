@@ -34,6 +34,18 @@ pub struct UnifiedDiff {
     /// Everything before the first hunk: `diff --git`, index, `---/+++`,
     /// rename/mode lines (lossy-decoded for display).
     pub header: String,
+    /// Byte-exact header — hunk staging reconstructs `git apply` patches
+    /// as `header_raw` plus selected hunks' `raw`, so it must survive
+    /// paths that are not valid UTF-8.
+    pub header_raw: Vec<u8>,
+    /// The abbreviated PRE-image blob from the header's `index a..b`
+    /// line, when present (mode-only changes have no hashes) — the blob
+    /// the INDEX contained when this diff was generated. Hunk staging
+    /// compares it against the index's current staged blob: a
+    /// pure-insertion hunk has no removal preimage, so if the index moved
+    /// since this diff was generated, git's apply would silently
+    /// duplicate content instead of failing.
+    pub index_pre_image: Option<String>,
     pub hunks: Vec<DiffHunk>,
     pub binary: bool,
 }
@@ -65,6 +77,19 @@ pub fn parse_unified_diff(input: &[u8]) -> UnifiedDiff {
         if cur.is_none() {
             if line.starts_with(b"Binary files ") || line.starts_with(b"GIT binary patch") {
                 diff.binary = true;
+            }
+            if diff.index_pre_image.is_none() && line.starts_with(b"index ") {
+                // `index <abbrev-pre>..<abbrev-post>[ mode]` — the
+                // abbreviated pre-image is a prefix of the full sha that
+                // `git ls-files -s` reports for the staged entry.
+                if let Some(rest) = line.strip_prefix(b"index ") {
+                    if let Some(pos) = rest.windows(2).position(|w| w == b"..") {
+                        if pos > 0 {
+                            diff.index_pre_image =
+                                Some(String::from_utf8_lossy(&rest[..pos]).into_owned());
+                        }
+                    }
+                }
             }
             header.extend_from_slice(line);
             continue;
@@ -104,6 +129,7 @@ pub fn parse_unified_diff(input: &[u8]) -> UnifiedDiff {
         diff.hunks.push(h);
     }
     diff.header = String::from_utf8_lossy(&header).into_owned();
+    diff.header_raw = header;
     diff
 }
 

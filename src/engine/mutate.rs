@@ -53,6 +53,83 @@ fn run_chunk(worktree: &Path, prefix: &[&str], chunk: &[String]) -> Result<()> {
     engine::run_trimmed(worktree, &refs).map(|_| ())
 }
 
+/// Applies a reconstructed patch — the diff's byte-exact header plus the
+/// selected hunks' `raw` — to the index only. The worktree is never
+/// touched. Before applying, the index's staged blob is compared against
+/// the diff header's abbreviated PRE-image (`expects_index_blob`): git's
+/// preimage check catches most stale patches, but a PURE-INSERTION hunk
+/// has no removal preimage — if the index moved and already contains the
+/// inserted lines, apply would silently duplicate them — so the explicit
+/// check refuses instead. Takes index.lock like every mutation, so no
+/// `--no-optional-locks` here.
+/// Why an apply refused. The pre-image refusal is distinct: its remedy is
+/// a refresh (`r`), not the blanket "stage the whole file" that fits a
+/// rejected patch.
+#[derive(Debug)]
+pub enum ApplyError {
+    /// The index's staged blob no longer matches the diff's pre-image —
+    /// the file changed since the diff was generated.
+    StaleIndex,
+    /// `git apply` itself failed (rejected hunk, lock contention, …).
+    Git(crate::engine::GitError),
+}
+
+impl std::fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApplyError::StaleIndex => f.write_str(
+                "the file's staged state changed since this diff was loaded — press r and try again",
+            ),
+            ApplyError::Git(e) => f.write_str(&e.message),
+        }
+    }
+}
+
+/// Builds the patch for staging ONE content hunk: the diff header minus
+/// its `old mode`/`new mode` lines, plus the hunk's byte-exact `raw`.
+/// Stripping the mode lines keeps `git apply --cached` from flipping the
+/// index entry's mode as a side effect of staging a content hunk — a
+/// mode change is its own decision (`git add -p` asks separately).
+pub fn content_patch(header_raw: &[u8], hunk_raw: &[u8]) -> Vec<u8> {
+    let mut patch = Vec::with_capacity(header_raw.len() + hunk_raw.len());
+    for line in header_raw.split_inclusive(|b| *b == b'\n') {
+        if line.starts_with(b"old mode ") || line.starts_with(b"new mode ") {
+            continue;
+        }
+        patch.extend_from_slice(line);
+    }
+    patch.extend_from_slice(hunk_raw);
+    patch
+}
+
+pub fn apply_cached(
+    worktree: &Path,
+    rel_path: &str,
+    patch: Vec<u8>,
+    expects_index_blob: Option<&str>,
+) -> std::result::Result<(), ApplyError> {
+    if let Some(expected) = expects_index_blob {
+        let staged = engine::run_trimmed(
+            worktree,
+            &["ls-files", "-s", "--", &format!(":(literal){rel_path}")],
+        )
+        .map_err(ApplyError::Git)?;
+        // "100644 <full-sha> 0\t<path>" — the header's pre-image hash is
+        // an abbreviation of this one.
+        let index_blob = staged.split_whitespace().nth(1).unwrap_or_default();
+        if !index_blob.starts_with(expected) {
+            return Err(ApplyError::StaleIndex);
+        }
+    }
+    engine::run_bytes_stdin(
+        worktree,
+        &["apply", "--cached", "--whitespace=nowarn"],
+        patch,
+    )
+    .map_err(ApplyError::Git)
+    .map(|_| ())
+}
+
 /// `git add -- <paths>`, batched. Also how a conflict is marked resolved.
 /// An empty slice is a no-op (callers use this for "stage all" with nothing
 /// left).

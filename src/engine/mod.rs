@@ -51,6 +51,53 @@ pub fn run_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
     }
 }
 
+/// Like [`run_bytes`], but `input` goes to the child's stdin and is
+/// consumed (patches can be multi-MB — no reason to copy). All three
+/// pipes are handled concurrently — stdin is written from a helper
+/// thread, and stdout/stderr are each drained by their own reader
+/// threads before `wait()` — so a child that fills any pipe (a `git
+/// apply` rejecting many hunks writes large stderr) can never deadlock
+/// the caller against unread output.
+pub fn run_bytes_stdin(cwd: &Path, args: &[&str], input: Vec<u8>) -> Result<Vec<u8>> {
+    use std::io::{Read as _, Write as _};
+    let mut child = command(cwd, args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| GitError {
+            message: format!("failed to run git: {e}"),
+        })?;
+    {
+        let mut stdin = child.stdin.take().expect("just configured piped");
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input); // EPIPE if git exited early — fine
+        });
+    }
+    let mut stdout_pipe = child.stdout.take().expect("just configured piped");
+    let mut stderr_pipe = child.stderr.take().expect("just configured piped");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let status = child.wait().map_err(|e| GitError {
+        message: format!("failed to run git: {e}"),
+    })?;
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if status.success() {
+        Ok(stdout)
+    } else {
+        Err(stderr_error(&stderr))
+    }
+}
+
 pub fn run_trimmed(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(run(cwd, args)?.trim_end().to_string())
 }
