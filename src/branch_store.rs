@@ -139,13 +139,17 @@ impl BranchStore {
         self.message = Some(format!("Switching to {name}…"));
         self.note_transient_hint();
         cx.notify();
+        let display_name = name.clone();
         cx.spawn(async move |this, cx| {
-            let result = branches::switch(&worktree, &name);
+            let result = cx
+                .background_executor()
+                .spawn(async move { branches::switch(&worktree, &name) })
+                .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
                 match result {
                     Ok(()) => {
-                        store.message = Some(format!("Switched to {name}"));
+                        store.message = Some(format!("Switched to {display_name}"));
                         store.mutated = true;
                         store.refresh(cx);
                     }
@@ -173,13 +177,17 @@ impl BranchStore {
         self.message = Some(format!("Creating {name}…"));
         self.note_transient_hint();
         cx.notify();
+        let display_name = name.clone();
         cx.spawn(async move |this, cx| {
-            let result = branches::create(&worktree, &name);
+            let result = cx
+                .background_executor()
+                .spawn(async move { branches::create(&worktree, &name) })
+                .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
                 match result {
                     Ok(()) => {
-                        store.message = Some(format!("Created {name}"));
+                        store.message = Some(format!("Created {display_name}"));
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -215,13 +223,17 @@ impl BranchStore {
         self.message = Some(format!("Deleting {name}…"));
         self.note_transient_hint();
         cx.notify();
+        let display_name = name.clone();
         cx.spawn(async move |this, cx| {
-            let result = branches::delete(&worktree, &name, &current);
+            let result = cx
+                .background_executor()
+                .spawn(async move { branches::delete(&worktree, &name, &current) })
+                .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
                 match result {
                     Ok(()) => {
-                        store.message = Some(format!("Deleted {name}"));
+                        store.message = Some(format!("Deleted {display_name}"));
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -257,13 +269,17 @@ impl BranchStore {
         self.message = Some(format!("Merging {name}…"));
         self.note_transient_hint();
         cx.notify();
+        let display_name = name.clone();
         cx.spawn(async move |this, cx| {
-            let result = branches::merge(&worktree, &name);
+            let result = cx
+                .background_executor()
+                .spawn(async move { branches::merge(&worktree, &name) })
+                .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
                 match result {
                     Ok(conflicts) if conflicts.is_empty() => {
-                        store.message = Some(format!("Merged {name}"));
+                        store.message = Some(format!("Merged {display_name}"));
                         store.mutated = true;
                         store.refresh(cx);
                     }
@@ -307,13 +323,17 @@ impl BranchStore {
         self.message = Some(format!("Rebasing onto {name}…"));
         self.note_transient_hint();
         cx.notify();
+        let display_name = name.clone();
         cx.spawn(async move |this, cx| {
-            let result = branches::rebase(&worktree, &name);
+            let result = cx
+                .background_executor()
+                .spawn(async move { branches::rebase(&worktree, &name) })
+                .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
                 match result {
                     Ok(conflicts) if conflicts.is_empty() => {
-                        store.message = Some(format!("Rebased onto {name}"));
+                        store.message = Some(format!("Rebased onto {display_name}"));
                         store.mutated = true;
                         store.refresh(cx);
                     }
