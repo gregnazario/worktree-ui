@@ -673,6 +673,9 @@ impl RootView {
         if self.section == Section::History {
             return self.history_keydown(ks, window, cx);
         }
+        if self.section == Section::Branches {
+            return self.branches_keydown(ks, window, cx);
+        }
         // A history action (checkout / worktree add) in flight races the
         // Working Copy keys in the same worktree (index.lock contention,
         // staging post-checkout content): refuse with an explanation.
@@ -1003,6 +1006,42 @@ impl RootView {
                 }
                 cx.notify();
             }),
+            _ => {}
+        }
+    }
+
+    /// Key routing for the Branches section (section 3).
+    fn branches_keydown(
+        &mut self,
+        ks: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bs) = self.branch_store.clone() else {
+            return;
+        };
+        let list_focused = self.history_list_focus.is_focused(window);
+        if !list_focused {
+            return;
+        }
+        match ks.key.as_str() {
+            "escape" => self.close_detail(window, cx),
+            "1" => {
+                self.section = Section::WorkingCopy;
+                window.focus(&self.detail_list_focus);
+                cx.notify();
+            }
+            "2" => self.open_history(window, cx),
+            "t" => {
+                let path = bs.read(cx).worktree.clone();
+                open_terminal(&path);
+            }
+            "r" => bs.update(cx, |store, cx| store.refresh(cx)),
+            "up" if list_focused => bs.update(cx, |h, cx| h.select_prev(cx)),
+            "down" if list_focused => bs.update(cx, |h, cx| h.select_next(cx)),
+            "y" if list_focused => bs.update(cx, |h, cx| h.copy_name(cx)),
+            "x" if list_focused => bs.update(cx, |h, cx| h.switch(cx)),
+            "d" if list_focused => bs.update(cx, |h, cx| h.delete_branch(cx)),
             _ => {}
         }
     }

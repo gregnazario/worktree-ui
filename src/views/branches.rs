@@ -1,7 +1,7 @@
 //! Branches section of the worktree detail view: branch list with
 //! current/ahead/behind markers, and branch management actions.
 
-use crate::app::{RootView, ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED, TEXT, YELLOW};
+use crate::app::{RootView, ACCENT, BORDER, DIM, PANEL, RED, ROW_SELECTED, TEXT, YELLOW};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
