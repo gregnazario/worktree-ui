@@ -14,6 +14,9 @@ pub struct BranchStore {
     pub load_failed: bool,
     pub message: Option<String>,
     pub busy_hint: bool,
+    /// Mirrored from the app: a working-copy or history operation is
+    /// running git on this worktree — switch / merge / rebase must wait.
+    pub wc_mutating: bool,
     mutated: bool,
     load_generation: u64,
     pub busy: bool,
@@ -29,6 +32,7 @@ impl BranchStore {
             load_failed: false,
             message: None,
             busy_hint: false,
+            wc_mutating: false,
             mutated: false,
             load_generation: 0,
             busy: false,
@@ -122,6 +126,10 @@ impl BranchStore {
     pub fn switch(&mut self, cx: &mut Context<Self>) {
         if self.busy {
             self.busy_message(cx);
+            return;
+        }
+        if self.wc_mutating {
+            self.refuse_while_other_section_busy(cx);
             return;
         }
         let Some(branch) = self.selected_branch() else {
@@ -254,6 +262,10 @@ impl BranchStore {
             self.busy_message(cx);
             return;
         }
+        if self.wc_mutating {
+            self.refuse_while_other_section_busy(cx);
+            return;
+        }
         let Some(branch) = self.selected_branch() else {
             return;
         };
@@ -308,6 +320,10 @@ impl BranchStore {
             self.busy_message(cx);
             return;
         }
+        if self.wc_mutating {
+            self.refuse_while_other_section_busy(cx);
+            return;
+        }
         let Some(branch) = self.selected_branch() else {
             return;
         };
@@ -357,6 +373,15 @@ impl BranchStore {
 
     pub fn busy_message(&mut self, cx: &mut Context<Self>) {
         self.message = Some("Busy — wait for the current operation".into());
+        self.note_transient_hint();
+        cx.notify();
+    }
+
+    /// Refusal shown when a working-copy or history operation holds the
+    /// worktree: branch switch / merge / rebase touch the same index and
+    /// working tree.
+    fn refuse_while_other_section_busy(&mut self, cx: &mut Context<Self>) {
+        self.message = Some("Busy — another section is changing this worktree".into());
         self.note_transient_hint();
         cx.notify();
     }

@@ -166,7 +166,7 @@ pub fn render(
                 )
                 .child(tab_label("1 Working Copy", true))
                 .child(tab_label("2 History", false))
-                .child(tab_label("3 Branches — v0.4", false))
+                .child(tab_label("3 Branches", false))
                 .child(div().flex_1())
                 .child(toolbar_button(
                     "detail-open-terminal",

@@ -99,7 +99,7 @@ pub fn render(
                 )
                 .child(tab_label("1 Working Copy", false))
                 .child(tab_label("2 History", true))
-                .child(tab_label("3 Branches — v0.4", false))
+                .child(tab_label("3 Branches", false))
                 .child(div().text_size(px(11.)).text_color(DIM).child("esc back")),
         )
         // ---- body: commits | files+diff ----

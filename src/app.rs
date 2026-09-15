@@ -102,6 +102,10 @@ pub struct RootView {
     pub history_stale: bool,
     /// Branches section store (section 3), created on first entry.
     pub branch_store: Option<Entity<crate::branch_store::BranchStore>>,
+    /// Observation of the branch store: switch / merge / rebase flag
+    /// `mutated`, which refreshes the home worktree list and the other
+    /// sections' views of this worktree.
+    pub branch_subscription: Option<gpui::Subscription>,
     pub history_list_focus: FocusHandle,
     pub history_files_focus: FocusHandle,
     /// Scroll position of the history files chip strip, so keyboard file
@@ -242,6 +246,7 @@ impl RootView {
             history_subscription: None,
             history_stale: false,
             branch_store: None,
+            branch_subscription: None,
             history_list_focus,
             history_files_focus,
             history_files_scroll,
@@ -524,13 +529,10 @@ impl RootView {
         // inert but never remove their subscription entries).
         self.detail_subscription = Some(cx.observe(&wc, move |this, wc, cx| {
             // Mirror the mutation state FIRST (success or failure): an
-            // already-open History section must release its `wc_mutating`
+            // already-open History or Branches section must release its
             // refusal as soon as the working-copy operation ends, not
             // only when the user re-enters the section.
-            let mutating = wc.read(cx).mutating;
-            if let Some(hs) = &this.history {
-                hs.update(cx, |store, _cx| store.wc_mutating = mutating);
-            }
+            this.sync_worktree_busy(cx);
             if wc.update(cx, |store, _cx| store.take_mutated()) {
                 this.store.update(cx, |store, cx| store.refresh(cx));
                 // Only a COMMIT changes reachable history (stage/unstage/
@@ -560,6 +562,65 @@ impl RootView {
         cx.notify();
     }
 
+    /// Mirrors the OR of all in-flight git work into each store's refusal
+    /// gate. Every section that runs a mutating git command on the open
+    /// worktree (working-copy stage/commit/discard, history checkout /
+    /// worktree-add, branch switch / merge / rebase) must see the others'
+    /// in-flight windows: a single-writer mirror lets a racing completion
+    /// clear the gate while another section's operation is still running.
+    fn sync_worktree_busy(&mut self, cx: &mut Context<Self>) {
+        let wc_mutating = self.detail.as_ref().is_some_and(|w| w.read(cx).mutating);
+        let hs_busy = self.history.as_ref().is_some_and(|h| h.read(cx).busy());
+        let bs_busy = self
+            .branch_store
+            .as_ref()
+            .is_some_and(|b| b.read(cx).busy);
+        if let Some(wc) = &self.detail {
+            wc.update(cx, |store, _cx| store.history_busy = hs_busy || bs_busy);
+        }
+        if let Some(hs) = &self.history {
+            hs.update(cx, |store, _cx| store.wc_mutating = wc_mutating || bs_busy);
+        }
+        if let Some(bs) = &self.branch_store {
+            bs.update(cx, |store, _cx| store.wc_mutating = wc_mutating || hs_busy);
+        }
+    }
+
+    /// Writes a transient message to whichever section's view is on
+    /// screen — a hint aimed at a section that isn't rendered would never
+    /// be seen.
+    fn show_in_visible_section(&mut self, msg: String, cx: &mut Context<Self>) {
+        match self.section {
+            Section::WorkingCopy => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| {
+                        store.message = Some(msg);
+                        store.note_transient_hint();
+                        cx.notify();
+                    });
+                }
+            }
+            Section::History => {
+                if let Some(hs) = &self.history {
+                    hs.update(cx, |store, cx| {
+                        store.message = Some(msg);
+                        store.note_transient_hint();
+                        cx.notify();
+                    });
+                }
+            }
+            Section::Branches => {
+                if let Some(bs) = &self.branch_store {
+                    bs.update(cx, |store, cx| {
+                        store.message = Some(msg);
+                        store.note_transient_hint();
+                        cx.notify();
+                    });
+                }
+            }
+        }
+    }
+
     /// Returns to the home list: refocus it and refresh, since the user may
     /// have mutated the worktree from the detail view.
     pub fn close_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -574,21 +635,22 @@ impl RootView {
                 // the actual in-flight action.
                 let what = hs.read(cx).action_name().unwrap_or("history action");
                 let msg = format!("Busy — {what} is finishing in this worktree");
-                if self.section == Section::WorkingCopy {
-                    if let Some(wc) = &self.detail {
-                        wc.update(cx, |store, cx| {
-                            store.message = Some(msg);
-                            store.note_transient_hint();
-                            cx.notify();
-                        });
-                    }
-                } else {
-                    hs.update(cx, |store, cx| {
-                        store.message = Some(msg);
-                        store.note_transient_hint();
-                        cx.notify();
-                    });
-                }
+                self.show_in_visible_section(msg, cx);
+                return;
+            }
+        }
+        // Same guard for an in-flight branch action (switch / merge /
+        // rebase): dropping the store orphans its completion — the home
+        // list and the other sections would keep the pre-action view.
+        if let Some(bs) = &self.branch_store {
+            if bs.read(cx).busy {
+                let what = bs
+                    .read(cx)
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "branch action".into());
+                let msg = format!("Busy — {what}");
+                self.show_in_visible_section(msg, cx);
                 return;
             }
         }
@@ -629,12 +691,22 @@ impl RootView {
             }
             // Write the hint to the VISIBLE section's store: a user
             // sitting in History would otherwise see nothing.
-            if self.section == Section::History {
-                if let Some(hs) = &self.history {
-                    hs.update(cx, |store, cx| store.busy_message(cx));
+            match self.section {
+                Section::History => {
+                    if let Some(hs) = &self.history {
+                        hs.update(cx, |store, cx| store.busy_message(cx));
+                    }
                 }
-            } else if let Some(wc) = &self.detail {
-                wc.update(cx, |store, cx| store.busy_message(cx));
+                Section::Branches => {
+                    if let Some(bs) = &self.branch_store {
+                        bs.update(cx, |store, cx| store.busy_message(cx));
+                    }
+                }
+                Section::WorkingCopy => {
+                    if let Some(wc) = &self.detail {
+                        wc.update(cx, |store, cx| store.busy_message(cx));
+                    }
+                }
             }
             return;
         }
@@ -642,6 +714,8 @@ impl RootView {
         self.detail_subscription = None;
         self.history = None;
         self.history_subscription = None;
+        self.branch_store = None;
+        self.branch_subscription = None;
         self.section = Section::WorkingCopy;
         // A fresh handle: the next drill-in's History opens at the top
         // instead of inheriting this session's scroll offset.
@@ -1055,8 +1129,40 @@ impl RootView {
                 return;
             };
             let bs = crate::branch_store::BranchStore::new(entry.path.clone(), cx);
+            // Same lifecycle as the History observer: a branch action
+            // (switch / merge / rebase) mutates the worktree and index, so
+            // its in-flight window must gate the other sections and its
+            // success must refresh what they show.
+            self.branch_subscription = Some(cx.observe(&bs, move |this, bs, cx| {
+                this.sync_worktree_busy(cx);
+                let mutated = bs.update(cx, |store, _cx| store.take_mutated());
+                if mutated {
+                    this.store.update(cx, |store, cx| store.refresh(cx));
+                    // A switch moves HEAD, a merge/rebase moves commits:
+                    // the History log is stale either way, with no
+                    // `history_changed` distinction to lean on.
+                    this.history_stale = true;
+                    if this.section == Section::History {
+                        if let Some(hs) = &this.history {
+                            if !hs.read(cx).busy() {
+                                hs.update(cx, |h, cx| h.refresh(cx));
+                            }
+                        }
+                    }
+                    // All three `mutated` actions can rewrite this
+                    // worktree's files — refresh the Working Copy list so
+                    // its staged/unstaged view matches the new HEAD.
+                    if let Some(wc) = &this.detail {
+                        wc.update(cx, |store, cx| store.refresh(cx));
+                    }
+                }
+                cx.notify();
+            }));
             self.branch_store = Some(bs);
         }
+        // The (possibly reused) store must see the other sections'
+        // in-flight work at entry, not only at their next completion.
+        self.sync_worktree_busy(cx);
         window.focus(&self.history_list_focus);
         cx.notify();
     }
@@ -1084,10 +1190,10 @@ impl RootView {
             } else {
                 window.focus(&self.history_list_focus);
             }
-            // Mirror the Working Copy store's mutation state: history
-            // actions must not race an in-flight stage/discard/commit.
-            let wc_mutating = self.detail.as_ref().is_some_and(|wc| wc.read(cx).mutating);
-            hs.update(cx, |store, _cx| store.wc_mutating = wc_mutating);
+            // Mirror the other sections' in-flight git work: history
+            // actions must not race an in-flight stage/discard/commit or
+            // branch switch/merge/rebase.
+            self.sync_worktree_busy(cx);
             cx.notify();
             return;
         }
@@ -1097,14 +1203,11 @@ impl RootView {
         };
         let hs = HistoryStore::new(entry.path.clone(), cx);
         self.history_subscription = Some(cx.observe(&hs, move |this, hs, cx| {
-            // Mirror the history action state into the wc store BOTH ways:
-            // its mutating entry points must refuse while a checkout/
-            // worktree-add runs, regardless of which entry point (keys,
-            // mouse, future callers) launched them.
-            let busy = hs.read(cx).busy();
-            if let Some(wc) = &this.detail {
-                wc.update(cx, |store, _cx| store.history_busy = busy);
-            }
+            // Mirror the history action state into the wc and branch
+            // stores BOTH ways: their mutating entry points must refuse
+            // while a checkout / worktree-add runs, regardless of which
+            // entry point (keys, mouse, future callers) launched them.
+            this.sync_worktree_busy(cx);
             let mutated = hs.update(cx, |store, _cx| store.take_mutated());
             let files_changed = hs.update(cx, |store, _cx| store.take_worktree_files_changed());
             if mutated {
@@ -1127,10 +1230,9 @@ impl RootView {
         // The fresh store just loaded the current log: a stale flag set
         // by an earlier working-copy mutation no longer applies.
         self.history_stale = false;
-        // Mirror the Working Copy store's mutation state for the new
-        // store too (the re-entry path syncs it for existing stores).
-        let wc_mutating = self.detail.as_ref().is_some_and(|wc| wc.read(cx).mutating);
-        hs.update(cx, |store, _cx| store.wc_mutating = wc_mutating);
+        // Mirror the other sections' in-flight git work for the new store
+        // too (the re-entry path syncs it for existing stores).
+        self.sync_worktree_busy(cx);
         self.history = Some(hs);
         window.focus(&self.history_list_focus);
         cx.notify();
