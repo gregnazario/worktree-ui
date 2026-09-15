@@ -2,7 +2,7 @@
 //! list, stash entries, and the branch/stash/remote actions. Same async
 //! discipline as the other stores.
 
-use crate::engine::{self, branches, stash};
+use crate::engine::{branches, stash};
 use gpui::{App, AppContext, Context, Entity};
 use std::path::PathBuf;
 
