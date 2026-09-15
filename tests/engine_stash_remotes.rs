@@ -71,7 +71,14 @@ fn push_to_bare_remote_and_pull() {
     std::fs::create_dir(&remote).unwrap();
     sh(
         None,
-        &["git", "init", "-q", "--bare", remote.to_str().unwrap()],
+        &[
+            "git",
+            "init",
+            "-q",
+            "--bare",
+            "--initial-branch=main",
+            remote.to_str().unwrap(),
+        ],
     );
 
     let work = tmp.path().join("work");
@@ -120,7 +127,14 @@ fn fetch_updates_tracking_refs() {
     std::fs::create_dir(&remote).unwrap();
     sh(
         None,
-        &["git", "init", "-q", "--bare", remote.to_str().unwrap()],
+        &[
+            "git",
+            "init",
+            "-q",
+            "--bare",
+            "--initial-branch=main",
+            remote.to_str().unwrap(),
+        ],
     );
 
     let work = tmp.path().join("work");
