@@ -1203,12 +1203,14 @@ impl RootView {
         if !initial.is_empty() {
             field.update(cx, |f, cx| f.set_value(&initial, cx));
         }
+        // Start typing immediately: focus the field, not the card.
+        let handle = field.read(cx).focus_handle.clone();
         self.dialog = DialogState::BranchName {
             title,
             rename_from,
             name: field,
         };
-        window.focus(&self.dialog_focus);
+        window.focus(&handle);
         cx.notify();
     }
 
@@ -2776,6 +2778,101 @@ mod tests {
                 wc.read(cx).pane,
                 Pane::Files,
                 "second tab returns to the file list"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn branches_section_lists_branches_and_creates_via_dialog(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        // Drill in, then open section 3.
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("3");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            assert!(matches!(root.section, Section::Branches));
+            let bs = root.branch_store.as_ref().expect("branch store created");
+            let s = bs.read(cx);
+            assert!(
+                s.branches.iter().any(|b| b.short == "main"),
+                "main listed, got: {:?}",
+                s.branches
+                    .iter()
+                    .map(|b| b.short.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert!(s.branches.iter().any(|b| b.is_current));
+            assert!(
+                s.branches.iter().all(|b| !b.is_remote),
+                "no remotes in fixture"
+            );
+        });
+
+        // `n` opens the dialog with the field focused; typing lands in it.
+        vcx.simulate_keystrokes("n");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("n e w b r");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert!(matches!(root.dialog, DialogState::BranchName { .. }));
+        });
+
+        // enter confirms: the branch is created and the dialog closes.
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            assert!(matches!(root.dialog, DialogState::None), "dialog closed");
+            let bs = root.branch_store.as_ref().unwrap();
+            let s = bs.read(cx);
+            assert!(
+                s.branches.iter().any(|b| b.short == "newbr"),
+                "created branch listed, got: {:?}",
+                s.branches
+                    .iter()
+                    .map(|b| b.short.clone())
+                    .collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn branches_section_escape_works_from_the_container_focus(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("3");
+        vcx.run_until_parked();
+
+        // A click on the header or list padding leaves the section
+        // container focused (not the list): escape must still close the
+        // drill-in instead of dead-ending.
+        let container = view.update(&mut vcx.cx, |root, _| root.detail_focus.clone());
+        vcx.update(|window, _cx| {
+            window.focus(&container);
+        });
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert!(
+                root.detail.is_none(),
+                "drill-in closed from container focus"
+            );
+            assert!(matches!(root.section, Section::WorkingCopy));
+            assert!(
+                root.branch_store.is_none(),
+                "branch store dropped with drill-in"
             );
         });
     }

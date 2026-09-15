@@ -201,7 +201,17 @@ fn render_active_list(this: &mut RootView, cx: &mut Context<RootView>) -> gpui::
             .child(text)
             .into_any_element();
     }
-    uniform_list("branches-list", count, move |range, _window, cx| {
+    // The focus target must be a rendered element: the keystroke
+    // dispatcher walks the tree from the focused element, so a handle
+    // attached nowhere would swallow every list-scoped key.
+    let wrap = div()
+        .id("branches-list-wrap")
+        .track_focus(&list_focus)
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col();
+    let list = uniform_list("branches-list", count, move |range, _window, cx| {
         range
             .filter(|pos| *pos < count)
             .filter_map(|pos| {
@@ -302,8 +312,8 @@ fn render_active_list(this: &mut RootView, cx: &mut Context<RootView>) -> gpui::
     })
     .track_scroll(scroll)
     .flex_1()
-    .min_h_0()
-    .into_any_element()
+    .min_h_0();
+    wrap.child(list).into_any_element()
 }
 
 fn tab_label(text: &str, active: bool) -> impl IntoElement {
