@@ -6,7 +6,7 @@ use crate::platform;
 use crate::store::WorktreeStore;
 use crate::terminal;
 use crate::text_field::TextField;
-use crate::views::{history as history_view, working_copy};
+use crate::views::{branches as branches_view, history as history_view, working_copy};
 use crate::wc_store::{Pane, WorkingCopyStore};
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -68,6 +68,7 @@ pub(crate) fn open_terminal(path: &std::path::Path) {
 pub enum Section {
     WorkingCopy,
     History,
+    Branches,
 }
 
 pub struct RootView {
@@ -99,6 +100,8 @@ pub struct RootView {
     /// Set when working-copy mutations make the history log stale; the
     /// next entry into the History section revalidates it.
     pub history_stale: bool,
+    /// Branches section store (section 3), created on first entry.
+    pub branch_store: Option<Entity<crate::branch_store::BranchStore>>,
     pub history_list_focus: FocusHandle,
     pub history_files_focus: FocusHandle,
     /// Scroll position of the history files chip strip, so keyboard file
@@ -238,6 +241,7 @@ impl RootView {
             history: None,
             history_subscription: None,
             history_stale: false,
+            branch_store: None,
             history_list_focus,
             history_files_focus,
             history_files_scroll,
@@ -778,6 +782,8 @@ impl RootView {
                     wc.update(cx, |store, cx| store.commit_with_editor(cx));
                 }
             }
+            // Section switching: 3 opens Branches.
+            "3" => self.open_branches(window, cx),
             // ---- diff pane (hunk staging, Phase 1b) ----
             "up" if diff_focused => {
                 if let Some(wc) = &self.detail {
@@ -999,6 +1005,21 @@ impl RootView {
             }),
             _ => {}
         }
+    }
+
+    /// Opens (or creates) the Branches section (section 3).
+    pub fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.section = Section::Branches;
+        if self.branch_store.is_none() {
+            let Some(entry) = self.store.read(cx).selected_entry().cloned() else {
+                self.section = Section::WorkingCopy;
+                return;
+            };
+            let bs = crate::branch_store::BranchStore::new(entry.path.clone(), cx);
+            self.branch_store = Some(bs);
+        }
+        window.focus(&self.history_list_focus);
+        cx.notify();
     }
 
     /// Opens (or re-focuses) the History section of the open detail view.
@@ -1302,6 +1323,7 @@ impl Render for RootView {
                         working_copy::render(self, window, cx).into_any_element()
                     }
                     Section::History => history_view::render(self, window, cx).into_any_element(),
+                    Section::Branches => branches_view::render(self, window, cx).into_any_element(),
                 };
                 main.child(section)
             } else {
