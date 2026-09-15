@@ -165,7 +165,7 @@ pub fn render(
                         .child(path),
                 )
                 .child(tab_label("1 Working Copy", true))
-                .child(tab_label("2 History — v0.3", false))
+                .child(tab_label("2 History", false))
                 .child(tab_label("3 Branches — v0.4", false))
                 .child(div().flex_1())
                 .child(toolbar_button(
@@ -247,7 +247,7 @@ pub fn render(
         .into_any_element()
 }
 
-fn tab_label(text: &str, active: bool) -> impl IntoElement {
+pub(crate) fn tab_label(text: &str, active: bool) -> impl IntoElement {
     div()
         .text_size(px(12.))
         .text_color(if active { ACCENT } else { DIM })
