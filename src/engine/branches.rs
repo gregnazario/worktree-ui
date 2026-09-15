@@ -48,8 +48,10 @@ pub fn list(worktree: &Path) -> Result<Vec<BranchInfo>> {
         let (is_remote, short) = match refname.strip_prefix("refs/heads/") {
             Some(short) => (false, short.to_string()),
             None => match refname.strip_prefix("refs/remotes/") {
-                // Skip the symbolic `origin/HEAD -> origin/main` entry.
-                Some(short) if short.ends_with(" -> ") || short.contains(" -> ") => continue,
+                // The symbolic remote HEAD renders as a plain
+                // `refs/remotes/<remote>/HEAD` refname with %(refname) —
+                // skip it or every clone shows a phantom `origin/HEAD`.
+                Some(short) if short.ends_with("/HEAD") => continue,
                 Some(short) => (true, short.to_string()),
                 None => continue,
             },
@@ -167,13 +169,16 @@ pub fn merge(worktree: &Path, branch: &str) -> Result<Vec<String>> {
     match result {
         Ok(_) => Ok(Vec::new()),
         Err(e) => {
-            let conflicts = conflicted_files(worktree)?;
-            if conflicts.is_empty() {
-                // Not a conflict — propagate the original error.
-                Err(e)
-            } else {
-                let _ = engine::run_trimmed(worktree, &["merge", "--abort"]);
-                Ok(conflicts)
+            // A failing conflict query must not swallow `e` — and must
+            // not skip the abort below, which unwedges the repo.
+            match conflicted_files(worktree) {
+                Ok(conflicts) if !conflicts.is_empty() => {
+                    let _ = engine::run_trimmed(worktree, &["merge", "--abort"]);
+                    Ok(conflicts)
+                }
+                // Not a conflict (or the query failed) — propagate the
+                // original error.
+                _ => Err(e),
             }
         }
     }
@@ -187,14 +192,12 @@ pub fn rebase(worktree: &Path, onto: &str) -> Result<Vec<String>> {
     let result = engine::run_trimmed(worktree, &["rebase", "--", onto]);
     match result {
         Ok(_) => Ok(Vec::new()),
-        Err(e) => {
-            let conflicts = conflicted_files(worktree)?;
-            if conflicts.is_empty() {
-                Err(e)
-            } else {
+        Err(e) => match conflicted_files(worktree) {
+            Ok(conflicts) if !conflicts.is_empty() => {
                 let _ = engine::run_trimmed(worktree, &["rebase", "--abort"]);
                 Ok(conflicts)
             }
-        }
+            _ => Err(e),
+        },
     }
 }

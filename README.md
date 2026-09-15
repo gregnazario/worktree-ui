@@ -135,8 +135,9 @@ Branches section (`3` from the detail view):
 | `p` / `a` | Pop (apply + drop) / apply the selected stash |
 | `D` | Drop the selected stash |
 | `f` | Fetch all remotes (with prune) |
-| `P` | Push the current branch (sets upstream on first push) |
+| `u` | Push the current branch (sets upstream on first push) |
 | `l` | Pull the current branch (fast-forward only) |
+| `F` | Force-push the current branch with lease — press twice to confirm |
 | `r` / `t` / `esc` | Refresh / terminal / back — same as the Working Copy section |
 
 Remote-tracking branches (`origin/…`) are listed after the locals; switching

@@ -30,6 +30,9 @@ pub struct BranchStore {
     mutated: bool,
     load_generation: u64,
     pub busy: bool,
+    /// Set on the first force-push press; the second press on the SAME
+    /// branch executes. Any completed refresh disarms it.
+    force_armed: Option<String>,
 }
 
 impl BranchStore {
@@ -48,6 +51,7 @@ impl BranchStore {
             mutated: false,
             load_generation: 0,
             busy: false,
+            force_armed: None,
         });
         entity.update(cx, |store, cx| store.refresh(cx));
         entity
@@ -82,6 +86,8 @@ impl BranchStore {
                     store.message = None;
                     store.busy_hint = false;
                 }
+                // Whatever was pending when the state changed is history.
+                store.force_armed = None;
                 let (branches, stashes) = result;
                 match branches {
                     Ok(branches) => {
@@ -193,6 +199,14 @@ impl BranchStore {
         }
     }
 
+    /// Refusal for actions pressed with nothing selected (first load in
+    /// flight, an emptied list): a silent dead key looks like a crash.
+    fn note_no_selection(&mut self, cx: &mut Context<Self>) {
+        self.message = Some("Nothing selected".into());
+        self.note_transient_hint();
+        cx.notify();
+    }
+
     /// The selected row when it is a LOCAL branch, for actions that
     /// cannot target a remote-tracking ref (switch, delete). The message
     /// explains the refusal instead of failing silently.
@@ -201,7 +215,13 @@ impl BranchStore {
         action: &str,
         cx: &mut Context<Self>,
     ) -> Option<branches::BranchInfo> {
-        let branch = self.selected_branch()?.clone();
+        let branch = match self.selected_branch() {
+            Some(b) => b.clone(),
+            None => {
+                self.note_no_selection(cx);
+                return None;
+            }
+        };
         if branch.is_remote {
             self.message = Some(format!(
                 "{action} needs a local branch — '{}' is remote-tracking",
@@ -216,6 +236,7 @@ impl BranchStore {
 
     pub fn copy_name(&mut self, cx: &mut Context<Self>) {
         let Some(branch) = self.selected_branch() else {
+            self.note_no_selection(cx);
             return;
         };
         let name = branch.ref_name.clone();
@@ -239,7 +260,9 @@ impl BranchStore {
         true
     }
 
-    /// Switches to the selected branch. Refuses on dirty working copy.
+    /// Switches to the selected branch. Unconflicted local changes
+    /// carry over (git's standard behavior); git refuses the switch when
+    /// a local change would be overwritten by the target branch.
     pub fn switch(&mut self, cx: &mut Context<Self>) {
         if !self.ready_for_action(cx) {
             return;
@@ -271,6 +294,7 @@ impl BranchStore {
                     Ok(()) => {
                         store.message = Some(format!("Switched to {display_name}"));
                         store.mutated = true;
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -287,8 +311,7 @@ impl BranchStore {
 
     /// Creates a new branch at the current HEAD (does not switch).
     pub fn create_branch(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.busy {
-            self.busy_message(cx);
+        if !self.ready_for_action(cx) {
             return;
         }
         let worktree = self.worktree.clone();
@@ -308,6 +331,7 @@ impl BranchStore {
                 match result {
                     Ok(()) => {
                         store.message = Some(format!("Created {display_name}"));
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -348,6 +372,7 @@ impl BranchStore {
                 match result {
                     Ok(()) => {
                         store.message = Some(format!("Renamed to {display_new}"));
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -364,8 +389,7 @@ impl BranchStore {
 
     /// Deletes the selected branch (refuses current and remote-tracking).
     pub fn delete_branch(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
-            self.busy_message(cx);
+        if !self.ready_for_action(cx) {
             return;
         }
         let current = self
@@ -375,6 +399,7 @@ impl BranchStore {
             .map(|b| b.short.clone())
             .unwrap_or_default();
         let Some(branch) = self.selected_local_branch("Delete", cx) else {
+            self.note_no_selection(cx);
             return;
         };
         let name = branch.short.clone();
@@ -394,6 +419,7 @@ impl BranchStore {
                 match result {
                     Ok(()) => {
                         store.message = Some(format!("Deleted {display_name}"));
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -414,6 +440,7 @@ impl BranchStore {
             return;
         }
         let Some(branch) = self.selected_branch() else {
+            self.note_no_selection(cx);
             return;
         };
         if branch.is_current {
@@ -440,6 +467,7 @@ impl BranchStore {
                     Ok(conflicts) if conflicts.is_empty() => {
                         store.message = Some(format!("Merged {display_name}"));
                         store.mutated = true;
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Ok(conflicts) => {
@@ -449,7 +477,7 @@ impl BranchStore {
                             "Merge conflicts in {} — merge aborted, worktree restored",
                             conflicts.join(", ")
                         ));
-                        store.busy_hint = true;
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -470,6 +498,7 @@ impl BranchStore {
             return;
         }
         let Some(branch) = self.selected_branch() else {
+            self.note_no_selection(cx);
             return;
         };
         if branch.is_current {
@@ -496,6 +525,7 @@ impl BranchStore {
                     Ok(conflicts) if conflicts.is_empty() => {
                         store.message = Some(format!("Rebased onto {display_name}"));
                         store.mutated = true;
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Ok(_) => {
@@ -523,24 +553,36 @@ impl BranchStore {
         if !self.ready_for_action(cx) {
             return;
         }
+        let before = self.stashes.len();
         let worktree = self.worktree.clone();
         self.busy = true;
         self.message = Some("Stashing changes…".into());
         self.note_transient_hint();
         cx.notify();
         cx.spawn(async move |this, cx| {
+            // `git stash push` exits 0 with "No local changes to save" on
+            // a clean tree: detect that by counting entries before/after
+            // (both listed in the same background task).
             let result = cx
                 .background_executor()
-                .spawn(async move { stash::push(&worktree, None) })
+                .spawn(async move {
+                    stash::push(&worktree, None)?;
+                    Ok::<_, crate::engine::GitError>(stash::list(&worktree)?.len())
+                })
                 .await;
             this.update(cx, |store, cx| {
                 store.busy = false;
                 match result {
-                    Ok(()) => {
+                    Ok(count) if count == before => {
+                        store.message = Some("Nothing to stash — working copy is clean".into());
+                        store.refresh(cx);
+                    }
+                    Ok(_) => {
                         // Stashing reverts the working tree: the Working
                         // Copy section must re-read it.
                         store.mutated = true;
                         store.message = Some("Stashed working copy".into());
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -600,6 +642,7 @@ impl BranchStore {
                     Ok(()) => {
                         store.mutated = true;
                         store.message = Some(format!("Applied {display_ref}"));
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -624,11 +667,11 @@ impl BranchStore {
     /// Drops the selected stash entry (ref-only; the working copy is
     /// untouched, but the entry is gone for good).
     pub fn stash_drop(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
-            self.busy_message(cx);
+        if !self.ready_for_action(cx) {
             return;
         }
         let Some(entry) = self.selected_stash_entry().cloned() else {
+            self.note_no_selection(cx);
             return;
         };
         let worktree = self.worktree.clone();
@@ -648,6 +691,7 @@ impl BranchStore {
                 match result {
                     Ok(()) => {
                         store.message = Some(format!("Dropped {display_ref}"));
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -682,6 +726,7 @@ impl BranchStore {
                 match result {
                     Ok(()) => {
                         store.message = Some("Fetched".into());
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -729,6 +774,67 @@ impl BranchStore {
                 match result {
                     Ok(()) => {
                         store.message = Some(format!("Pushed {display_name}"));
+                        store.busy_hint = false;
+                        store.refresh(cx);
+                    }
+                    Err(e) => {
+                        store.message = Some(e.message);
+                        store.busy_hint = true;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Force-pushes the current branch with lease. Two-step: the first
+    /// press arms (the message asks for confirmation), the second press
+    /// on the same branch executes. `--force-with-lease` refuses when
+    /// the remote moved under us — safer than a blind `--force`.
+    pub fn force_push_current(&mut self, cx: &mut Context<Self>) {
+        if !self.ready_for_action(cx) {
+            return;
+        }
+        let Some(current) = self
+            .branches
+            .iter()
+            .find(|b| b.is_current && !b.is_remote)
+            .map(|b| b.short.clone())
+        else {
+            self.message = Some("No current branch to push (detached HEAD?)".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        };
+        if self.force_armed.as_deref() != Some(current.as_str()) {
+            self.force_armed = Some(current.clone());
+            self.message = Some(format!(
+                "Force-push {current} (with lease)? Press F again to confirm"
+            ));
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        self.force_armed = None;
+        let worktree = self.worktree.clone();
+        self.busy = true;
+        self.message = Some(format!("Force-pushing {current}…"));
+        self.note_transient_hint();
+        cx.notify();
+        let display_name = current.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { remotes::push_force_with_lease(&worktree, &current) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.busy = false;
+                match result {
+                    Ok(()) => {
+                        store.message = Some(format!("Force-pushed {display_name}"));
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Err(e) => {
@@ -764,6 +870,7 @@ impl BranchStore {
                     Ok(()) => {
                         store.mutated = true;
                         store.message = Some("Pulled".into());
+                        store.busy_hint = false;
                         store.refresh(cx);
                     }
                     Err(e) => {

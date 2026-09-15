@@ -289,7 +289,12 @@ impl RootView {
     /// when no detail handle is focused, so refocusing the root while the
     /// detail view is open leaves every detail key dead (keyboard trap).
     fn focus_active_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.detail.is_some() {
+        if self.detail.is_some() && self.section == Section::Branches {
+            // The Branches section has no pane state to restore and its
+            // list IS the surface; the Working Copy pane reset below must
+            // not fire here (it would corrupt the remembered WC pane).
+            window.focus(&self.history_list_focus);
+        } else if self.detail.is_some() {
             // Keep the store's pane state in sync with the focused pane.
             if let Some(wc) = &self.detail {
                 wc.update(cx, |store, cx| {
@@ -1135,18 +1140,17 @@ impl RootView {
         if !self.history_list_focus.is_focused(window) {
             return;
         }
-        match ks.key.as_str() {
-            "up" | "down" => {
+        // gpui delivers shift+letter as the LOWERCASE key with
+        // modifiers.shift set — a literal uppercase key never arrives
+        // (same pattern as the Working Copy's shift+s stage-all). The
+        // pane decides which actions a key reaches: branch keys must not
+        // fire while the stash list is on screen, and vice versa.
+        let pane = bs.read(cx).pane;
+        match (ks.key.as_str(), ks.modifiers.shift, pane) {
+            ("up", _, _) => {
                 let pos = bs.update(cx, |h, cx| {
-                    if ks.key == "up" {
-                        h.select_prev(cx);
-                    } else {
-                        h.select_next(cx);
-                    }
-                    match h.pane {
-                        crate::branch_store::Pane::Branches => h.selected,
-                        crate::branch_store::Pane::Stashes => h.selected_stash,
-                    }
+                    h.select_prev(cx);
+                    h.active_selected()
                 });
                 // Keep the selected row on screen as the cursor moves.
                 if let Some(pos) = pos {
@@ -1154,7 +1158,17 @@ impl RootView {
                         .scroll_to_item(pos, gpui::ScrollStrategy::Center);
                 }
             }
-            "tab" | "s" => {
+            ("down", _, _) => {
+                let pos = bs.update(cx, |h, cx| {
+                    h.select_next(cx);
+                    h.active_selected()
+                });
+                if let Some(pos) = pos {
+                    self.branch_list_scroll
+                        .scroll_to_item(pos, gpui::ScrollStrategy::Center);
+                }
+            }
+            ("tab", _, _) | ("s", _, _) => {
                 bs.update(cx, |h, cx| h.toggle_pane(cx));
                 let pos = bs.read(cx).active_selected();
                 if let Some(pos) = pos {
@@ -1162,28 +1176,53 @@ impl RootView {
                         .scroll_to_item(pos, gpui::ScrollStrategy::Center);
                 }
             }
-            "y" => bs.update(cx, |h, cx| h.copy_name(cx)),
-            "r" => bs.update(cx, |h, cx| h.refresh(cx)),
-            "n" => self.open_branch_name_dialog(None, window, cx),
-            // Branch actions.
-            "enter" | "x" => bs.update(cx, |h, cx| h.switch(cx)),
-            "d" => bs.update(cx, |h, cx| h.delete_branch(cx)),
-            "m" => bs.update(cx, |h, cx| h.merge(cx)),
-            "R" => bs.update(cx, |h, cx| h.rebase_onto(cx)),
-            "M" => {
+            // z works in both panes: stashing is the entry point TO the
+            // stash list, so it must not require visiting it first.
+            ("z", _, _) => bs.update(cx, |h, cx| h.stash_push(cx)),
+            // --- branch-pane actions ---
+            ("enter", _, crate::branch_store::Pane::Branches)
+            | ("x", _, crate::branch_store::Pane::Branches) => bs.update(cx, |h, cx| h.switch(cx)),
+            ("d", false, crate::branch_store::Pane::Branches) => {
+                bs.update(cx, |h, cx| h.delete_branch(cx))
+            }
+            ("m", false, crate::branch_store::Pane::Branches) => bs.update(cx, |h, cx| h.merge(cx)),
+            ("r", true, crate::branch_store::Pane::Branches) => {
+                bs.update(cx, |h, cx| h.rebase_onto(cx))
+            }
+            ("r", false, crate::branch_store::Pane::Branches) => {
+                bs.update(cx, |h, cx| h.refresh(cx))
+            }
+            ("m", true, crate::branch_store::Pane::Branches) => {
                 let rename_from = bs.read(cx).selected_branch().map(|b| b.short.clone());
                 self.open_branch_name_dialog(rename_from, window, cx);
             }
-            // Stash actions (in the stash pane; in the branches pane
-            // these are no-ops so the pane toggle stays discoverable).
-            "z" => bs.update(cx, |h, cx| h.stash_push(cx)),
-            "p" => bs.update(cx, |h, cx| h.stash_pop(cx)),
-            "a" => bs.update(cx, |h, cx| h.stash_apply(cx)),
-            "D" => bs.update(cx, |h, cx| h.stash_drop(cx)),
-            // Remote actions (operate on the CURRENT branch).
-            "f" => bs.update(cx, |h, cx| h.fetch_remotes(cx)),
-            "P" => bs.update(cx, |h, cx| h.push_current(cx)),
-            "l" => bs.update(cx, |h, cx| h.pull_current(cx)),
+            ("n", _, crate::branch_store::Pane::Branches) => {
+                self.open_branch_name_dialog(None, window, cx)
+            }
+            ("y", _, crate::branch_store::Pane::Branches) => bs.update(cx, |h, cx| h.copy_name(cx)),
+            ("f", false, crate::branch_store::Pane::Branches) => {
+                bs.update(cx, |h, cx| h.fetch_remotes(cx))
+            }
+            ("f", true, crate::branch_store::Pane::Branches) => {
+                bs.update(cx, |h, cx| h.force_push_current(cx))
+            }
+            ("u", _, crate::branch_store::Pane::Branches) => {
+                bs.update(cx, |h, cx| h.push_current(cx))
+            }
+            ("l", _, crate::branch_store::Pane::Branches) => {
+                bs.update(cx, |h, cx| h.pull_current(cx))
+            }
+            // --- stash-pane actions ---
+            ("enter", _, crate::branch_store::Pane::Stashes)
+            | ("p", false, crate::branch_store::Pane::Stashes) => {
+                bs.update(cx, |h, cx| h.stash_pop(cx))
+            }
+            ("a", _, crate::branch_store::Pane::Stashes) => {
+                bs.update(cx, |h, cx| h.stash_apply(cx))
+            }
+            ("d", true, crate::branch_store::Pane::Stashes) => {
+                bs.update(cx, |h, cx| h.stash_drop(cx))
+            }
             _ => {}
         }
     }
@@ -2843,6 +2882,142 @@ mod tests {
                     .map(|b| b.short.clone())
                     .collect::<Vec<_>>()
             );
+        });
+    }
+
+    #[gpui::test]
+    fn branches_section_switch_moves_head(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("3");
+        vcx.run_until_parked();
+
+        // The fixture's `feat` branch is checked out in the fixture's
+        // second worktree, so switching to it is refused by git. Create
+        // a fresh branch instead, select it, and switch.
+        vcx.simulate_keystrokes("n");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("t o p i c");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("x");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let bs = root.branch_store.as_ref().unwrap();
+            let s = bs.read(cx);
+            let current: Vec<&str> = s
+                .branches
+                .iter()
+                .filter(|b| b.is_current)
+                .map(|b| b.short.as_str())
+                .collect();
+            assert_eq!(
+                current,
+                vec!["topic"],
+                "switch moved HEAD to topic (msg={:?})",
+                s.message
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn branches_section_shift_keys_reach_shifted_actions(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("3");
+        vcx.run_until_parked();
+
+        // gpui delivers shift+m as key "m" with modifiers.shift set: the
+        // rename dialog must open (not merge, which shares the letter).
+        vcx.simulate_keystrokes("shift-m");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| match &root.dialog {
+            DialogState::BranchName { rename_from, .. } => {
+                assert!(rename_from.is_some(), "shift+m opens the RENAME dialog");
+            }
+            DialogState::None => panic!("no dialog opened"),
+            DialogState::Create { .. }
+            | DialogState::Remove { .. }
+            | DialogState::Settings { .. }
+            | DialogState::Discard { .. } => {
+                panic!("wrong dialog variant for shift+m")
+            }
+        });
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+
+        // Select `feat` (up from main), then shift+r rebases the current
+        // branch onto the selection: in this fixture that is a no-op
+        // fast-forward, so the store must report success — a mis-routed
+        // plain "r" would only refresh with no message.
+        vcx.simulate_keystrokes("up");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("shift-r");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let s = root.branch_store.as_ref().unwrap().read(cx);
+            assert_eq!(
+                s.message.as_deref(),
+                Some("Rebased onto feat"),
+                "shift+r rebased"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn branches_section_stash_roundtrip_via_keys(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "dirty").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("3");
+        vcx.run_until_parked();
+
+        // z stashes the dirty file away.
+        vcx.simulate_keystrokes("z");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        let content = std::fs::read_to_string(repo.join("f.txt")).unwrap();
+        assert_eq!(content, "one", "stash cleaned the working copy");
+        view.update(&mut vcx.cx, |root, cx| {
+            let s = root.branch_store.as_ref().unwrap().read(cx);
+            assert_eq!(s.stashes.len(), 1, "stash entry listed");
+        });
+
+        // tab into the stash pane and pop: the change comes back.
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("p");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        let content = std::fs::read_to_string(repo.join("f.txt")).unwrap();
+        assert_eq!(content, "dirty", "pop restored the change");
+        view.update(&mut vcx.cx, |root, cx| {
+            let s = root.branch_store.as_ref().unwrap().read(cx);
+            assert!(s.stashes.is_empty(), "pop dropped the entry");
         });
     }
 

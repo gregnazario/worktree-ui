@@ -136,7 +136,7 @@ pub fn render(
                             "1/2/3 section · esc back".to_string()
                         } else {
                             match pane {
-                                Pane::Branches => "↑↓ branch · enter switch · m merge · R rebase · d delete · M rename · n new · f fetch · P push · l pull · z stash · tab stashes · esc back".to_string(),
+                                Pane::Branches => "↑↓ branch · enter switch · m merge · R rebase · d delete · M rename · n new · f fetch · F force-push · u push · l pull · z stash · tab stashes · esc back".to_string(),
                                 Pane::Stashes => "↑↓ stash · p pop · a apply · D drop · tab branches · esc back".to_string(),
                             }
                         },
