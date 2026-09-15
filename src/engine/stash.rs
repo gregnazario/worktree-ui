@@ -61,9 +61,28 @@ pub fn apply(worktree: &Path) -> Result<()> {
     engine::run_trimmed(worktree, &["stash", "apply", "-q"]).map(|_| ())
 }
 
+/// Applies a specific stash entry (by its `stash@{N}` index) without
+/// dropping it.
+pub fn apply_at(worktree: &Path, index: usize) -> Result<()> {
+    engine::run_trimmed(
+        worktree,
+        &["stash", "apply", "-q", &format!("stash@{{{index}}}")],
+    )
+    .map(|_| ())
+}
+
 /// Applies and drops the most recent stash.
 pub fn pop(worktree: &Path) -> Result<()> {
     engine::run_trimmed(worktree, &["stash", "pop", "-q"]).map(|_| ())
+}
+
+/// Applies and drops a specific stash entry.
+pub fn pop_at(worktree: &Path, index: usize) -> Result<()> {
+    engine::run_trimmed(
+        worktree,
+        &["stash", "pop", "-q", &format!("stash@{{{index}}}")],
+    )
+    .map(|_| ())
 }
 
 /// Drops a specific stash entry by index.

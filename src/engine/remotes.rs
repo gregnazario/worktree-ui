@@ -9,25 +9,54 @@ pub fn fetch(worktree: &Path) -> Result<()> {
     engine::run_trimmed(worktree, &["fetch", "--all", "--prune", "-q"]).map(|_| ())
 }
 
-/// Pushes the current branch to its upstream (or origin with -u on first push).
+/// The remote `branch`'s upstream tracks, e.g. `upstream` for a branch
+/// whose upstream is `upstream/main`. None when the branch has no
+/// upstream (or a detached HEAD).
+fn upstream_remote(worktree: &Path, branch: &str) -> Option<String> {
+    let out = engine::run_trimmed(
+        worktree,
+        &[
+            "--no-optional-locks",
+            "for-each-ref",
+            "--format=%(upstream:remotename)",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .ok()?;
+    let remote = out.trim();
+    (!remote.is_empty()).then(|| remote.to_string())
+}
+
+/// Pushes `branch` to the remote its upstream tracks (falling back to
+/// `origin` for a not-yet-pushed branch) — never a hardcoded remote name.
 pub fn push(worktree: &Path, branch: &str, set_upstream: bool) -> Result<()> {
+    if branch.starts_with('-') {
+        return Err(crate::engine::GitError {
+            message: format!("invalid branch name: {branch:?}"),
+        });
+    }
+    let remote = upstream_remote(worktree, branch).unwrap_or_else(|| "origin".to_string());
     let mut args = vec!["push", "-q"];
     if set_upstream {
         args.push("--set-upstream");
-        args.push("origin");
-        args.push(branch);
-    } else {
-        args.push("origin");
-        args.push(branch);
     }
+    args.push(&remote);
+    args.push(branch);
     engine::run_trimmed(worktree, &args).map(|_| ())
 }
 
-/// Force-pushes with lease (safer than --force).
+/// Force-pushes with lease to the branch's tracked remote (safer than
+/// `--force`: refuses when someone else pushed in the meantime).
 pub fn push_force_with_lease(worktree: &Path, branch: &str) -> Result<()> {
+    if branch.starts_with('-') {
+        return Err(crate::engine::GitError {
+            message: format!("invalid branch name: {branch:?}"),
+        });
+    }
+    let remote = upstream_remote(worktree, branch).unwrap_or_else(|| "origin".to_string());
     engine::run_trimmed(
         worktree,
-        &["push", "-q", "--force-with-lease", "origin", branch],
+        &["push", "-q", "--force-with-lease", &remote, branch],
     )
     .map(|_| ())
 }

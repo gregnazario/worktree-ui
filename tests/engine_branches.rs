@@ -22,6 +22,51 @@ fn list_returns_local_branches_with_current_marker() {
 }
 
 #[test]
+fn list_includes_remote_tracking_branches_grouped_after_locals() {
+    let tmp = tempfile::tempdir().unwrap();
+    let remote = tmp.path().join("remote.git");
+    std::fs::create_dir(&remote).unwrap();
+    sh(
+        None,
+        &[
+            "git",
+            "init",
+            "-q",
+            "--bare",
+            "--initial-branch=main",
+            remote.to_str().unwrap(),
+        ],
+    );
+
+    let work = tmp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    fixture_repo(&work);
+    sh(
+        Some(&work),
+        &["git", "remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    sh(Some(&work), &["git", "push", "-q", "origin", "main"]);
+    sh(Some(&work), &["git", "fetch", "-q", "--all"]);
+
+    let branches = branches::list(&work).unwrap();
+    let remote_pos = branches
+        .iter()
+        .position(|b| b.short == "origin/main")
+        .expect("origin/main listed");
+    assert!(branches[remote_pos].is_remote);
+    assert_eq!(
+        branches[remote_pos].ref_name, "refs/remotes/origin/main",
+        "full refname preserved for remote rows"
+    );
+    // Locals come first: every remote row sits after every local row.
+    let last_local = branches
+        .iter()
+        .rposition(|b| !b.is_remote)
+        .expect("at least one local branch");
+    assert!(remote_pos > last_local, "remotes grouped after locals");
+}
+
+#[test]
 fn list_reports_ahead_and_behind() {
     let tmp = tempfile::tempdir().unwrap();
     fixture_repo(tmp.path());
@@ -115,7 +160,7 @@ fn merge_clean_fast_forward() {
 }
 
 #[test]
-fn merge_with_conflicts_reports_conflicted_files() {
+fn merge_with_conflicts_reports_conflicted_files_and_aborts() {
     let tmp = tempfile::tempdir().unwrap();
     fixture_repo(tmp.path());
     sh(Some(tmp.path()), &["git", "checkout", "-qb", "side"]);
@@ -125,11 +170,43 @@ fn merge_with_conflicts_reports_conflicted_files() {
     std::fs::write(tmp.path().join("f.txt"), "main change").unwrap();
     sh(Some(tmp.path()), &["git", "commit", "-qam", "main"]);
 
-    let err = branches::merge(tmp.path(), "side").unwrap_err();
+    // Conflicts come back as the Ok payload — and the merge is aborted:
+    // there is no continue flow in this UI, and a wedged MERGE_HEAD
+    // would block every later operation.
+    let conflicts = branches::merge(tmp.path(), "side").unwrap();
+    assert_eq!(conflicts, vec!["f.txt".to_string()]);
+
+    let merging = tmp.path().join(".git").join("MERGE_HEAD");
+    assert!(!merging.exists(), "merge must not stay mid-merge");
+    let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
+    assert_eq!(content, "main change", "worktree restored to pre-merge");
+}
+
+#[test]
+fn rebase_with_conflicts_reports_conflicted_files_and_aborts() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture_repo(tmp.path());
+    sh(Some(tmp.path()), &["git", "checkout", "-qb", "side"]);
+    std::fs::write(tmp.path().join("f.txt"), "side change").unwrap();
+    sh(Some(tmp.path()), &["git", "commit", "-qam", "side"]);
+    sh(Some(tmp.path()), &["git", "checkout", "-q", "main"]);
+    std::fs::write(tmp.path().join("f.txt"), "main change").unwrap();
+    sh(Some(tmp.path()), &["git", "commit", "-qam", "main"]);
+    sh(Some(tmp.path()), &["git", "checkout", "-q", "side"]);
+
+    let conflicts = branches::rebase(tmp.path(), "main").unwrap();
+    assert_eq!(conflicts, vec!["f.txt".to_string()]);
+
+    let rebasing = tmp.path().join(".git").join("rebase-merge");
+    let rebasing_apply = tmp.path().join(".git").join("rebase-apply");
     assert!(
-        err.message.contains("conflicts"),
-        "expected conflict report, got: {err}"
+        !rebasing.exists() && !rebasing_apply.exists(),
+        "rebase must not stay mid-rebase"
     );
+    let head_branch = sh_out(tmp.path(), &["git", "branch", "--show-current"]);
+    assert_eq!(head_branch, "side", "still on the rebased branch");
+    let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
+    assert_eq!(content, "side change", "worktree restored to pre-rebase");
 }
 
 #[test]

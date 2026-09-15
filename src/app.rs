@@ -117,6 +117,9 @@ pub struct RootView {
     pub history_files_scroll_generation: Option<usize>,
     /// Scroll position of the history commit list (virtualized).
     pub history_list_scroll: gpui::UniformListScrollHandle,
+    /// Scroll position of the Branches section's active list
+    /// (virtualized; the same handle serves the branch and stash panes).
+    pub branch_list_scroll: gpui::UniformListScrollHandle,
     /// Scroll position of the diff pane. Keyboard hunk movement scrolls
     /// the hovered hunk into view through it — without this, `down` on a
     /// tall diff moves the cursor to a hunk that is rendered but scrolled
@@ -223,6 +226,7 @@ impl RootView {
         let history_files_scroll = gpui::ScrollHandle::new();
         let history_files_scroll_generation = None;
         let history_list_scroll = gpui::UniformListScrollHandle::new();
+        let branch_list_scroll = gpui::UniformListScrollHandle::new();
         let diff_scroll = gpui::ScrollHandle::new();
         // Forced mismatch: the first detail land of any drill-in runs the
         // reset branch, so no previous session's scroll offset can leak in.
@@ -252,6 +256,7 @@ impl RootView {
             history_files_scroll,
             history_files_scroll_generation,
             history_list_scroll,
+            branch_list_scroll,
             diff_scroll,
             diff_scroll_generation,
             diff_scroll_key,
@@ -571,10 +576,7 @@ impl RootView {
     fn sync_worktree_busy(&mut self, cx: &mut Context<Self>) {
         let wc_mutating = self.detail.as_ref().is_some_and(|w| w.read(cx).mutating);
         let hs_busy = self.history.as_ref().is_some_and(|h| h.read(cx).busy());
-        let bs_busy = self
-            .branch_store
-            .as_ref()
-            .is_some_and(|b| b.read(cx).busy);
+        let bs_busy = self.branch_store.as_ref().is_some_and(|b| b.read(cx).busy);
         if let Some(wc) = &self.detail {
             wc.update(cx, |store, _cx| store.history_busy = hs_busy || bs_busy);
         }
@@ -720,6 +722,7 @@ impl RootView {
         // A fresh handle: the next drill-in's History opens at the top
         // instead of inheriting this session's scroll offset.
         self.history_list_scroll = gpui::UniformListScrollHandle::new();
+        self.branch_list_scroll = gpui::UniformListScrollHandle::new();
         self.history_files_scroll = gpui::ScrollHandle::new();
         self.history_files_scroll_generation = None;
         self.history_stale = false;
@@ -770,7 +773,7 @@ impl RootView {
                         self.open_history(window, cx);
                         return;
                     }
-                    "up" | "down" | "tab" | "escape" | "n" | "1" => {
+                    "up" | "down" | "tab" | "escape" | "n" | "1" | "3" => {
                         // Pure UI navigation: handle in the normal router
                         // (which doesn't run git commands for these keys).
                     }
@@ -1091,33 +1094,145 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Section-wide keys work on EVERY focused surface inside the
+        // section: a click on the header or list padding leaves the
+        // container focused, and `escape` must never dead-end there.
+        match ks.key.as_str() {
+            "escape" => return self.close_detail(window, cx),
+            "1" => {
+                self.section = Section::WorkingCopy;
+                // Restore the Working Copy section's remembered pane focus.
+                if let Some(wc) = &self.detail {
+                    let pane = wc.read(cx).pane;
+                    if pane == crate::wc_store::Pane::Diff {
+                        window.focus(&self.detail_diff_focus);
+                    } else {
+                        window.focus(&self.detail_list_focus);
+                    }
+                } else {
+                    window.focus(&self.detail_list_focus);
+                }
+                cx.notify();
+                return;
+            }
+            "2" => return self.open_history(window, cx),
+            "t" => {
+                let path = self
+                    .branch_store
+                    .as_ref()
+                    .map(|bs| bs.read(cx).worktree.clone());
+                if let Some(path) = path {
+                    open_terminal(&path);
+                }
+                return;
+            }
+            _ => {}
+        }
         let Some(bs) = self.branch_store.clone() else {
             return;
         };
-        let list_focused = self.history_list_focus.is_focused(window);
-        if !list_focused {
+        // List-scoped keys only when the list itself holds focus.
+        if !self.history_list_focus.is_focused(window) {
             return;
         }
         match ks.key.as_str() {
-            "escape" => self.close_detail(window, cx),
-            "1" => {
-                self.section = Section::WorkingCopy;
-                window.focus(&self.detail_list_focus);
-                cx.notify();
+            "up" | "down" => {
+                let pos = bs.update(cx, |h, cx| {
+                    if ks.key == "up" {
+                        h.select_prev(cx);
+                    } else {
+                        h.select_next(cx);
+                    }
+                    match h.pane {
+                        crate::branch_store::Pane::Branches => h.selected,
+                        crate::branch_store::Pane::Stashes => h.selected_stash,
+                    }
+                });
+                // Keep the selected row on screen as the cursor moves.
+                if let Some(pos) = pos {
+                    self.branch_list_scroll
+                        .scroll_to_item(pos, gpui::ScrollStrategy::Center);
+                }
             }
-            "2" => self.open_history(window, cx),
-            "t" => {
-                let path = bs.read(cx).worktree.clone();
-                open_terminal(&path);
+            "tab" | "s" => {
+                bs.update(cx, |h, cx| h.toggle_pane(cx));
+                let pos = bs.read(cx).active_selected();
+                if let Some(pos) = pos {
+                    self.branch_list_scroll
+                        .scroll_to_item(pos, gpui::ScrollStrategy::Center);
+                }
             }
-            "r" => bs.update(cx, |store, cx| store.refresh(cx)),
-            "up" if list_focused => bs.update(cx, |h, cx| h.select_prev(cx)),
-            "down" if list_focused => bs.update(cx, |h, cx| h.select_next(cx)),
-            "y" if list_focused => bs.update(cx, |h, cx| h.copy_name(cx)),
-            "x" if list_focused => bs.update(cx, |h, cx| h.switch(cx)),
-            "d" if list_focused => bs.update(cx, |h, cx| h.delete_branch(cx)),
+            "y" => bs.update(cx, |h, cx| h.copy_name(cx)),
+            "r" => bs.update(cx, |h, cx| h.refresh(cx)),
+            "n" => self.open_branch_name_dialog(None, window, cx),
+            // Branch actions.
+            "enter" | "x" => bs.update(cx, |h, cx| h.switch(cx)),
+            "d" => bs.update(cx, |h, cx| h.delete_branch(cx)),
+            "m" => bs.update(cx, |h, cx| h.merge(cx)),
+            "R" => bs.update(cx, |h, cx| h.rebase_onto(cx)),
+            "M" => {
+                let rename_from = bs.read(cx).selected_branch().map(|b| b.short.clone());
+                self.open_branch_name_dialog(rename_from, window, cx);
+            }
+            // Stash actions (in the stash pane; in the branches pane
+            // these are no-ops so the pane toggle stays discoverable).
+            "z" => bs.update(cx, |h, cx| h.stash_push(cx)),
+            "p" => bs.update(cx, |h, cx| h.stash_pop(cx)),
+            "a" => bs.update(cx, |h, cx| h.stash_apply(cx)),
+            "D" => bs.update(cx, |h, cx| h.stash_drop(cx)),
             _ => {}
         }
+    }
+
+    /// Opens the branch-name dialog: `rename_from` set = rename that
+    /// branch, None = create a new branch at HEAD.
+    pub(crate) fn open_branch_name_dialog(
+        &mut self,
+        rename_from: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dialog.is_open() || self.branch_store.is_none() {
+            return;
+        }
+        let (title, initial) = match &rename_from {
+            Some(from) => (format!("Rename branch {from}"), from.clone()),
+            None => ("New branch at HEAD".to_string(), String::new()),
+        };
+        let field = cx.new(|cx| crate::text_field::TextField::new("branch name", cx));
+        if !initial.is_empty() {
+            field.update(cx, |f, cx| f.set_value(&initial, cx));
+        }
+        self.dialog = DialogState::BranchName {
+            title,
+            rename_from,
+            name: field,
+        };
+        window.focus(&self.dialog_focus);
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_branch_name_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, rename_from) = match &self.dialog {
+            DialogState::BranchName {
+                name, rename_from, ..
+            } => (name.read(cx).value.trim().to_string(), rename_from.clone()),
+            _ => return,
+        };
+        if name.is_empty() || name.starts_with('-') {
+            return;
+        }
+        if let Some(bs) = &self.branch_store {
+            match rename_from {
+                Some(_) => bs.update(cx, |store, cx| store.rename_branch(&name, cx)),
+                None => bs.update(cx, |store, cx| store.create_branch(&name, cx)),
+            }
+        }
+        self.close_dialog(window, cx);
     }
 
     /// Opens (or creates) the Branches section (section 3).
@@ -1159,6 +1274,14 @@ impl RootView {
                 cx.notify();
             }));
             self.branch_store = Some(bs);
+        } else if let Some(bs) = &self.branch_store {
+            // Re-entry revalidates (unless an action is in flight): the
+            // current-branch marker, ahead/behind, and the stash list all
+            // go stale while the user works in the other sections (a
+            // commit here, a checkout in History).
+            if !bs.read(cx).busy {
+                bs.update(cx, |store, cx| store.refresh(cx));
+            }
         }
         // The (possibly reused) store must see the other sections'
         // in-flight work at entry, not only at their next completion.
@@ -1654,6 +1777,9 @@ impl Render for RootView {
                 }
                 DialogState::Discard { .. } => {
                     Some(dialogs::render_discard_dialog(self, window, cx).into_any_element())
+                }
+                DialogState::BranchName { .. } => {
+                    Some(dialogs::render_branch_name_dialog(self, window, cx).into_any_element())
                 }
             };
             if let Some(card) = card {

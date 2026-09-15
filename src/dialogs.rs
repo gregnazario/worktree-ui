@@ -48,6 +48,13 @@ pub enum DialogState {
         path: String,
         untracked: bool,
     },
+    /// Create a branch at HEAD, or rename an existing one.
+    BranchName {
+        title: String,
+        /// Some(branch) = rename that branch; None = create at HEAD.
+        rename_from: Option<String>,
+        name: Entity<TextField>,
+    },
 }
 
 impl DialogState {
@@ -260,6 +267,83 @@ pub fn render_create_dialog(
                     Some(GREEN),
                     None,
                     cx.listener(|this, _, window, cx| confirm_create(this, window, cx)),
+                )),
+        )
+}
+
+pub fn render_branch_name_dialog(
+    this: &mut RootView,
+    _window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let DialogState::BranchName {
+        title,
+        rename_from,
+        name,
+    } = &this.dialog
+    else {
+        unreachable!("branch dialog rendered without state")
+    };
+    let value = name.read(cx).value.trim().to_string();
+    let can_confirm = !value.is_empty() && !value.starts_with('-');
+    let confirm_label = if rename_from.is_some() {
+        "Rename"
+    } else {
+        "Create"
+    };
+
+    let dialog_focus = this.dialog_focus.clone();
+    let name_field = name.clone();
+    div()
+        .id("branch-name-dialog")
+        .track_focus(&dialog_focus)
+        .w(px(420.))
+        .p_4()
+        .rounded_lg()
+        .bg(PANEL)
+        .border_1()
+        .border_color(BORDER)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            cx.stop_propagation();
+            match event.keystroke.key.as_str() {
+                "escape" => this.close_dialog(window, cx),
+                "enter" => this.confirm_branch_name_dialog(window, cx),
+                _ => {}
+            }
+        }))
+        .child(
+            div()
+                .text_size(px(15.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(TEXT)
+                .child(title.clone()),
+        )
+        .child(field_row("Name", name_field, String::new()))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .when(!can_confirm, |row| row.opacity(0.4))
+                .child(button(
+                    "branch-name-cancel",
+                    "Cancel",
+                    TEXT,
+                    None,
+                    Some(BORDER),
+                    cx.listener(|this, _, window, cx| cancel(this, window, cx)),
+                ))
+                .child(button(
+                    "branch-name-confirm",
+                    confirm_label,
+                    rgb(0x11111b),
+                    Some(GREEN),
+                    None,
+                    cx.listener(|this, _, window, cx| this.confirm_branch_name_dialog(window, cx)),
                 )),
         )
 }

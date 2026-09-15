@@ -20,15 +20,20 @@ pub struct BranchInfo {
     pub behind: u32,
 }
 
-/// Lists local branches with current-branch markers and ahead/behind.
+/// Lists local and remote-tracking branches: locals first (git's `-a`
+/// order), each with current-branch markers and ahead/behind where an
+/// upstream exists.
 pub fn list(worktree: &Path) -> Result<Vec<BranchInfo>> {
-    // %(HEAD) = * for current, %(refname:short), %(upstream:track)
+    // %(HEAD) = * for current; %(refname) is the FULL name so locals and
+    // remotes are unambiguous (`refs/remotes/origin/main` vs a local
+    // branch literally named `origin/main`).
     let out = engine::run(
         worktree,
         &[
             "--no-optional-locks",
             "branch",
-            "--format=%(HEAD)%01%(refname:short)%01%(upstream:track)",
+            "-a",
+            "--format=%(HEAD)%01%(refname)%01%(upstream:track)",
         ],
     )?;
     let mut branches = Vec::new();
@@ -38,14 +43,32 @@ pub fn list(worktree: &Path) -> Result<Vec<BranchInfo>> {
         }
         let mut parts = line.splitn(3, '\u{1}');
         let head_marker = parts.next().unwrap_or("").trim();
-        let short = parts.next().unwrap_or("").to_string();
+        let refname = parts.next().unwrap_or("");
         let track = parts.next().unwrap_or("").to_string();
-        let (ahead, behind) = parse_track(&track);
+        let (is_remote, short) = match refname.strip_prefix("refs/heads/") {
+            Some(short) => (false, short.to_string()),
+            None => match refname.strip_prefix("refs/remotes/") {
+                // Skip the symbolic `origin/HEAD -> origin/main` entry.
+                Some(short) if short.ends_with(" -> ") || short.contains(" -> ") => continue,
+                Some(short) => (true, short.to_string()),
+                None => continue,
+            },
+        };
+        if short.is_empty() {
+            continue;
+        }
+        // Ahead/behind only applies to local branches' upstreams; a
+        // remote-tracking ref's own upstream tracking is noise.
+        let (ahead, behind) = if is_remote {
+            (0, 0)
+        } else {
+            parse_track(&track)
+        };
         branches.push(BranchInfo {
-            ref_name: short.clone(),
+            ref_name: refname.to_string(),
             short,
             is_current: head_marker == "*",
-            is_remote: false,
+            is_remote,
             ahead,
             behind,
         });
@@ -72,28 +95,32 @@ fn parse_track(track: &str) -> (u32, u32) {
 /// Creates a new branch at the current HEAD (does not switch).
 pub fn create(worktree: &Path, name: &str) -> Result<()> {
     validate_branch_name(name)?;
-    engine::run_trimmed(worktree, &["branch", name]).map(|_| ())
+    engine::run_trimmed(worktree, &["branch", "--", name]).map(|_| ())
 }
 
-/// Switches to an existing branch (or detached commit).
+/// Switches to an existing branch (or detached commit). No `--` here:
+/// after `--`, git checkout treats the argument as a PATH, not a ref.
 pub fn switch(worktree: &Path, target: &str) -> Result<()> {
+    validate_branch_name(target)?;
     engine::run_trimmed(worktree, &["checkout", "-q", target]).map(|_| ())
 }
 
 /// Renames a local branch.
 pub fn rename(worktree: &Path, old: &str, new: &str) -> Result<()> {
+    validate_branch_name(old)?;
     validate_branch_name(new)?;
-    engine::run_trimmed(worktree, &["branch", "-m", old, new]).map(|_| ())
+    engine::run_trimmed(worktree, &["branch", "-m", "--", old, new]).map(|_| ())
 }
 
 /// Deletes a local branch (refuses the current branch).
 pub fn delete(worktree: &Path, name: &str, current: &str) -> Result<()> {
+    validate_branch_name(name)?;
     if name == current {
         return Err(GitError {
             message: "cannot delete the current branch — switch to another branch first".into(),
         });
     }
-    engine::run_trimmed(worktree, &["branch", "-d", name]).map(|_| ())
+    engine::run_trimmed(worktree, &["branch", "-d", "--", name]).map(|_| ())
 }
 
 /// Branch names cannot start with `-` (option injection) or contain
@@ -111,73 +138,62 @@ fn validate_branch_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Merges a branch into the current branch. Returns the list of
-/// conflicted file paths (empty on success).
+/// Paths with unresolved merge conflicts (`git diff --name-only
+/// --diff-filter=U`).
+fn conflicted_files(worktree: &Path) -> Result<Vec<String>> {
+    let status = engine::run_bytes(
+        worktree,
+        &[
+            "--no-optional-locks",
+            "diff",
+            "--name-only",
+            "--diff-filter=U",
+        ],
+    )?;
+    Ok(status
+        .split(|b| *b == b'\n')
+        .filter(|r| !r.is_empty())
+        .map(|r| String::from_utf8_lossy(r).into_owned())
+        .collect())
+}
+
+/// Merges a branch into the current branch. On conflict the conflicted
+/// paths are returned as the `Ok` payload AND the merge is aborted —
+/// there is no continue flow in this UI, and a wedged MERGE_HEAD would
+/// block every later operation; aborting restores the pre-merge state.
 pub fn merge(worktree: &Path, branch: &str) -> Result<Vec<String>> {
-    let result = engine::run_trimmed(worktree, &["merge", "--no-edit", branch]);
+    validate_branch_name(branch)?;
+    let result = engine::run_trimmed(worktree, &["merge", "--no-edit", "--", branch]);
     match result {
         Ok(_) => Ok(Vec::new()),
         Err(e) => {
-            // Check for conflicts: git exits non-zero with CONFLICT markers
-            let status = engine::run_bytes(
-                worktree,
-                &[
-                    "--no-optional-locks",
-                    "diff",
-                    "--name-only",
-                    "--diff-filter=U",
-                ],
-            )?;
-            let conflicts: Vec<String> = status
-                .split(|b| *b == b'\n')
-                .filter(|r| !r.is_empty())
-                .map(|r| String::from_utf8_lossy(r).into_owned())
-                .collect();
+            let conflicts = conflicted_files(worktree)?;
             if conflicts.is_empty() {
                 // Not a conflict — propagate the original error.
                 Err(e)
             } else {
-                Err(GitError {
-                    message: format!(
-                        "merge conflicts in {} files — resolve them in the Working Copy section",
-                        conflicts.len()
-                    ),
-                })
+                let _ = engine::run_trimmed(worktree, &["merge", "--abort"]);
+                Ok(conflicts)
             }
         }
     }
 }
 
-/// Rebases the current branch onto `onto`. Returns conflicted file paths
-/// on failure (same as merge).
+/// Rebases the current branch onto `onto`. On conflict the conflicted
+/// paths are returned as the `Ok` payload and the rebase is aborted
+/// (same rationale as `merge`: no continue flow, never stay mid-rebase).
 pub fn rebase(worktree: &Path, onto: &str) -> Result<Vec<String>> {
-    let result = engine::run_trimmed(worktree, &["rebase", onto]);
+    validate_branch_name(onto)?;
+    let result = engine::run_trimmed(worktree, &["rebase", "--", onto]);
     match result {
         Ok(_) => Ok(Vec::new()),
         Err(e) => {
-            let status = engine::run_bytes(
-                worktree,
-                &[
-                    "--no-optional-locks",
-                    "diff",
-                    "--name-only",
-                    "--diff-filter=U",
-                ],
-            )?;
-            let conflicts: Vec<String> = status
-                .split(|b| *b == b'\n')
-                .filter(|r| !r.is_empty())
-                .map(|r| String::from_utf8_lossy(r).into_owned())
-                .collect();
+            let conflicts = conflicted_files(worktree)?;
             if conflicts.is_empty() {
                 Err(e)
             } else {
-                Err(GitError {
-                    message: format!(
-                        "rebase conflicts in {} files — resolve them in the Working Copy section",
-                        conflicts.len()
-                    ),
-                })
+                let _ = engine::run_trimmed(worktree, &["rebase", "--abort"]);
+                Ok(conflicts)
             }
         }
     }
