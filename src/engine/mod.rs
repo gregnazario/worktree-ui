@@ -29,6 +29,7 @@ pub type Result<T> = std::result::Result<T, GitError>;
 
 pub mod commit;
 pub mod diff;
+pub mod history;
 pub mod mutate;
 pub mod working_copy;
 

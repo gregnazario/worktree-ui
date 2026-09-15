@@ -1,11 +1,12 @@
 use crate::dialogs::{self, DialogState};
+use crate::history_store::HistoryStore;
 use crate::model::WorktreeEntry;
 use crate::model::WorktreeStatus;
 use crate::platform;
 use crate::store::WorktreeStore;
 use crate::terminal;
 use crate::text_field::TextField;
-use crate::views::working_copy;
+use crate::views::{history as history_view, working_copy};
 use crate::wc_store::{Pane, WorkingCopyStore};
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -62,6 +63,13 @@ pub(crate) fn open_terminal(path: &std::path::Path) {
     terminal::open_in_terminal(path);
 }
 
+/// Which section of the open detail view is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Section {
+    WorkingCopy,
+    History,
+}
+
 pub struct RootView {
     pub store: Entity<WorktreeStore>,
     pub search: Entity<TextField>,
@@ -80,6 +88,28 @@ pub struct RootView {
     pub detail_focus: FocusHandle,
     pub detail_list_focus: FocusHandle,
     pub detail_diff_focus: FocusHandle,
+    /// Active section of the open detail view.
+    pub section: Section,
+    /// History section store (created on first entry, dropped with the
+    /// drill-in).
+    pub history: Option<Entity<HistoryStore>>,
+    /// Observation of the history store: checkout / worktree-add actions
+    /// flag `mutated`, which refreshes the home worktree list.
+    pub history_subscription: Option<gpui::Subscription>,
+    /// Set when working-copy mutations make the history log stale; the
+    /// next entry into the History section revalidates it.
+    pub history_stale: bool,
+    pub history_list_focus: FocusHandle,
+    pub history_files_focus: FocusHandle,
+    /// Scroll position of the history files chip strip, so keyboard file
+    /// selection keeps the selected chip visible.
+    pub history_files_scroll: gpui::ScrollHandle,
+    /// Selected commit the files pane last saw; a change (different
+    /// commit) resets `history_files_scroll`. Load-more appends don't
+    /// change the selected row and must not reset the scroll.
+    pub history_files_scroll_generation: Option<usize>,
+    /// Scroll position of the history commit list (virtualized).
+    pub history_list_scroll: gpui::UniformListScrollHandle,
     /// Scroll position of the diff pane. Keyboard hunk movement scrolls
     /// the hovered hunk into view through it — without this, `down` on a
     /// tall diff moves the cursor to a hunk that is rendered but scrolled
@@ -181,6 +211,11 @@ impl RootView {
         let detail_focus = cx.focus_handle();
         let detail_list_focus = cx.focus_handle();
         let detail_diff_focus = cx.focus_handle();
+        let history_list_focus = cx.focus_handle();
+        let history_files_focus = cx.focus_handle();
+        let history_files_scroll = gpui::ScrollHandle::new();
+        let history_files_scroll_generation = None;
+        let history_list_scroll = gpui::UniformListScrollHandle::new();
         let diff_scroll = gpui::ScrollHandle::new();
         // Forced mismatch: the first detail land of any drill-in runs the
         // reset branch, so no previous session's scroll offset can leak in.
@@ -199,6 +234,15 @@ impl RootView {
             detail_focus,
             detail_list_focus,
             detail_diff_focus,
+            section: Section::WorkingCopy,
+            history: None,
+            history_subscription: None,
+            history_stale: false,
+            history_list_focus,
+            history_files_focus,
+            history_files_scroll,
+            history_files_scroll_generation,
+            history_list_scroll,
             diff_scroll,
             diff_scroll_generation,
             diff_scroll_key,
@@ -464,6 +508,10 @@ impl RootView {
         let Some(entry) = self.store.read(cx).selected_entry().cloned() else {
             return;
         };
+        self.section = Section::WorkingCopy;
+        self.history = None;
+        self.history_subscription = None;
+        self.history_stale = false;
         let wc = WorkingCopyStore::new(entry.path.clone(), cx);
         // One successful mutation inside the detail view must refresh the home
         // worktree list (status, ahead/behind, dirty badge all change). The
@@ -471,8 +519,35 @@ impl RootView {
         // observer would otherwise accumulate (dropped stores make old observers
         // inert but never remove their subscription entries).
         self.detail_subscription = Some(cx.observe(&wc, move |this, wc, cx| {
+            // Mirror the mutation state FIRST (success or failure): an
+            // already-open History section must release its `wc_mutating`
+            // refusal as soon as the working-copy operation ends, not
+            // only when the user re-enters the section.
+            let mutating = wc.read(cx).mutating;
+            if let Some(hs) = &this.history {
+                hs.update(cx, |store, _cx| store.wc_mutating = mutating);
+            }
             if wc.update(cx, |store, _cx| store.take_mutated()) {
                 this.store.update(cx, |store, cx| store.refresh(cx));
+                // Only a COMMIT changes reachable history (stage/unstage/
+                // discard move things between index and worktree): only
+                // that makes the History section's log stale.
+                if wc.update(cx, |store, _cx| store.take_history_changed()) {
+                    // If History is already on screen, refresh the log
+                    // NOW instead of leaving it stale until re-entry.
+                    if this.section == Section::History {
+                        if let Some(hs) = &this.history {
+                            let busy = hs.read(cx).busy();
+                            if !busy {
+                                hs.update(cx, |h, cx| h.refresh(cx));
+                            } else {
+                                this.history_stale = true;
+                            }
+                        }
+                    } else {
+                        this.history_stale = true;
+                    }
+                }
             }
             cx.notify();
         }));
@@ -484,6 +559,35 @@ impl RootView {
     /// Returns to the home list: refocus it and refresh, since the user may
     /// have mutated the worktree from the detail view.
     pub fn close_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // An in-flight history action (checkout / worktree add) would
+        // lose its completion when the store drops — the home list would
+        // go stale. Keep the drill-in until it lands.
+        if let Some(hs) = &self.history {
+            if hs.read(cx).busy() {
+                // Surface the blockage in the VISIBLE section: pressing
+                // esc from the Working Copy section would otherwise show
+                // nothing (the History view isn't rendered there). Name
+                // the actual in-flight action.
+                let what = hs.read(cx).action_name().unwrap_or("history action");
+                let msg = format!("Busy — {what} is finishing in this worktree");
+                if self.section == Section::WorkingCopy {
+                    if let Some(wc) = &self.detail {
+                        wc.update(cx, |store, cx| {
+                            store.message = Some(msg);
+                            store.note_transient_hint();
+                            cx.notify();
+                        });
+                    }
+                } else {
+                    hs.update(cx, |store, cx| {
+                        store.message = Some(msg);
+                        store.note_transient_hint();
+                        cx.notify();
+                    });
+                }
+                return;
+            }
+        }
         // A busy detail view means an operation is in flight — possibly the
         // commit editor, which can run for minutes. Dropping the store now
         // would orphan it: re-drilling opens a fresh, idle store while the
@@ -494,17 +598,53 @@ impl RootView {
         // forgotten editor can never keyboard-lock the view until quit.
         let busy = self.detail.as_ref().is_some_and(|wc| wc.read(cx).mutating);
         if busy {
-            if let Some(wc) = &self.detail {
-                if wc.read(cx).commit_editor_active() {
+            // A commit editor waits on the USER (an editor that can run
+            // for minutes) — esc abandons it regardless of which section
+            // is showing.
+            let editor_active = self
+                .detail
+                .as_ref()
+                .is_some_and(|wc| wc.read(cx).commit_editor_active());
+            if editor_active {
+                if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| store.abandon_commit(cx));
-                } else {
-                    wc.update(cx, |store, cx| store.busy_message(cx));
                 }
+                // Mirror the abandon feedback into the History store when
+                // the user is in the History section.
+                if self.section == Section::History {
+                    if let Some(hs) = &self.history {
+                        hs.update(cx, |store, cx| {
+                            store.message =
+                                Some("Commit editor abandoned — press r to refresh".into());
+                            store.note_transient_hint();
+                            cx.notify();
+                        });
+                    }
+                }
+                return;
+            }
+            // Write the hint to the VISIBLE section's store: a user
+            // sitting in History would otherwise see nothing.
+            if self.section == Section::History {
+                if let Some(hs) = &self.history {
+                    hs.update(cx, |store, cx| store.busy_message(cx));
+                }
+            } else if let Some(wc) = &self.detail {
+                wc.update(cx, |store, cx| store.busy_message(cx));
             }
             return;
         }
         // Drop the observer first: a dropped Subscription unsubscribes.
         self.detail_subscription = None;
+        self.history = None;
+        self.history_subscription = None;
+        self.section = Section::WorkingCopy;
+        // A fresh handle: the next drill-in's History opens at the top
+        // instead of inheriting this session's scroll offset.
+        self.history_list_scroll = gpui::UniformListScrollHandle::new();
+        self.history_files_scroll = gpui::ScrollHandle::new();
+        self.history_files_scroll_generation = None;
+        self.history_stale = false;
         self.detail = None;
         // Re-arm the diff-pane scroll bookkeeping: each store's detail
         // generation restarts at 0, so a later drill-in could otherwise
@@ -523,6 +663,53 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Route by section FIRST: the History section's focused handles
+        // (history_list/history_files) are not the working-copy handles
+        // checked below, and its container is a different subtree.
+        if self.section == Section::History {
+            return self.history_keydown(ks, window, cx);
+        }
+        // A history action (checkout / worktree add) in flight races the
+        // Working Copy keys in the same worktree (index.lock contention,
+        // staging post-checkout content): refuse with an explanation.
+        if let Some(hs) = &self.history {
+            if hs.read(cx).busy() {
+                // Navigation/terminal/section-switch stay live (none run a
+                // git command); only worktree-MUTATING keys (s / discard /
+                // commit / r) are refused while the action finishes.
+                match ks.key.as_str() {
+                    "t" => {
+                        if let Some(wc) = &self.detail {
+                            let path = wc.read(cx).worktree.clone();
+                            open_terminal(&path);
+                        }
+                        return;
+                    }
+                    "2" => {
+                        self.open_history(window, cx);
+                        return;
+                    }
+                    "up" | "down" | "tab" | "escape" | "n" | "1" => {
+                        // Pure UI navigation: handle in the normal router
+                        // (which doesn't run git commands for these keys).
+                    }
+                    _ => {
+                        // Everything else this section binds mutates the
+                        // worktree (s/S/d/c) or re-runs git (r): refuse.
+                        if let Some(wc) = &self.detail {
+                            wc.update(cx, |store, cx| {
+                                store.message = Some(
+                                    "Busy — a history action is finishing in this worktree".into(),
+                                );
+                                store.note_transient_hint();
+                                cx.notify();
+                            });
+                        }
+                        return;
+                    }
+                }
+            }
+        }
         let list_focused = self.detail_list_focus.is_focused(window);
         let diff_focused = self.detail_diff_focus.is_focused(window);
         let container_focused = self.detail_focus.is_focused(window);
@@ -631,8 +818,262 @@ impl RootView {
                     wc.update(cx, |store, cx| store.stage_hunk(cx));
                 }
             }
+            // Section switching: 2 opens History (1 is a no-op here).
+            // open_history is idempotent for an existing store and
+            // already focuses the remembered pane.
+            "2" => self.open_history(window, cx),
             _ => {}
         }
+    }
+
+    /// Key routing for the History section (see `open_history`).
+    fn history_keydown(
+        &mut self,
+        ks: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dialog.is_open() {
+            return; // dialogs handle their own keys (same as detail_keydown)
+        }
+        let Some(hs) = self.history.clone() else {
+            return;
+        };
+        let list_focused = self.history_list_focus.is_focused(window);
+        let files_focused = self.history_files_focus.is_focused(window);
+        let container_focused = self.detail_focus.is_focused(window);
+        if !list_focused && !files_focused && !container_focused {
+            return;
+        }
+        // Keys that work on every focused surface in this section.
+        match ks.key.as_str() {
+            "escape" => return self.close_detail(window, cx),
+            "1" => {
+                self.section = Section::WorkingCopy;
+                // Restore the Working Copy section's remembered pane focus.
+                if let Some(wc) = &self.detail {
+                    let pane = wc.read(cx).pane;
+                    if pane == crate::wc_store::Pane::Diff {
+                        window.focus(&self.detail_diff_focus);
+                    } else {
+                        window.focus(&self.detail_list_focus);
+                    }
+                } else {
+                    window.focus(&self.detail_list_focus);
+                }
+                cx.notify();
+                return;
+            }
+            "t" => {
+                let path = hs.read(cx).worktree.clone();
+                open_terminal(&path);
+                return;
+            }
+            _ => {}
+        }
+        match ks.key.as_str() {
+            // Re-entry retries a pending revalidation skipped while an
+            // action was in flight (open_history is idempotent here).
+            "2" => self.open_history(window, cx),
+            // r retries failed loads and reloads empty repos, so it must
+            // NOT be gated by action_blocker (whose failed-load message
+            // says "press r to retry" — that would block the very key it
+            // advertises). Gate only on busy/retrying: a mid-flight
+            // checkout must not spawn a redundant concurrent log.
+            "r" => hs.update(cx, |h, cx| {
+                if h.busy() || h.retrying {
+                    h.busy_message(cx);
+                    cx.notify();
+                } else {
+                    h.refresh(cx);
+                }
+            }),
+            "up" if list_focused => {
+                // First load still in flight (or failed): explain instead
+                // of silently no-oping.
+                if hs.read(cx).commits.is_empty() {
+                    if let Some(blocked) = hs.read(cx).action_blocker() {
+                        hs.update(cx, |h, cx| {
+                            h.message = Some(blocked);
+                            h.note_transient_hint();
+                            cx.notify();
+                        });
+                    }
+                    return;
+                }
+                let pos = hs.update(cx, |h, cx| {
+                    h.select_prev(cx);
+                    h.selected
+                });
+                // Keep the selected commit on screen as the cursor moves.
+                if let Some(pos) = pos {
+                    self.history_list_scroll
+                        .scroll_to_item(pos, gpui::ScrollStrategy::Center);
+                }
+            }
+            "down" if list_focused => {
+                if hs.read(cx).commits.is_empty() {
+                    if let Some(blocked) = hs.read(cx).action_blocker() {
+                        hs.update(cx, |h, cx| {
+                            h.message = Some(blocked);
+                            h.note_transient_hint();
+                            cx.notify();
+                        });
+                    }
+                    return;
+                }
+                let pos = hs.update(cx, |h, cx| {
+                    h.select_next(cx);
+                    h.selected
+                });
+                if let Some(pos) = pos {
+                    self.history_list_scroll
+                        .scroll_to_item(pos, gpui::ScrollStrategy::Center);
+                }
+            }
+            "up" if files_focused => {
+                hs.update(cx, |h, cx| h.select_file_prev(cx));
+                if let Some(i) = hs.read(cx).selected_file {
+                    self.history_files_scroll.scroll_to_item(i);
+                }
+            }
+            "down" if files_focused => {
+                hs.update(cx, |h, cx| h.select_file_next(cx));
+                if let Some(i) = hs.read(cx).selected_file {
+                    self.history_files_scroll.scroll_to_item(i);
+                }
+            }
+            "tab" if list_focused => {
+                hs.update(cx, |h, cx| h.toggle_pane(cx));
+                window.focus(&self.history_files_focus);
+            }
+            "tab" if files_focused => {
+                hs.update(cx, |h, cx| h.toggle_pane(cx));
+                window.focus(&self.history_list_focus);
+            }
+            // Actions explain themselves when swallowed: busy (an action
+            // in flight), still loading, a failed first load, or an empty
+            // repo — each state gets its own accurate message.
+            // Action keys work from any history-section surface; when the
+            // preconditions aren't met, the blocker explains why instead
+            // of silently dropping the key.
+            "y" => hs.update(cx, |h, cx| {
+                if let Some(blocked) = h.action_blocker() {
+                    h.message = Some(blocked);
+                    h.note_transient_hint();
+                } else {
+                    h.copy_hash(cx);
+                }
+                cx.notify();
+            }),
+            "x" => hs.update(cx, |h, cx| {
+                if let Some(blocked) = h.action_blocker() {
+                    h.message = Some(blocked);
+                    h.note_transient_hint();
+                } else {
+                    h.checkout(cx);
+                }
+                cx.notify();
+            }),
+            "w" => hs.update(cx, |h, cx| {
+                if let Some(blocked) = h.action_blocker() {
+                    h.message = Some(blocked);
+                    h.note_transient_hint();
+                } else {
+                    h.open_worktree(cx);
+                }
+                cx.notify();
+            }),
+            // gpui normalizes capitals to lowercase + shift.
+            "l" if ks.modifiers.shift => hs.update(cx, |h, cx| {
+                if let Some(blocked) = h.action_blocker() {
+                    h.message = Some(blocked);
+                    h.note_transient_hint();
+                } else if !h.has_more {
+                    h.message = Some("No older commits to load".into());
+                    h.note_transient_hint();
+                } else {
+                    h.load_more(cx);
+                }
+                cx.notify();
+            }),
+            _ => {}
+        }
+    }
+
+    /// Opens (or re-focuses) the History section of the open detail view.
+    pub fn open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_open() {
+            return;
+        }
+        self.section = Section::History;
+        if let Some(hs) = &self.history {
+            // Revalidate only when the working copy mutated since the last
+            // visit — an unconditional refetch on every tab press costs a
+            // full-depth log run for nothing.
+            // Clear the flag only when the refresh actually runs; while
+            // an action is in flight the pending revalidation must stay
+            // pending, not vanish.
+            if self.history_stale && !hs.read(cx).busy() {
+                self.history_stale = false;
+                hs.update(cx, |h, cx| h.refresh(cx));
+            }
+            // Restore the section's remembered pane focus.
+            if hs.read(cx).pane == crate::history_store::Pane::Files {
+                window.focus(&self.history_files_focus);
+            } else {
+                window.focus(&self.history_list_focus);
+            }
+            // Mirror the Working Copy store's mutation state: history
+            // actions must not race an in-flight stage/discard/commit.
+            let wc_mutating = self.detail.as_ref().is_some_and(|wc| wc.read(cx).mutating);
+            hs.update(cx, |store, _cx| store.wc_mutating = wc_mutating);
+            cx.notify();
+            return;
+        }
+        let Some(entry) = self.store.read(cx).selected_entry().cloned() else {
+            self.section = Section::WorkingCopy;
+            return;
+        };
+        let hs = HistoryStore::new(entry.path.clone(), cx);
+        self.history_subscription = Some(cx.observe(&hs, move |this, hs, cx| {
+            // Mirror the history action state into the wc store BOTH ways:
+            // its mutating entry points must refuse while a checkout/
+            // worktree-add runs, regardless of which entry point (keys,
+            // mouse, future callers) launched them.
+            let busy = hs.read(cx).busy();
+            if let Some(wc) = &this.detail {
+                wc.update(cx, |store, _cx| store.history_busy = busy);
+            }
+            let mutated = hs.update(cx, |store, _cx| store.take_mutated());
+            let files_changed = hs.update(cx, |store, _cx| store.take_worktree_files_changed());
+            if mutated {
+                this.store.update(cx, |store, cx| store.refresh(cx));
+                // Only a CHECKOUT rewrites this worktree's files (worktree
+                // add touches a different directory) — refresh section 1
+                // selectively so its in-progress state isn't churned.
+                if files_changed {
+                    if let Some(wc) = &this.detail {
+                        wc.update(cx, |store, cx| store.refresh(cx));
+                    }
+                    // Checkout's completion re-ran the log: the flag is
+                    // satisfied. A worktree add did NOT re-run it, so a
+                    // pending revalidation must stay pending.
+                    this.history_stale = false;
+                }
+            }
+            cx.notify();
+        }));
+        // The fresh store just loaded the current log: a stale flag set
+        // by an earlier working-copy mutation no longer applies.
+        self.history_stale = false;
+        // Mirror the Working Copy store's mutation state for the new
+        // store too (the re-entry path syncs it for existing stores).
+        let wc_mutating = self.detail.as_ref().is_some_and(|wc| wc.read(cx).mutating);
+        hs.update(cx, |store, _cx| store.wc_mutating = wc_mutating);
+        self.history = Some(hs);
+        window.focus(&self.history_list_focus);
+        cx.notify();
     }
 }
 
@@ -856,7 +1297,13 @@ impl Render for RootView {
             );
 
             if self.detail.is_some() {
-                main.child(working_copy::render(self, window, cx).into_any_element())
+                let section = match self.section {
+                    Section::WorkingCopy => {
+                        working_copy::render(self, window, cx).into_any_element()
+                    }
+                    Section::History => history_view::render(self, window, cx).into_any_element(),
+                };
+                main.child(section)
             } else {
                 main.child(
                     div()
@@ -1594,6 +2041,98 @@ mod tests {
         vcx.run_until_parked();
         view.update(&mut vcx.cx, |root, _cx| {
             assert!(root.detail.is_none(), "idle detail closes normally");
+        });
+    }
+
+    #[gpui::test]
+    fn two_opens_history_one_returns_to_working_copy(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "changed").unwrap();
+        sh(&repo, &["git", "add", "f.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "second commit"]);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert_eq!(root.section, Section::WorkingCopy);
+            assert!(root.history.is_none());
+        });
+        vcx.simulate_keystrokes("2");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            assert_eq!(root.section, Section::History);
+            let hs = root.history.as_ref().expect("history store created");
+            assert!(!hs.read(cx).commits.is_empty(), "log loaded");
+        });
+        // The history list has focus; down moves the commit selection.
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let hs = root.history.as_ref().unwrap().read(cx);
+            assert_eq!(hs.selected, Some(1), "down moved the commit selection");
+        });
+        vcx.simulate_keystrokes("1");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert_eq!(root.section, Section::WorkingCopy);
+            assert!(root.detail.is_some(), "still drilled in");
+        });
+    }
+
+    #[gpui::test]
+    fn history_files_pane_loads_the_commit_diff(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("h.txt"), "one").unwrap();
+        sh(&repo, &["git", "add", "h.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "add h"]);
+        std::fs::write(repo.join("h.txt"), "two").unwrap();
+        sh(&repo, &["git", "add", "h.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "edit h"]);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("2");
+        vcx.run_until_parked();
+        // Newest commit ("edit h") is pre-selected; tab to the files pane
+        // and walk to its only file.
+        vcx.simulate_keystrokes("tab");
+        // The commit-files load debounces on a 60ms background timer:
+        // advance the test clock past it, then let the chain complete.
+        vcx.cx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let hs = root.history.as_ref().unwrap().read(cx);
+            assert_eq!(hs.pane, crate::history_store::Pane::Files);
+            let files = hs.files.as_ref().expect("files loaded");
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].letter, 'M');
+            assert_eq!(files[0].path, "h.txt");
+        });
+        // The per-file diff load runs after ANOTHER debounce timer:
+        // advance the clock again, then assert on the loaded diff.
+        vcx.cx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let hs = root.history.as_ref().unwrap().read(cx);
+            let diff = hs.file_diff.as_ref().expect("diff loaded");
+            assert!(diff
+                .hunks
+                .iter()
+                .any(|h| h.lines.iter().any(
+                    |l| l.kind == crate::engine::diff::DiffLineKind::Add && l.content == "two"
+                )));
         });
     }
 

@@ -95,6 +95,7 @@ Detail view (per worktree):
 
 | Key | Action |
 | --- | --- |
+| `1` / `2` | Switch section: Working Copy ↔ History |
 | `up` / `down` | Move file selection (diff pane focused: move hunk cursor) |
 | `tab` | Toggle file list ↔ diff pane |
 | `s` | Stage / unstage selected file (diff pane focused: stage hovered hunk) |
@@ -104,6 +105,18 @@ Detail view (per worktree):
 | `t` | Open worktree in terminal |
 | `r` | Refresh working copy |
 | `esc` | Back to worktree list |
+
+History section (`2` from the detail view):
+
+| Key | Action |
+| --- | --- |
+| `up` / `down` | Move commit selection (files pane focused: move file selection) |
+| `tab` | Toggle commit list ↔ commit files |
+| `y` | Copy the selected commit's full hash to the clipboard |
+| `x` | Check out the selected commit (detached; refused while the working copy has changes) |
+| `w` | Open a new worktree at the selected commit |
+| `L` | Load 500 more commits |
+| `r` / `t` / `esc` | Refresh / terminal / back — same as the Working Copy section |
 
 ## Working Copy
 
