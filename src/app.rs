@@ -1180,6 +1180,10 @@ impl RootView {
             "p" => bs.update(cx, |h, cx| h.stash_pop(cx)),
             "a" => bs.update(cx, |h, cx| h.stash_apply(cx)),
             "D" => bs.update(cx, |h, cx| h.stash_drop(cx)),
+            // Remote actions (operate on the CURRENT branch).
+            "f" => bs.update(cx, |h, cx| h.fetch_remotes(cx)),
+            "P" => bs.update(cx, |h, cx| h.push_current(cx)),
+            "l" => bs.update(cx, |h, cx| h.pull_current(cx)),
             _ => {}
         }
     }

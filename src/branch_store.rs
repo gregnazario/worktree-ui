@@ -2,7 +2,7 @@
 //! list, stash entries, and the branch/stash actions. Same async
 //! discipline as the other stores.
 
-use crate::engine::{branches, stash};
+use crate::engine::{branches, remotes, stash};
 use gpui::{App, AppContext, Context, Entity};
 use std::path::PathBuf;
 
@@ -648,6 +648,122 @@ impl BranchStore {
                 match result {
                     Ok(()) => {
                         store.message = Some(format!("Dropped {display_ref}"));
+                        store.refresh(cx);
+                    }
+                    Err(e) => {
+                        store.message = Some(e.message);
+                        store.busy_hint = true;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Fetches all remotes with prune.
+    pub fn fetch_remotes(&mut self, cx: &mut Context<Self>) {
+        if !self.ready_for_action(cx) {
+            return;
+        }
+        let worktree = self.worktree.clone();
+        self.busy = true;
+        self.message = Some("Fetching…".into());
+        self.note_transient_hint();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { remotes::fetch(&worktree) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.busy = false;
+                match result {
+                    Ok(()) => {
+                        store.message = Some("Fetched".into());
+                        store.refresh(cx);
+                    }
+                    Err(e) => {
+                        store.message = Some(e.message);
+                        store.busy_hint = true;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Pushes the CURRENT branch to the remote its upstream tracks
+    /// (`--set-upstream` on first push; a re-push just reconfirms it).
+    pub fn push_current(&mut self, cx: &mut Context<Self>) {
+        if !self.ready_for_action(cx) {
+            return;
+        }
+        let Some(current) = self
+            .branches
+            .iter()
+            .find(|b| b.is_current && !b.is_remote)
+            .map(|b| b.short.clone())
+        else {
+            self.message = Some("No current branch to push (detached HEAD?)".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        };
+        let worktree = self.worktree.clone();
+        self.busy = true;
+        self.message = Some(format!("Pushing {current}…"));
+        self.note_transient_hint();
+        cx.notify();
+        let display_name = current.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { remotes::push(&worktree, &current, true) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.busy = false;
+                match result {
+                    Ok(()) => {
+                        store.message = Some(format!("Pushed {display_name}"));
+                        store.refresh(cx);
+                    }
+                    Err(e) => {
+                        store.message = Some(e.message);
+                        store.busy_hint = true;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Pulls the current branch's upstream with --ff-only.
+    pub fn pull_current(&mut self, cx: &mut Context<Self>) {
+        if !self.ready_for_action(cx) {
+            return;
+        }
+        let worktree = self.worktree.clone();
+        self.busy = true;
+        self.message = Some("Pulling…".into());
+        self.note_transient_hint();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { remotes::pull(&worktree) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.busy = false;
+                match result {
+                    Ok(()) => {
+                        store.mutated = true;
+                        store.message = Some("Pulled".into());
                         store.refresh(cx);
                     }
                     Err(e) => {
