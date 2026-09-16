@@ -5,7 +5,7 @@
 //! the background executor, loads are guarded by a detail-generation
 //! counter, and every refusal explains itself.
 
-use crate::engine::{diff, history};
+use crate::engine::{diff, history, rewrite};
 use gpui::{App, AppContext, Context, Entity};
 use std::path::PathBuf;
 
@@ -16,6 +16,15 @@ pub const HISTORY_BATCH: usize = 500;
 pub enum Pane {
     Commits,
     Files,
+}
+
+/// One editable row of the interactive-rebase dialog: the todo applies
+/// `oid` (displayed as `short` + `subject`), oldest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RebasePlanEntry {
+    pub oid: String,
+    pub short: String,
+    pub subject: String,
 }
 
 pub struct HistoryStore {
@@ -747,6 +756,221 @@ impl HistoryStore {
     /// busiest commit) — the view sizes the commit column from it.
     pub fn graph_width(&self) -> usize {
         self.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0)
+    }
+
+    /// `p`: cherry-picks the selected commit onto this worktree's HEAD.
+    /// On conflict the engine aborts and the conflicted paths are
+    /// reported — the repo is never left mid-sequence.
+    pub fn cherry_pick(&mut self, cx: &mut Context<Self>) {
+        if let Some(blocked) = self.rewrite_blocker() {
+            self.message = Some(blocked);
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        let Some(commit) = self.selected.and_then(|i| self.commits.get(i)) else {
+            return;
+        };
+        let oid = commit.hash.clone();
+        let short = commit.short.clone();
+        let worktree = self.worktree.clone();
+        self.message = Some(format!("Cherry-picking {short}…"));
+        self.note_transient_hint();
+        self.action_in_flight = true;
+        self.action_kind = Some("cherry-pick");
+        cx.notify();
+        let display_short = short.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { rewrite::cherry_pick(&worktree, &oid) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.action_in_flight = false;
+                store.action_kind = None;
+                store.finish_rewrite(
+                    result,
+                    |conflicts| {
+                        if conflicts.is_empty() {
+                            format!("Cherry-picked {display_short}")
+                        } else {
+                            format!(
+                            "Cherry-pick conflicts in {} — cherry-pick aborted, worktree restored",
+                            conflicts.join(", ")
+                        )
+                        }
+                    },
+                    cx,
+                );
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `v`: reverts the selected commit with an auto-generated revert
+    /// commit.
+    pub fn revert(&mut self, cx: &mut Context<Self>) {
+        if let Some(blocked) = self.rewrite_blocker() {
+            self.message = Some(blocked);
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        let Some(commit) = self.selected.and_then(|i| self.commits.get(i)) else {
+            return;
+        };
+        let oid = commit.hash.clone();
+        let short = commit.short.clone();
+        let worktree = self.worktree.clone();
+        self.message = Some(format!("Reverting {short}…"));
+        self.note_transient_hint();
+        self.action_in_flight = true;
+        self.action_kind = Some("revert");
+        cx.notify();
+        let display_short = short.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { rewrite::revert(&worktree, &oid) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.action_in_flight = false;
+                store.action_kind = None;
+                store.finish_rewrite(
+                    result,
+                    |conflicts| {
+                        if conflicts.is_empty() {
+                            format!("Reverted {display_short}")
+                        } else {
+                            format!(
+                                "Revert conflicts in {} — revert aborted, worktree restored",
+                                conflicts.join(", ")
+                            )
+                        }
+                    },
+                    cx,
+                );
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The interactive-rebase plan for the selected commit: rewrite it
+    /// and everything above it (oldest first); the base is the selected
+    /// commit's first parent. None when there is no selection, the
+    /// selection is a merge or the root commit (v1 rebases first-parent
+    /// lines only), or the log is still loading.
+    pub fn rebase_plan(&self) -> Option<(String, Vec<RebasePlanEntry>)> {
+        let sel = self.selected?;
+        let commit = self.commits.get(sel)?;
+        if commit.parents.len() != 1 {
+            return None;
+        }
+        let base = commit.parents[0].clone();
+        // Rows are newest-first: selected..=0 reversed is oldest-first.
+        let entries = self.commits[..=sel]
+            .iter()
+            .rev()
+            .map(|c| RebasePlanEntry {
+                oid: c.hash.clone(),
+                short: c.short.clone(),
+                subject: c.subject.clone(),
+            })
+            .collect();
+        Some((base, entries))
+    }
+
+    /// Runs the confirmed rebase todo from the dialog.
+    pub fn run_rebase(
+        &mut self,
+        base: String,
+        steps: Vec<rewrite::TodoStep>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(blocked) = self.rewrite_blocker() {
+            self.message = Some(blocked);
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        let count = steps.len();
+        let worktree = self.worktree.clone();
+        self.message = Some(format!("Rebasing {count} commits…"));
+        self.note_transient_hint();
+        self.action_in_flight = true;
+        self.action_kind = Some("rebase");
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { rewrite::run_rebase_todo(&worktree, &base, &steps) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.action_in_flight = false;
+                store.action_kind = None;
+                store.finish_rewrite(
+                    result,
+                    |conflicts| {
+                        if conflicts.is_empty() {
+                            format!("Rebased {count} commits")
+                        } else {
+                            format!(
+                                "Rebase conflicts in {} — rebase aborted, worktree restored",
+                                conflicts.join(", ")
+                            )
+                        }
+                    },
+                    cx,
+                );
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shared refusal check for the rewrite actions: the centralized
+    /// action blocker (busy / loading / empty log) plus the
+    /// working-copy mirror.
+    fn rewrite_blocker(&self) -> Option<String> {
+        if let Some(blocked) = self.action_blocker() {
+            return Some(blocked);
+        }
+        if self.wc_mutating {
+            return Some("Busy — finish the working-copy operation first".into());
+        }
+        None
+    }
+
+    /// Completion shared by the rewrite actions: success and
+    /// conflict-abort both rewrote history and possibly files — refresh
+    /// the log and flag both mutations. `describe` turns the engine's
+    /// conflict list into the user-facing message.
+    fn finish_rewrite(
+        &mut self,
+        result: crate::engine::Result<Vec<String>>,
+        describe: impl Fn(&[String]) -> String,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(conflicts) => {
+                self.message = Some(describe(&conflicts));
+                self.mutated = true;
+                self.worktree_files_changed = true;
+                // The result message must survive this action's own
+                // refresh (the busy_hint convention: success disarms).
+                self.busy_hint = false;
+                self.refresh(cx);
+            }
+            Err(e) => {
+                self.message = Some(e.message);
+                self.busy_hint = true;
+            }
+        }
     }
 
     /// Why an action key currently cannot run, or None when it can.

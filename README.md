@@ -114,6 +114,9 @@ History section (`2` from the detail view):
 | `tab` | Toggle commit list ↔ commit files |
 | `y` | Copy the selected commit's full hash to the clipboard |
 | `x` | Check out the selected commit (detached; refused while the working copy has changes) |
+| `p` | Cherry-pick the selected commit onto this branch |
+| `v` | Revert the selected commit (creates a revert commit) |
+| `R` | Interactive rebase from the selected commit to HEAD — pick/drop/fixup rows in the dialog |
 | `w` | Open a new worktree at the selected commit |
 | `L` | Load 500 more commits |
 | `r` / `t` / `esc` | Refresh / terminal / back — same as the Working Copy section |
