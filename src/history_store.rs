@@ -866,11 +866,13 @@ impl HistoryStore {
     /// lines only), or the log is still loading.
     pub fn rebase_plan(&self) -> Option<(String, Vec<RebasePlanEntry>)> {
         let sel = self.selected?;
-        let commit = self.commits.get(sel)?;
-        if commit.parents.len() != 1 {
+        // The whole range replays: a merge anywhere in it cannot be
+        // cherry-picked (git needs a parent choice), so the plan refuses
+        // rather than failing mid-chain.
+        if self.commits[..=sel].iter().any(|c| c.parents.len() != 1) {
             return None;
         }
-        let base = commit.parents[0].clone();
+        let base = self.commits[sel].parents[0].clone();
         // Rows are newest-first: selected..=0 reversed is oldest-first.
         let entries = self.commits[..=sel]
             .iter()
@@ -907,7 +909,7 @@ impl HistoryStore {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { rewrite::run_rebase_todo(&worktree, &base, &steps) })
+                .spawn(async move { rewrite::run_rewrite_plan(&worktree, &base, &steps) })
                 .await;
             this.update(cx, |store, cx| {
                 store.action_in_flight = false;

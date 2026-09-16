@@ -7,7 +7,7 @@
 //! argv-based; commit-ish arguments are validated object IDs.
 
 use crate::engine::{self, GitError, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Object IDs only: 40 (SHA-1) or 64 (SHA-256) hex characters. Every
 /// commit-ish this module accepts goes through here, so a malformed
@@ -55,9 +55,11 @@ pub fn revert(worktree: &Path, oid: &str) -> Result<Vec<String>> {
     finish_with_abort(worktree, result, "revert")
 }
 
-/// Shared conflict resolution for cherry-pick/revert: a conflicted run
-/// is aborted (best effort) and reported as `Ok(paths)`; any other
-/// failure propagates the original error.
+/// Shared failure resolution for cherry-pick/revert. git can fail with
+/// sequencer state and NO conflicts — most commonly an empty result
+/// ("The previous cherry-pick is now empty") — so the abort runs
+/// unconditionally on failure (a no-op when nothing is running), and
+/// only a non-empty conflict probe turns the failure into `Ok(paths)`.
 fn finish_with_abort(
     worktree: &Path,
     result: Result<String>,
@@ -65,15 +67,15 @@ fn finish_with_abort(
 ) -> Result<Vec<String>> {
     match result {
         Ok(_) => Ok(Vec::new()),
-        Err(e) => match conflicted_files(worktree) {
-            Ok(conflicts) if !conflicts.is_empty() => {
-                let _ = engine::run_trimmed(worktree, &[abort_command, "--abort"]);
+        Err(e) => {
+            let conflicts = conflicted_files(worktree).unwrap_or_default();
+            let _ = engine::run_trimmed(worktree, &[abort_command, "--abort"]);
+            if conflicts.is_empty() {
+                Err(e)
+            } else {
                 Ok(conflicts)
             }
-            // Not a conflict (or the query failed) — propagate the
-            // original error.
-            _ => Err(e),
-        },
+        }
     }
 }
 
@@ -85,92 +87,116 @@ pub enum TodoAction {
     Fixup,
 }
 
-impl TodoAction {
-    fn keyword(self) -> &'static str {
-        match self {
-            TodoAction::Pick => "pick",
-            TodoAction::Drop => "drop",
-            TodoAction::Fixup => "fixup",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TodoStep {
     pub action: TodoAction,
     /// Full object id of the commit this line applies.
     pub oid: String,
-    /// Subject text (todo comment only — git matches on the oid).
+    /// Subject (dialog display only — the replay matches on the oid).
     pub subject: String,
 }
 
-/// Rebases the current branch onto `base` (an object id) applying
-/// `steps` as the todo — the scripted equivalent of editing the rebase
-/// todo list in an editor: the todo file is written to a temp file and
-/// injected through `sequence.editor`, which git invokes with the todo
-/// path as its argument (`cp <ours> <theirs>`). `fixup` never opens a
-/// message editor; reword/squash would, and are not offered in v1.
+/// Rewrites the current branch's recent history per `steps` (oldest
+/// first, covering `base`'s child through the current HEAD): drops are
+/// skipped, picks are replayed, fixups are replayed into the previous
+/// commit. Implemented as a cherry-pick CHAIN rather than `rebase -i`:
+/// the branch is moved to `base`, then each step replays via
+/// `cherry-pick` (`-n` + `commit --amend --no-edit` for fixups). Pure
+/// argv — a sequence editor would have to be executable on every
+/// platform (git cannot spawn POSIX `cp` as one on Windows).
 ///
-/// On conflict: aborts and returns the conflicted paths.
-pub fn run_rebase_todo(worktree: &Path, base: &str, steps: &[TodoStep]) -> Result<Vec<String>> {
+/// Guards: the working copy must be clean (a rewrite would otherwise
+/// destroy uncommitted changes in the `reset --hard` that starts the
+/// chain), and HEAD must still be the newest step's commit (the log the
+/// dialog was built from is stale otherwise).
+///
+/// On conflict: the conflicted paths are probed FIRST, then the chain
+/// unwinds completely — `cherry-pick --abort` plus `reset --hard` back
+/// to the pre-operation tip — and the paths are returned as the `Ok`
+/// payload. Same contract as the other rewrite ops: never wedged.
+pub fn run_rewrite_plan(worktree: &Path, base: &str, steps: &[TodoStep]) -> Result<Vec<String>> {
     validate_oid(base)?;
     if steps.is_empty() {
         return Err(GitError {
-            message: "empty rebase plan".into(),
+            message: "empty rewrite plan".into(),
         });
     }
     for step in steps {
         validate_oid(&step.oid)?;
-        // The subject is a todo COMMENT, but control characters could
-        // still confuse line-oriented parsing of the file we write.
-        if step.subject.bytes().any(|b| b.is_ascii_control()) {
-            return Err(GitError {
-                message: "invalid commit subject".into(),
-            });
+    }
+    let dirty = engine::run_trimmed(worktree, &["--no-optional-locks", "status", "--porcelain"])?;
+    if !dirty.is_empty() {
+        return Err(GitError {
+            message:
+                "working copy has uncommitted changes — commit or stash before rewriting history"
+                    .into(),
+        });
+    }
+    let tip_before = engine::run_trimmed(worktree, &["rev-parse", "HEAD"])?;
+    validate_oid(&tip_before)?;
+    // HEAD must be part of the plan (as pick, fixup, or drop): the plan
+    // was built from a log snapshot ending at HEAD, so a moved HEAD
+    // means the branch advanced and the plan would rewrite the wrong
+    // commits. Reordering means the newest commit need not be the LAST
+    // step — membership is the invariant, not order.
+    if !steps.iter().any(|s| s.oid == tip_before) {
+        return Err(GitError {
+            message: "history changed since this plan was opened — reopen it".into(),
+        });
+    }
+
+    // One instrumented failure path: probe conflicts BEFORE unwinding,
+    // so the report survives the `reset --hard` that restores the branch.
+    macro_rules! unwind_on_failure {
+        ($result:expr) => {
+            match $result {
+                Ok(v) => v,
+                Err(e) => {
+                    let conflicts = conflicted_files(worktree).unwrap_or_default();
+                    let _ = engine::run_trimmed(worktree, &["cherry-pick", "--abort"]);
+                    let _ = engine::run_trimmed(worktree, &["reset", "--hard", &tip_before]);
+                    if conflicts.is_empty() {
+                        return Err(e);
+                    }
+                    return Ok(conflicts);
+                }
+            }
+        };
+    }
+
+    engine::run_trimmed(worktree, &["reset", "--hard", base])?;
+    // A fixup folds into the PREVIOUS replayed commit — as the first
+    // replayed step it would amend `base` itself, rewriting a commit
+    // this operation does not own.
+    let mut replayed = 0usize;
+    for step in steps {
+        match step.action {
+            TodoAction::Drop => {}
+            TodoAction::Pick => {
+                unwind_on_failure!(engine::run_trimmed(worktree, &["cherry-pick", &step.oid]));
+                replayed += 1;
+            }
+            TodoAction::Fixup => {
+                if replayed == 0 {
+                    let _ = engine::run_trimmed(worktree, &["reset", "--hard", &tip_before]);
+                    return Err(GitError {
+                        message: "the first commit of a plan cannot be a fixup — pick it instead"
+                            .into(),
+                    });
+                }
+                unwind_on_failure!(engine::run_trimmed(
+                    worktree,
+                    &["cherry-pick", "-n", &step.oid]
+                ));
+                // Fold the staged changes into the previous commit;
+                // nothing staged (a fixup of an empty commit) is a
+                // no-op amend.
+                unwind_on_failure!(engine::run_trimmed(
+                    worktree,
+                    &["commit", "--amend", "--no-edit"]
+                ));
+            }
         }
     }
-    // Unique per CALL, not per process: two rebases (two worktrees, two
-    // threads) can run concurrently and must never share a todo file.
-    let todo_path: PathBuf = std::env::temp_dir().join(format!(
-        "worktree-tool-rebase-todo-{}-{}.txt",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    ));
-    let mut todo = String::new();
-    for step in steps {
-        todo.push_str(&format!(
-            "{} {} {}\n",
-            step.action.keyword(),
-            step.oid,
-            step.subject
-        ));
-    }
-    std::fs::write(&todo_path, todo).map_err(|e| GitError {
-        message: format!("cannot write rebase todo: {e}"),
-    })?;
-    let editor = format!("cp {}", todo_path.display());
-    let result = engine::run_trimmed(
-        worktree,
-        &[
-            "-c",
-            &format!("sequence.editor={editor}"),
-            "rebase",
-            "-i",
-            base,
-        ],
-    );
-    let _ = std::fs::remove_file(&todo_path);
-    match result {
-        Ok(_) => Ok(Vec::new()),
-        Err(e) => match conflicted_files(worktree) {
-            Ok(conflicts) if !conflicts.is_empty() => {
-                let _ = engine::run_trimmed(worktree, &["rebase", "--abort"]);
-                Ok(conflicts)
-            }
-            _ => Err(e),
-        },
-    }
+    Ok(Vec::new())
 }

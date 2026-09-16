@@ -157,7 +157,7 @@ fn rebase_todo_drops_and_reorders() {
         step(TodoAction::Pick, &subjects[2].0, &subjects[2].1),
         step(TodoAction::Pick, &subjects[0].0, &subjects[0].1),
     ];
-    rewrite::run_rebase_todo(tmp.path(), &base, &steps).unwrap();
+    rewrite::run_rewrite_plan(tmp.path(), &base, &steps).unwrap();
 
     let log = sh_out(tmp.path(), &["git", "log", "--format=%s", "main"]);
     let order: Vec<&str> = log.lines().collect();
@@ -191,7 +191,7 @@ fn rebase_todo_fixup_squashes_without_editor() {
         step(TodoAction::Pick, &entries[0].0, &entries[0].1),
         step(TodoAction::Fixup, &entries[1].0, &entries[1].1),
     ];
-    rewrite::run_rebase_todo(tmp.path(), &base, &steps).unwrap();
+    rewrite::run_rewrite_plan(tmp.path(), &base, &steps).unwrap();
 
     let log = sh_out(tmp.path(), &["git", "log", "--format=%s", "main"]);
     let order: Vec<&str> = log.lines().collect();
@@ -225,20 +225,58 @@ fn rebase_todo_conflict_aborts_and_reports() {
         step(TodoAction::Drop, &first, "first edit"),
         step(TodoAction::Pick, &second, "second edit"),
     ];
-    let conflicts = rewrite::run_rebase_todo(tmp.path(), &base, &steps).unwrap();
+    let conflicts = rewrite::run_rewrite_plan(tmp.path(), &base, &steps).unwrap();
     assert_eq!(conflicts, vec!["f.txt".to_string()]);
 
-    let rebasing = tmp.path().join(".git").join("rebase-merge");
-    let rebasing_apply = tmp.path().join(".git").join("rebase-apply");
-    assert!(
-        !rebasing.exists() && !rebasing_apply.exists(),
-        "must not stay mid-rebase"
-    );
+    // The cherry-pick chain must unwind COMPLETELY: no sequence state,
+    // and the branch exactly back at its pre-operation tip.
+    let picking = tmp.path().join(".git").join("CHERRY_PICK_HEAD");
+    assert!(!picking.exists(), "no mid-sequence state");
     let log = sh_out(tmp.path(), &["git", "log", "--format=%s", "main"]);
-    assert!(
-        log.contains("second edit") && log.contains("first edit"),
-        "both commits restored after abort: {log}"
+    assert_eq!(
+        log, "second edit\nfirst edit\ninit",
+        "branch fully restored after abort"
     );
+}
+
+#[test]
+fn rewrite_plan_refuses_a_dirty_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture_repo(tmp.path());
+    std::fs::write(tmp.path().join("f.txt"), "dirty\n").unwrap();
+    std::fs::write(tmp.path().join("new.txt"), "untracked\n").unwrap();
+    let head = sh_out(tmp.path(), &["git", "rev-parse", "HEAD"]);
+    let steps = vec![step(TodoAction::Drop, &head, "init")];
+    let err = rewrite::run_rewrite_plan(tmp.path(), &head, &steps).unwrap_err();
+    assert!(
+        err.message.contains("uncommitted"),
+        "dirty tree refused: {err}"
+    );
+    // Nothing was touched.
+    let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
+    assert_eq!(content, "dirty\n");
+}
+
+#[test]
+fn rewrite_plan_refuses_a_stale_head() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture_repo(tmp.path());
+    std::fs::write(tmp.path().join("g.txt"), "g\n").unwrap();
+    sh(Some(tmp.path()), &["git", "add", "g.txt"]);
+    sh(Some(tmp.path()), &["git", "commit", "-qm", "add g"]);
+    std::fs::write(tmp.path().join("h.txt"), "h\n").unwrap();
+    sh(Some(tmp.path()), &["git", "add", "h.txt"]);
+    sh(Some(tmp.path()), &["git", "commit", "-qm", "add h"]);
+    // Plan built before "add h" landed: it covers only "add g", so the
+    // current HEAD ("add h") is not part of it.
+    let one = sh_out(tmp.path(), &["git", "rev-parse", "HEAD~1"]);
+    let base = sh_out(tmp.path(), &["git", "rev-parse", "HEAD~2"]);
+    let steps = vec![step(TodoAction::Pick, &one, "add g")];
+    let err = rewrite::run_rewrite_plan(tmp.path(), &base, &steps).unwrap_err();
+    assert!(err.message.contains("reopen"), "stale plan refused: {err}");
+    // And the branch was not touched.
+    let log = sh_out(tmp.path(), &["git", "log", "--format=%s"]);
+    assert!(log.contains("add h"), "HEAD unchanged: {log}");
 }
 
 #[test]
@@ -248,13 +286,13 @@ fn rebase_todo_rejects_bad_input() {
     let good = sh_out(tmp.path(), &["git", "rev-parse", "HEAD"]);
 
     let empty: Vec<TodoStep> = Vec::new();
-    assert!(rewrite::run_rebase_todo(tmp.path(), &good, &empty).is_err());
+    assert!(rewrite::run_rewrite_plan(tmp.path(), &good, &empty).is_err());
     assert!(
-        rewrite::run_rebase_todo(tmp.path(), "main", &[]).is_err(),
+        rewrite::run_rewrite_plan(tmp.path(), "main", &[]).is_err(),
         "base must be an oid, not a ref"
     );
     let bad_step = vec![step(TodoAction::Pick, "-oops", "x")];
-    assert!(rewrite::run_rebase_todo(tmp.path(), &good, &bad_step).is_err());
+    assert!(rewrite::run_rewrite_plan(tmp.path(), &good, &bad_step).is_err());
 }
 
 #[test]
@@ -286,4 +324,59 @@ fn cherry_pick_self_heals_a_wedged_sequence() {
         !tmp.path().join(".git").join("CHERRY_PICK_HEAD").exists(),
         "sequence aborted by the self-heal"
     );
+}
+
+#[test]
+fn cherry_pick_empty_result_still_unwinds() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture_repo(tmp.path());
+    // Two commits producing IDENTICAL content on different branches:
+    // picking side's commit onto main yields an EMPTY result — git
+    // fails with sequencer state and NO conflicts, which must still
+    // unwind (CHERRY_PICK_HEAD must not survive the call).
+    std::fs::write(tmp.path().join("f.txt"), "one\ntwo\n").unwrap();
+    sh(Some(tmp.path()), &["git", "commit", "-qam", "main same"]);
+    let main_tip = sh_out(tmp.path(), &["git", "rev-parse", "HEAD"]);
+    sh(Some(tmp.path()), &["git", "checkout", "-qb", "side"]);
+    sh(
+        Some(tmp.path()),
+        &["git", "reset", "-q", "--hard", "HEAD~1"],
+    );
+    std::fs::write(tmp.path().join("f.txt"), "one\ntwo\n").unwrap();
+    sh(Some(tmp.path()), &["git", "commit", "-qam", "side same"]);
+    let side_tip = sh_out(tmp.path(), &["git", "rev-parse", "HEAD"]);
+    sh(Some(tmp.path()), &["git", "checkout", "-q", "main"]);
+    assert_eq!(sh_out(tmp.path(), &["git", "rev-parse", "HEAD"]), main_tip);
+
+    // The message text varies by git version (the "now empty" advice
+    // block's last line wins) — what matters is that it FAILED and the
+    // sequencer state unwound, asserted below.
+    let _err = rewrite::cherry_pick(tmp.path(), &side_tip).unwrap_err();
+    assert!(
+        !tmp.path().join(".git").join("CHERRY_PICK_HEAD").exists(),
+        "sequence state unwound even without conflicts"
+    );
+    let log = sh_out(tmp.path(), &["git", "log", "--format=%s"]);
+    assert!(log.contains("main same"), "branch untouched");
+}
+
+#[test]
+fn rewrite_plan_refuses_a_leading_fixup() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture_repo(tmp.path());
+    std::fs::write(tmp.path().join("g.txt"), "g\n").unwrap();
+    sh(Some(tmp.path()), &["git", "add", "g.txt"]);
+    sh(Some(tmp.path()), &["git", "commit", "-qm", "add g"]);
+    let base = sh_out(tmp.path(), &["git", "rev-parse", "HEAD~1"]);
+    let g = sh_out(tmp.path(), &["git", "rev-parse", "HEAD"]);
+    // The only replayed step is a fixup: it would amend the BASE.
+    let steps = vec![step(TodoAction::Fixup, &g, "add g")];
+    let err = rewrite::run_rewrite_plan(tmp.path(), &base, &steps).unwrap_err();
+    assert!(
+        err.message.contains("fixup"),
+        "leading fixup refused: {err}"
+    );
+    // The branch snapped back to its original tip.
+    let log = sh_out(tmp.path(), &["git", "log", "--format=%s"]);
+    assert_eq!(log, "add g\ninit", "branch restored after refusal");
 }
