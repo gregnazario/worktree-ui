@@ -1,4 +1,5 @@
 pub mod app;
+pub mod branch_store;
 pub mod dialogs;
 pub mod engine;
 pub mod feedback;

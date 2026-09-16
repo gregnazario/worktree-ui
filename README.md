@@ -95,7 +95,7 @@ Detail view (per worktree):
 
 | Key | Action |
 | --- | --- |
-| `1` / `2` | Switch section: Working Copy ↔ History |
+| `1` / `2` / `3` | Switch section: Working Copy ↔ History ↔ Branches |
 | `up` / `down` | Move file selection (diff pane focused: move hunk cursor) |
 | `tab` | Toggle file list ↔ diff pane |
 | `s` | Stage / unstage selected file (diff pane focused: stage hovered hunk) |
@@ -117,6 +117,33 @@ History section (`2` from the detail view):
 | `w` | Open a new worktree at the selected commit |
 | `L` | Load 500 more commits |
 | `r` / `t` / `esc` | Refresh / terminal / back — same as the Working Copy section |
+
+Branches section (`3` from the detail view):
+
+| Key | Action |
+| --- | --- |
+| `up` / `down` | Move the cursor in the active list (branches or stashes) |
+| `tab` / `s` | Toggle between the branch list and the stash list |
+| `enter` / `x` | Switch to the selected branch (refused on a dirty working copy) |
+| `m` | Merge the selected branch into the current branch |
+| `R` | Rebase the current branch onto the selected branch |
+| `d` | Delete the selected branch (refuses the current branch) |
+| `n` | Create a new branch at HEAD |
+| `M` | Rename the selected branch |
+| `y` | Copy the selected branch name to the clipboard |
+| `z` | Stash the working copy's changes (tracked + untracked) |
+| `p` / `a` | Pop (apply + drop) / apply the selected stash |
+| `D` | Drop the selected stash |
+| `f` | Fetch all remotes (with prune) |
+| `u` | Push the current branch (sets upstream on first push) |
+| `l` | Pull the current branch (fast-forward only) |
+| `F` | Force-push the current branch with lease — press twice to confirm |
+| `r` / `t` / `esc` | Refresh / terminal / back — same as the Working Copy section |
+
+Remote-tracking branches (`origin/…`) are listed after the locals; switching
+and deleting refuse them, and merging/rebasing from them works. A conflicted
+merge or rebase is aborted automatically — the conflicted paths are reported
+and the worktree is left exactly as it was, so nothing wedges mid-operation.
 
 ## Working Copy
 

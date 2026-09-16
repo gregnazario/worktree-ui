@@ -5,7 +5,7 @@
 //! the background executor, loads are guarded by a detail-generation
 //! counter, and every refusal explains itself.
 
-use crate::engine::{self, diff, history};
+use crate::engine::{diff, history};
 use gpui::{App, AppContext, Context, Entity};
 use std::path::PathBuf;
 
@@ -179,7 +179,7 @@ impl HistoryStore {
                     let has_more = commits.len() >= fetch_count;
                     commits.truncate(fetch_count);
                     let rows = history::assign_lanes(&mut commits);
-                    Ok::<_, engine::GitError>((commits, rows, has_more))
+                    Ok::<_, crate::engine::GitError>((commits, rows, has_more))
                 })
                 .await;
             this.update(cx, |store, cx| {
@@ -319,7 +319,7 @@ impl HistoryStore {
                     if fetched.is_empty() {
                         let drifting = boundary_hash.is_some();
                         if drifting {
-                            return Err(engine::GitError {
+                            return Err(crate::engine::GitError {
                                 message: "__drift__".into(),
                             });
                         }
@@ -328,7 +328,7 @@ impl HistoryStore {
                     let boundary_ok = fetched.first().map(|c| c.hash.clone()).as_deref()
                         == boundary_hash.as_deref();
                     if !boundary_ok {
-                        return Err(engine::GitError {
+                        return Err(crate::engine::GitError {
                             message: "__drift__".into(),
                         });
                     }
