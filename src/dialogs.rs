@@ -3,7 +3,7 @@
 //! directly and attach listeners against it.
 
 use crate::app::RootView;
-use crate::app::{ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED, TEXT};
+use crate::app::{ACCENT, BORDER, DIM, GREEN, PANEL, RED, ROW_SELECTED, TEXT, YELLOW};
 use crate::feedback;
 use crate::platform;
 use crate::terminal::{self, InstalledTerminal};
@@ -55,6 +55,23 @@ pub enum DialogState {
         rename_from: Option<String>,
         name: Entity<TextField>,
     },
+    /// Scripted interactive rebase: the todo rows (oldest first), the
+    /// rebase base, and the dialog's own cursor.
+    RebaseTodo {
+        base: String,
+        entries: Vec<RebaseEntry>,
+        selected: usize,
+    },
+}
+
+/// One todo row. `action` mutates in place via the dialog keys; the
+/// confirm converts these into the engine's `TodoStep`s.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RebaseEntry {
+    pub oid: String,
+    pub short: String,
+    pub subject: String,
+    pub action: crate::engine::rewrite::TodoAction,
 }
 
 impl DialogState {
@@ -685,4 +702,167 @@ pub fn render_settings_dialog(
                 )),
         );
     card
+}
+
+pub fn render_rebase_dialog(
+    this: &mut RootView,
+    _window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let DialogState::RebaseTodo {
+        entries, selected, ..
+    } = &this.dialog
+    else {
+        unreachable!("rebase dialog rendered without state")
+    };
+    let entries = entries.clone();
+    let selected = *selected;
+    let drop_count = entries
+        .iter()
+        .filter(|e| e.action == crate::engine::rewrite::TodoAction::Drop)
+        .count();
+    let fixup_count = entries
+        .iter()
+        .filter(|e| e.action == crate::engine::rewrite::TodoAction::Fixup)
+        .count();
+    let mut summary = format!("{} commits", entries.len());
+    if drop_count > 0 {
+        summary.push_str(&format!(", {drop_count} dropped"));
+    }
+    if fixup_count > 0 {
+        summary.push_str(&format!(", {fixup_count} fixupped"));
+    }
+
+    let dialog_focus = this.dialog_focus.clone();
+    let mut list = div().id("rebase-rows").flex().flex_col().gap_px();
+    for (pos, entry) in entries.iter().enumerate() {
+        let is_selected = pos == selected;
+        let (keyword, color) = match entry.action {
+            crate::engine::rewrite::TodoAction::Pick => ("pick ", TEXT),
+            crate::engine::rewrite::TodoAction::Drop => ("drop ", RED),
+            crate::engine::rewrite::TodoAction::Fixup => ("fixup", YELLOW),
+        };
+        let row = div()
+            .id(SharedString::from(format!("rebase-row-{pos}")))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_0p5()
+            .rounded_sm()
+            .when(is_selected, |r| r.bg(ROW_SELECTED))
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                if let DialogState::RebaseTodo { selected, .. } = &mut this.dialog {
+                    *selected = pos;
+                    cx.notify();
+                }
+            }));
+        let mut row = row;
+        row = row.child(
+            div()
+                .w(px(44.))
+                .flex_shrink_0()
+                .text_size(px(11.))
+                .text_color(color)
+                .child(keyword),
+        );
+        row = row.child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(11.))
+                .text_color(DIM)
+                .child(entry.short.clone()),
+        );
+        row = row.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(12.))
+                .text_color(
+                    if entry.action == crate::engine::rewrite::TodoAction::Drop {
+                        DIM
+                    } else {
+                        TEXT
+                    },
+                )
+                .truncate()
+                .child(entry.subject.clone()),
+        );
+        list = list.child(row);
+    }
+
+    div()
+        .id("rebase-dialog")
+        .track_focus(&dialog_focus)
+        .w(px(620.))
+        .max_h(px(520.))
+        .p_4()
+        .rounded_lg()
+        .bg(PANEL)
+        .border_1()
+        .border_color(BORDER)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .overflow_y_scroll()
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            cx.stop_propagation();
+            let DialogState::RebaseTodo {
+                entries, selected, ..
+            } = &mut this.dialog
+            else {
+                return;
+            };
+            match event.keystroke.key.as_str() {
+                "escape" => this.close_dialog(window, cx),
+                "up" => {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                    cx.notify();
+                }
+                "down" => {
+                    if *selected + 1 < entries.len() {
+                        *selected += 1;
+                    }
+                    cx.notify();
+                }
+                "d" => {
+                    if let Some(entry) = entries.get_mut(*selected) {
+                        entry.action = match entry.action {
+                            crate::engine::rewrite::TodoAction::Pick => {
+                                crate::engine::rewrite::TodoAction::Drop
+                            }
+                            _ => crate::engine::rewrite::TodoAction::Pick,
+                        };
+                    }
+                    cx.notify();
+                }
+                "f" => {
+                    if let Some(entry) = entries.get_mut(*selected) {
+                        entry.action = match entry.action {
+                            crate::engine::rewrite::TodoAction::Pick => {
+                                crate::engine::rewrite::TodoAction::Fixup
+                            }
+                            _ => crate::engine::rewrite::TodoAction::Pick,
+                        };
+                    }
+                    cx.notify();
+                }
+                "enter" => this.confirm_rebase_dialog(window, cx),
+                _ => {}
+            }
+        }))
+        .child(
+            div()
+                .text_size(px(15.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(TEXT)
+                .child(format!("Interactive rebase — {summary}")),
+        )
+        .child(list)
+        .child(label(
+            "up/down move · d drop · f fixup · enter rebase · esc cancel".to_string(),
+        ))
 }

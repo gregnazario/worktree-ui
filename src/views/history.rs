@@ -121,7 +121,7 @@ pub fn render(
                             "↑↓ file · tab back to commits · 1/2 section · esc back"
                                 .to_string()
                         } else if list_focused {
-                            "↑↓ commit · y copy hash · x checkout · w new worktree · L load more · r refresh · t terminal · 1/2 section · esc back".to_string()
+                            "↑↓ commit · y copy hash · x checkout · p cherry-pick · v revert · R rebase · w new worktree · L load more · r refresh · t terminal · 1/2 section · esc back".to_string()
                         } else {
                             String::new()
                         },

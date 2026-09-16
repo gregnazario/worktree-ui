@@ -1,0 +1,62 @@
+# Phase 4 — History Actions: cherry-pick, revert, interactive rebase
+
+Date: 2026-09-15. Builds on Phases 1–3 (v0.4.0). The History section
+becomes actionable: the selected commit can be applied, undone, or the
+branch above it rewritten.
+
+## Design decisions
+
+- **Abort-on-conflict everywhere (same contract as Phase 3
+  merge/rebase).** `cherry-pick`, `revert`, and todo-driven rebase return
+  the conflicted paths as `Ok(Vec<String>)` AND abort the operation —
+  `CHERRY_PICK_HEAD` / `REVERT_HEAD` / `rebase-merge` never outlive the
+  call. There is no continue flow yet (that is the Phase 5 conflict
+  surface); a wedged repo would block every later operation.
+- **Interactive rebase is a scripted cherry-pick chain, not `rebase -i`.**
+  The branch moves to the base (`reset --hard`, behind a clean-tree
+  guard), then each todo step replays: pick → `cherry-pick`, fixup →
+  `cherry-pick -n` + `commit --amend --no-edit`, drop → skipped. Pure
+  argv on every platform — a sequence editor would have to be
+  executable everywhere, and git cannot spawn POSIX `cp` as one on
+  Windows (found by CI). Guards: clean worktree, HEAD must be part of
+  the plan (stale dialog refused), no merges in the range, and the
+  first replayed step cannot be a fixup (it would amend the base).
+  `squash`/`reword` wait for the in-app commit editor.
+- **Rebase range = selected..HEAD.** `R` (shift+r) on a selected commit
+  opens a dialog listing that commit and everything above it (oldest
+  first); the rebase base is the selected commit's first parent. HEAD
+  itself may be dropped/fixupped (base = its parent). Refuses merges as
+  the base of a rewrite (selected commit with >1 parent) in v1.
+- **Cherry-pick targets this worktree's HEAD.** `p` applies the selected
+  commit onto the current branch. Git's own guards surface errors for
+  empty picks; conflicts abort with the report.
+- **Revert creates a revert commit.** `v` runs `git revert --no-edit`;
+  the log refresh shows the new commit.
+- **Busy mirrors apply.** All three actions run through HistoryStore's
+  existing busy/window and `sync_worktree_busy` gates: Working Copy and
+  Branches refuse while a rewrite runs.
+
+## Keys (History section)
+
+| Key | Action |
+| --- | --- |
+| `p` | Cherry-pick the selected commit onto this branch |
+| `v` | Revert the selected commit (creates a revert commit) |
+| `R` | Interactive rebase from the selected commit to HEAD (todo dialog) |
+
+Rebase dialog keys: `up`/`down` move, `d` toggles pick↔drop, `f` toggles
+pick↔fixup, `enter` starts the rebase, `esc` cancels.
+
+## Tasks
+
+1. **Engine — rewrite ops.** `engine/rewrite.rs`: `cherry_pick`,
+   `revert`, `run_rebase_todo(base, steps)` with sha validation
+   (40|64 hex), conflict-abort contract, temp todo file cleanup. TDD:
+   clean flows, conflict flows (state restored), drop/reorder/fixup.
+2. **Store — HistoryStore actions.** `cherry_pick`, `revert` on the bg
+   executor with completion refresh + `mutated`; `rebase_plan()`
+   (selected..HEAD + base) for the dialog; `run_rebase(steps)`.
+3. **Dialog — RebaseTodo.** `DialogState` variant, render (rows with
+   action chips), keys, confirm wiring.
+4. **Shell.** History keys `p`/`v`/`R`, footer, README, version bump
+   (0.4.1 → 0.5.0 — new features, minor bump), ledger. Full gates.

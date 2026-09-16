@@ -966,6 +966,10 @@ impl RootView {
             // Re-entry retries a pending revalidation skipped while an
             // action was in flight (open_history is idempotent here).
             "2" => self.open_history(window, cx),
+            // gpui delivers shift+letter as the lowercase key with the
+            // shift modifier set: this guarded arm must precede the
+            // plain-r arm below or it is unreachable.
+            "r" if ks.modifiers.shift => self.open_rebase_dialog(window, cx),
             // r retries failed loads and reloads empty repos, so it must
             // NOT be gated by action_blocker (whose failed-load message
             // says "press r to retry" — that would block the very key it
@@ -1085,6 +1089,27 @@ impl RootView {
                     h.note_transient_hint();
                 } else {
                     h.load_more(cx);
+                }
+                cx.notify();
+            }),
+            // History rewrites: cherry-pick the selected commit onto this
+            // branch, revert it, or open the scripted rebase dialog for
+            // it and everything above it.
+            "p" => hs.update(cx, |h, cx| {
+                if let Some(blocked) = h.action_blocker() {
+                    h.message = Some(blocked);
+                    h.note_transient_hint();
+                } else {
+                    h.cherry_pick(cx);
+                }
+                cx.notify();
+            }),
+            "v" => hs.update(cx, |h, cx| {
+                if let Some(blocked) = h.action_blocker() {
+                    h.message = Some(blocked);
+                    h.note_transient_hint();
+                } else {
+                    h.revert(cx);
                 }
                 cx.notify();
             }),
@@ -1278,6 +1303,67 @@ impl RootView {
             }
         }
         self.close_dialog(window, cx);
+    }
+
+    /// Opens the scripted interactive-rebase dialog for the History
+    /// section's selected commit and everything above it.
+    pub(crate) fn open_rebase_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_open() {
+            return;
+        }
+        let Some(hs) = &self.history else {
+            return;
+        };
+        let Some((base, entries)) = hs.read(cx).rebase_plan() else {
+            hs.update(cx, |store, cx| {
+                store.message = Some(
+                    "Rebase needs a non-merge commit with a parent — select a plain commit".into(),
+                );
+                store.note_transient_hint();
+                cx.notify();
+            });
+            return;
+        };
+        self.dialog = DialogState::RebaseTodo {
+            base,
+            entries: entries
+                .into_iter()
+                .map(|e| crate::dialogs::RebaseEntry {
+                    oid: e.oid,
+                    short: e.short,
+                    subject: e.subject,
+                    action: crate::engine::rewrite::TodoAction::Pick,
+                })
+                .collect(),
+            // Cursor on the oldest (top) row: the commit the user
+            // selected in the log.
+            selected: 0,
+        };
+        window.focus(&self.dialog_focus);
+        cx.notify();
+    }
+
+    /// Converts the dialog's todo into engine steps and starts the
+    /// rebase on the History store.
+    pub(crate) fn confirm_rebase_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (base, steps) = match &self.dialog {
+            DialogState::RebaseTodo { base, entries, .. } => (
+                base.clone(),
+                entries
+                    .iter()
+                    .map(|e| crate::engine::rewrite::TodoStep {
+                        action: e.action,
+                        oid: e.oid.clone(),
+                        subject: e.subject.clone(),
+                    })
+                    .collect(),
+            ),
+            _ => return,
+        };
+        self.close_dialog(window, cx);
+        if let Some(hs) = &self.history {
+            hs.update(cx, |store, cx| store.run_rebase(base, steps, cx));
+        }
     }
 
     /// Opens (or creates) the Branches section (section 3).
@@ -1825,6 +1911,9 @@ impl Render for RootView {
                 }
                 DialogState::BranchName { .. } => {
                     Some(dialogs::render_branch_name_dialog(self, window, cx).into_any_element())
+                }
+                DialogState::RebaseTodo { .. } => {
+                    Some(dialogs::render_rebase_dialog(self, window, cx).into_any_element())
                 }
             };
             if let Some(card) = card {
@@ -2826,6 +2915,119 @@ mod tests {
     }
 
     #[gpui::test]
+    fn history_rebase_dialog_rewrites_history(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        // Two independent-file commits above init.
+        std::fs::write(repo.join("m.txt"), "mid").unwrap();
+        sh(&repo, &["git", "add", "m.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "mid commit"]);
+        std::fs::write(repo.join("t.txt"), "top").unwrap();
+        sh(&repo, &["git", "add", "t.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "top commit"]);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("2");
+        vcx.run_until_parked();
+        // Rows are newest-first: down once selects "mid commit".
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+
+        // shift-r opens the todo dialog covering mid..HEAD (2 rows).
+        vcx.simulate_keystrokes("shift-r");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            let DialogState::RebaseTodo {
+                entries, selected, ..
+            } = &root.dialog
+            else {
+                panic!("rebase dialog not open");
+            };
+            assert_eq!(entries.len(), 2, "selected commit ..= HEAD");
+            assert_eq!(entries[0].subject, "mid commit", "oldest first");
+            assert_eq!(*selected, 0, "cursor on the selected commit's row");
+        });
+
+        // d drops "mid commit"; enter starts the rebase.
+        vcx.simulate_keystrokes("d");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            assert!(matches!(root.dialog, DialogState::None), "dialog closed");
+            let hs = root.history.as_ref().unwrap().read(cx);
+            assert_eq!(
+                hs.message.as_deref(),
+                Some("Rebased 2 commits"),
+                "rebase completed, got {:?}",
+                hs.message
+            );
+        });
+        assert!(
+            !repo.join("m.txt").exists(),
+            "dropped commit's file is gone"
+        );
+        let log = std::process::Command::new("git")
+            .args(["log", "--format=%s"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&log.stdout);
+        assert!(log.contains("top commit"), "kept commit still present");
+        assert!(!log.contains("mid commit"), "dropped commit gone");
+    }
+
+    #[gpui::test]
+    fn history_revert_creates_a_revert_commit(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("g.txt"), "g").unwrap();
+        sh(&repo, &["git", "add", "g.txt"]);
+        sh(&repo, &["git", "commit", "-qm", "add g"]);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("2");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+
+        // v on the newest commit ("add g") reverts it.
+        vcx.simulate_keystrokes("v");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let hs = root.history.as_ref().unwrap().read(cx);
+            assert!(
+                hs.message
+                    .as_deref()
+                    .map(|m| m.starts_with("Reverted "))
+                    .unwrap_or(false),
+                "revert completed, got {:?}",
+                hs.message
+            );
+        });
+        assert!(!repo.join("g.txt").exists(), "revert removed the file");
+        let log = std::process::Command::new("git")
+            .args(["log", "--format=%s"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&log.stdout);
+        assert!(
+            log.lines().any(|l| l.starts_with("Revert")),
+            "revert commit in log: {log}"
+        );
+    }
+
+    #[gpui::test]
     fn branches_section_lists_branches_and_creates_via_dialog(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("fixture");
@@ -2956,7 +3158,8 @@ mod tests {
             DialogState::Create { .. }
             | DialogState::Remove { .. }
             | DialogState::Settings { .. }
-            | DialogState::Discard { .. } => {
+            | DialogState::Discard { .. }
+            | DialogState::RebaseTodo { .. } => {
                 panic!("wrong dialog variant for shift+m")
             }
         });

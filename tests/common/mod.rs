@@ -40,6 +40,10 @@ pub fn fixture_repo(dir: &Path) {
     // "Cannot allocate memory", flaking every fixture. Fixtures are
     // throwaway — never sign in them.
     sh(Some(dir), &["git", "config", "commit.gpgsign", "false"]);
+    // CI runners (Windows) default core.autocrlf=true: a checkout that
+    // round-trips through the index would hand CRLF back to tests that
+    // wrote LF. Byte-exact content assertions need this off.
+    sh(Some(dir), &["git", "config", "core.autocrlf", "false"]);
     std::fs::write(dir.join("f.txt"), "one").unwrap();
     sh(Some(dir), &["git", "add", "."]);
     sh(Some(dir), &["git", "commit", "-qm", "init"]);
