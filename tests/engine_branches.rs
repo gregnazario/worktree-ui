@@ -3,7 +3,7 @@
 mod common;
 
 use common::{fixture_repo, sh, sh_out};
-use worktree_tool::engine::branches;
+use worktree_tool::engine::{branches, sequence};
 
 #[test]
 fn list_returns_local_branches_with_current_marker() {
@@ -160,7 +160,7 @@ fn merge_clean_fast_forward() {
 }
 
 #[test]
-fn merge_with_conflicts_reports_conflicted_files_and_aborts() {
+fn merge_with_conflicts_reports_conflicted_files_and_pauses() {
     let tmp = tempfile::tempdir().unwrap();
     fixture_repo(tmp.path());
     sh(Some(tmp.path()), &["git", "checkout", "-qb", "side"]);
@@ -170,20 +170,29 @@ fn merge_with_conflicts_reports_conflicted_files_and_aborts() {
     std::fs::write(tmp.path().join("f.txt"), "main change").unwrap();
     sh(Some(tmp.path()), &["git", "commit", "-qam", "main"]);
 
-    // Conflicts come back as the Ok payload — and the merge is aborted:
-    // there is no continue flow in this UI, and a wedged MERGE_HEAD
-    // would block every later operation.
+    // Conflicts come back as the Ok payload and the merge STAYS PAUSED:
+    // the conflict surface resolves and continues (or aborts) in-app.
     let conflicts = branches::merge(tmp.path(), "side").unwrap();
     assert_eq!(conflicts, vec!["f.txt".to_string()]);
 
     let merging = tmp.path().join(".git").join("MERGE_HEAD");
-    assert!(!merging.exists(), "merge must not stay mid-merge");
+    assert!(merging.exists(), "merge paused for resolution");
     let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
-    assert_eq!(content, "main change", "worktree restored to pre-merge");
+    assert!(
+        content.contains("<<<<<<<"),
+        "conflicted content is in the worktree"
+    );
+    // Resolve + continue completes the merge; abort unwinds.
+    std::fs::write(tmp.path().join("f.txt"), "resolved\n").unwrap();
+    sh(Some(tmp.path()), &["git", "add", "f.txt"]);
+    let done = sequence::continue_op(tmp.path()).unwrap();
+    assert!(done.is_empty(), "continue after resolution: {done:?}");
+    assert!(!merging.exists(), "merge completed");
+    sh(Some(tmp.path()), &["git", "reset", "-q", "--hard", "HEAD"]);
 }
 
 #[test]
-fn rebase_with_conflicts_reports_conflicted_files_and_aborts() {
+fn rebase_with_conflicts_reports_conflicted_files_and_pauses() {
     let tmp = tempfile::tempdir().unwrap();
     fixture_repo(tmp.path());
     sh(Some(tmp.path()), &["git", "checkout", "-qb", "side"]);
@@ -197,14 +206,14 @@ fn rebase_with_conflicts_reports_conflicted_files_and_aborts() {
     let conflicts = branches::rebase(tmp.path(), "main").unwrap();
     assert_eq!(conflicts, vec!["f.txt".to_string()]);
 
+    // The rebase is paused on the conflicted step.
     let rebasing = tmp.path().join(".git").join("rebase-merge");
-    let rebasing_apply = tmp.path().join(".git").join("rebase-apply");
-    assert!(
-        !rebasing.exists() && !rebasing_apply.exists(),
-        "rebase must not stay mid-rebase"
-    );
+    assert!(rebasing.exists(), "rebase paused for resolution");
+    // Abort unwinds (the tested escape hatch).
+    sequence::abort_op(tmp.path()).unwrap();
+    assert!(!rebasing.exists(), "abort unwound the rebase");
     let head_branch = sh_out(tmp.path(), &["git", "branch", "--show-current"]);
-    assert_eq!(head_branch, "side", "still on the rebased branch");
+    assert_eq!(head_branch, "side", "back on the branch after abort");
     let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
     assert_eq!(content, "side change", "worktree restored to pre-rebase");
 }

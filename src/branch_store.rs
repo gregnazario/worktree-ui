@@ -471,12 +471,15 @@ impl BranchStore {
                         store.refresh(cx);
                     }
                     Ok(conflicts) => {
-                        // The engine aborted the merge: the worktree is
-                        // back to its pre-merge state, nothing to resolve.
+                        // The merge is PAUSED on conflicts: the conflicted
+                        // files are in the worktree right now, so the
+                        // home list AND the Working Copy section must
+                        // re-probe (the banner comes from that probe).
                         store.message = Some(format!(
-                            "Merge conflicts in {} — merge aborted, worktree restored",
+                            "Merge conflicts in {} — resolve in the Working Copy section, then g to continue (A aborts)",
                             conflicts.join(", ")
                         ));
+                        store.mutated = true;
                         store.busy_hint = false;
                         store.refresh(cx);
                     }
@@ -529,10 +532,12 @@ impl BranchStore {
                         store.refresh(cx);
                     }
                     Ok(_) => {
-                        // The engine aborted the rebase: nothing wedged.
+                        // The rebase is PAUSED on the conflicted step:
+                        // flag the mutation so Working Copy re-probes.
                         store.message = Some(format!(
-                            "Rebase onto {display_name} hit conflicts — rebase aborted, worktree restored"
+                            "Rebase onto {display_name} paused on conflicts — resolve in the Working Copy section, then g (A aborts)"
                         ));
+                        store.mutated = true;
                         store.busy_hint = true;
                         store.refresh(cx);
                     }

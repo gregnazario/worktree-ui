@@ -6,6 +6,7 @@ use crate::app::{
     TEXT, YELLOW,
 };
 use crate::engine::diff::{self, DiffLineKind};
+use crate::engine::sequence;
 use crate::engine::working_copy::Group;
 use crate::wc_store::{FileDetail, DIFF_RENDER_CAP};
 use gpui::prelude::FluentBuilder;
@@ -108,6 +109,10 @@ pub fn render(
     };
     let author = wc.read(cx).author.clone();
     let message = wc.read(cx).message.clone();
+    let (in_progress, rebase_step) = {
+        let store = wc.read(cx);
+        (store.in_progress, store.rebase_step)
+    };
 
     let container_focus = this.detail_focus.clone();
     let (loading, load_failed, load_error) = {
@@ -180,6 +185,40 @@ pub fn render(
                 ))
                 .child(div().text_size(px(11.)).text_color(DIM).child("esc back")),
         )
+        // ---- paused-operation banner: the conflict surface names the
+        // paused operation and its keys; K only applies to steppable
+        // operations (rebase, cherry-pick).
+        .when_some(in_progress, |el, op| {
+            let step = match (op, rebase_step) {
+                (sequence::InProgress::Rebase, Some((cur, total))) => {
+                    format!(" (rebasing {cur}/{total})")
+                }
+                _ => String::new(),
+            };
+            let skip_hint = if op.skippable() { " · K skip" } else { "" };
+            el.child(
+                div()
+                    .id("sequence-banner")
+                    .flex()
+                    .items_center()
+                    .px_3()
+                    .py_1()
+                    .bg(PANEL)
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(YELLOW)
+                            .child(format!(
+                                "{} in progress{} — resolve conflicts, stage with s · g continue{} · A abort",
+                                op.label(),
+                                step,
+                                skip_hint
+                            )),
+                    ),
+            )
+        })
         // ---- body: files | diff ----
         .child(body)
         // ---- footer: hints + author + message ----

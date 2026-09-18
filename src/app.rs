@@ -580,16 +580,28 @@ impl RootView {
     /// clear the gate while another section's operation is still running.
     fn sync_worktree_busy(&mut self, cx: &mut Context<Self>) {
         let wc_mutating = self.detail.as_ref().is_some_and(|w| w.read(cx).mutating);
+        // A PAUSED sequence (merge/rebase/cherry-pick/revert) owns the
+        // worktree until continued or aborted: the other sections must
+        // not race it. Resolution staging stays live in Working Copy —
+        // the pause never gates the wc store's own keys.
+        let wc_paused = self
+            .detail
+            .as_ref()
+            .is_some_and(|w| w.read(cx).in_progress.is_some());
         let hs_busy = self.history.as_ref().is_some_and(|h| h.read(cx).busy());
         let bs_busy = self.branch_store.as_ref().is_some_and(|b| b.read(cx).busy);
         if let Some(wc) = &self.detail {
             wc.update(cx, |store, _cx| store.history_busy = hs_busy || bs_busy);
         }
         if let Some(hs) = &self.history {
-            hs.update(cx, |store, _cx| store.wc_mutating = wc_mutating || bs_busy);
+            hs.update(cx, |store, _cx| {
+                store.wc_mutating = wc_mutating || bs_busy || wc_paused
+            });
         }
         if let Some(bs) = &self.branch_store {
-            bs.update(cx, |store, _cx| store.wc_mutating = wc_mutating || hs_busy);
+            bs.update(cx, |store, _cx| {
+                store.wc_mutating = wc_mutating || hs_busy || wc_paused
+            });
         }
     }
 
@@ -907,6 +919,25 @@ impl RootView {
             "s" if diff_focused => {
                 if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| store.stage_hunk(cx));
+                }
+            }
+            // Sequence keys: continue / skip / abort a paused merge,
+            // rebase, cherry-pick, or revert (the banner names it).
+            // These run git: the history-busy guard above already
+            // refuses them while a checkout is in flight.
+            "g" => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.continue_op(cx));
+                }
+            }
+            "k" if ks.modifiers.shift => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.skip_op(cx));
+                }
+            }
+            "a" if ks.modifiers.shift => {
+                if let Some(wc) = &self.detail {
+                    wc.update(cx, |store, cx| store.abort_op(cx));
                 }
             }
             // Section switching: 2 opens History (1 is a no-op here).
@@ -2912,6 +2943,188 @@ mod tests {
                 "second tab returns to the file list"
             );
         });
+    }
+
+    #[gpui::test]
+    fn merge_conflict_pauses_and_the_surface_resolves_it(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        // side conflicts with a change made on the drill-in worktree.
+        sh(&repo, &["git", "checkout", "-qb", "side"]);
+        std::fs::write(repo.join("f.txt"), "side change\n").unwrap();
+        sh(&repo, &["git", "commit", "-qam", "side"]);
+        sh(&repo, &["git", "checkout", "-q", "main"]);
+        std::fs::write(repo.join("f.txt"), "main change\n").unwrap();
+        sh(&repo, &["git", "commit", "-qam", "main"]);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        // Drill in, open Branches, merge side into main: conflicts.
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("3");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("down"); // select side (feat, main, side)
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("m");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let bs = root.branch_store.as_ref().unwrap().read(cx);
+            assert!(
+                bs.message
+                    .as_deref()
+                    .map(|m| m.contains("conflicts"))
+                    .unwrap_or(false),
+                "conflicts reported, got {:?}",
+                bs.message
+            );
+        });
+
+        // Back to Working Copy: the pause is visible and the other
+        // sections are gated. The probe rides the wc refresh (real git
+        // wall time) — wait for it.
+        vcx.simulate_keystrokes("1");
+        let mut seen = None;
+        for _ in 0..100 {
+            seen = view.update(&mut vcx.cx, |root, cx| {
+                root.detail.as_ref().and_then(|wc| wc.read(cx).in_progress)
+            });
+            if seen.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            vcx.run_until_parked();
+        }
+        assert_eq!(
+            seen,
+            Some(crate::engine::sequence::InProgress::Merge),
+            "banner state from the git probe"
+        );
+
+        // Resolve in-place and stage via s (the file is the default row).
+        std::fs::write(repo.join("f.txt"), "resolved\n").unwrap();
+        vcx.simulate_keystrokes("s");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let store = root.detail.as_ref().unwrap().read(cx);
+            assert!(
+                store.staged_count() >= 1,
+                "resolution staged, staged={}",
+                store.staged_count()
+            );
+        });
+
+        // g completes the merge.
+        vcx.simulate_keystrokes("g");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let store = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(
+                store.message.as_deref(),
+                Some("Merge completed"),
+                "continue landed, got {:?}",
+                store.message
+            );
+            assert!(store.in_progress.is_none(), "pause cleared");
+        });
+        let log = std::process::Command::new("git")
+            .args(["log", "--format=%s", "-1"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&log.stdout);
+        assert!(log.contains("Merge"), "merge commit exists: {log}");
+    }
+
+    #[gpui::test]
+    fn paused_merge_aborts_and_unblocks_other_sections(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        sh(&repo, &["git", "checkout", "-qb", "side"]);
+        std::fs::write(repo.join("f.txt"), "side change\n").unwrap();
+        sh(&repo, &["git", "commit", "-qam", "side"]);
+        sh(&repo, &["git", "checkout", "-q", "main"]);
+        std::fs::write(repo.join("f.txt"), "main change\n").unwrap();
+        sh(&repo, &["git", "commit", "-qam", "main"]);
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("3");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("down"); // side (feat, main, side)
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("m");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+
+        // The pause reaches the Working Copy store through a two-hop
+        // async chain (branch observer -> wc refresh -> git probe) whose
+        // git subprocesses finish on real threads: wait for it instead
+        // of racing it.
+        let mut paused = false;
+        for _ in 0..100 {
+            paused = view.update(&mut vcx.cx, |root, cx| {
+                root.detail
+                    .as_ref()
+                    .map(|wc| wc.read(cx).in_progress.is_some())
+                    .unwrap_or(false)
+            });
+            if paused {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            vcx.run_until_parked();
+        }
+        assert!(paused, "the paused merge reached the wc store's probe");
+        // While paused, a branch switch refuses (the pause owns the
+        // worktree).
+        vcx.simulate_keystrokes("x");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let bs = root.branch_store.as_ref().unwrap().read(cx);
+            assert!(
+                bs.message
+                    .as_deref()
+                    .map(|m| m.contains("another section") || m.contains("Busy"))
+                    .unwrap_or(false),
+                "switch refused while paused, got {:?}",
+                bs.message
+            );
+        });
+
+        // A aborts the pause from Working Copy.
+        vcx.simulate_keystrokes("1");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("shift-a");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let store = root.detail.as_ref().unwrap().read(cx);
+            assert_eq!(
+                store.message.as_deref(),
+                Some("Merge aborted"),
+                "abort landed, got {:?}",
+                store.message
+            );
+            assert!(store.in_progress.is_none());
+        });
+        // The pre-merge state is back. Line endings are the runner's
+        // business (a checkout round-trip may hand CRLF back on Windows)
+        // — the invariant is the committed CONTENT.
+        let content = std::fs::read_to_string(repo.join("f.txt")).unwrap();
+        assert_eq!(
+            content.replace("\r\n", "\n"),
+            "main change\n",
+            "worktree restored"
+        );
     }
 
     #[gpui::test]

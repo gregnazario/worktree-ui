@@ -4,7 +4,10 @@
 mod common;
 
 use common::{fixture_repo, sh, sh_allow_fail, sh_out};
-use worktree_tool::engine::rewrite::{self, TodoAction, TodoStep};
+use worktree_tool::engine::{
+    rewrite::{self, TodoAction, TodoStep},
+    sequence,
+};
 
 /// Repo on `main` with one commit; `side` branches off with two commits
 /// touching independent files. Returns (dir, side_tip, side_base).
@@ -39,7 +42,7 @@ fn cherry_pick_applies_a_foreign_commit() {
 }
 
 #[test]
-fn cherry_pick_conflict_aborts_and_reports() {
+fn cherry_pick_conflict_reports_and_pauses() {
     let tmp = tempfile::tempdir().unwrap();
     fixture_repo(tmp.path());
     sh(Some(tmp.path()), &["git", "checkout", "-qb", "side"]);
@@ -54,7 +57,10 @@ fn cherry_pick_conflict_aborts_and_reports() {
     assert_eq!(conflicts, vec!["f.txt".to_string()]);
 
     let picking = tmp.path().join(".git").join("CHERRY_PICK_HEAD");
-    assert!(!picking.exists(), "must not stay mid-cherry-pick");
+    assert!(picking.exists(), "cherry-pick paused for resolution");
+    // Abort unwinds (the tested escape hatch).
+    sequence::abort_op(tmp.path()).unwrap();
+    assert!(!picking.exists(), "abort unwound");
     let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
     assert_eq!(content, "main change", "worktree restored");
 }
@@ -79,7 +85,7 @@ fn revert_creates_a_revert_commit() {
 }
 
 #[test]
-fn revert_conflict_aborts_and_reports() {
+fn revert_conflict_reports_and_pauses() {
     let tmp = tempfile::tempdir().unwrap();
     fixture_repo(tmp.path());
     std::fs::write(tmp.path().join("f.txt"), "one\ntwo\n").unwrap();
@@ -93,7 +99,9 @@ fn revert_conflict_aborts_and_reports() {
     let conflicts = rewrite::revert(tmp.path(), &to_revert).unwrap();
     assert_eq!(conflicts, vec!["f.txt".to_string()]);
     let reverting = tmp.path().join(".git").join("REVERT_HEAD");
-    assert!(!reverting.exists(), "must not stay mid-revert");
+    assert!(reverting.exists(), "revert paused for resolution");
+    sequence::abort_op(tmp.path()).unwrap();
+    assert!(!reverting.exists(), "abort unwound");
     let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
     assert_eq!(content, "one\nrewritten\n", "worktree restored");
 }
@@ -296,13 +304,12 @@ fn rebase_todo_rejects_bad_input() {
 }
 
 #[test]
-fn cherry_pick_self_heals_a_wedged_sequence() {
+fn cherry_pick_persists_an_already_paused_sequence() {
     // A mid-sequence repo (deliberately conflicted cherry-pick, left
-    // running via sh_allow_fail) — only reachable via external git use,
-    // since the engine always aborts its own conflicts. The next pick
-    // hits git's mid-sequence refusal; the conflicted-files probe then
-    // finds the stale sequence's conflicts, aborts it, and reports the
-    // paths: the repo is usable again in one step.
+    // running via sh_allow_fail) — paused state is now SUPPORTED, not
+    // wedged. The next pick hits git's mid-sequence refusal; the
+    // conflict probe reports the paths and the state PERSISTS for the
+    // user to resolve, continue, or abort explicitly.
     let tmp = tempfile::tempdir().unwrap();
     fixture_repo(tmp.path());
     sh(Some(tmp.path()), &["git", "checkout", "-qb", "side"]);
@@ -318,16 +325,19 @@ fn cherry_pick_self_heals_a_wedged_sequence() {
         &["git", "cherry-pick", &side_tip], // conflicts, left mid-sequence
     );
     let other = sh_out(tmp.path(), &["git", "rev-parse", "HEAD"]);
+    // The pick fails (mid-sequence) and the probe reports the STILL
+    // unresolved paths; the state persists for explicit resolution.
     let conflicts = rewrite::cherry_pick(tmp.path(), &other).unwrap();
     assert_eq!(conflicts, vec!["f.txt".to_string()]);
     assert!(
-        !tmp.path().join(".git").join("CHERRY_PICK_HEAD").exists(),
-        "sequence aborted by the self-heal"
+        tmp.path().join(".git").join("CHERRY_PICK_HEAD").exists(),
+        "paused state persists for explicit resolution"
     );
+    sequence::abort_op(tmp.path()).unwrap();
 }
 
 #[test]
-fn cherry_pick_empty_result_still_unwinds() {
+fn cherry_pick_empty_result_leaves_a_visible_pause() {
     let tmp = tempfile::tempdir().unwrap();
     fixture_repo(tmp.path());
     // Two commits producing IDENTICAL content on different branches:
@@ -350,12 +360,13 @@ fn cherry_pick_empty_result_still_unwinds() {
 
     // The message text varies by git version (the "now empty" advice
     // block's last line wins) — what matters is that it FAILED and the
-    // sequencer state unwound, asserted below.
+    // pause is visible for the user to abort explicitly.
     let _err = rewrite::cherry_pick(tmp.path(), &side_tip).unwrap_err();
     assert!(
-        !tmp.path().join(".git").join("CHERRY_PICK_HEAD").exists(),
-        "sequence state unwound even without conflicts"
+        tmp.path().join(".git").join("CHERRY_PICK_HEAD").exists(),
+        "empty pick leaves the pause visible"
     );
+    sequence::abort_op(tmp.path()).unwrap();
     let log = sh_out(tmp.path(), &["git", "log", "--format=%s"]);
     assert!(log.contains("main same"), "branch untouched");
 }

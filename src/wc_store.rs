@@ -3,9 +3,18 @@
 //! are dropped, while mutation completions always apply (the disk effect is
 //! real whenever it lands).
 
-use crate::engine::{self, commit, diff, mutate, working_copy as eng};
+use crate::engine::{self, commit, diff, mutate, sequence, working_copy as eng};
 use gpui::{App, AppContext, Context, Entity};
 use std::path::PathBuf;
+
+/// "merge" → "Merge": completion messages start a sentence.
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
@@ -57,6 +66,12 @@ pub struct WorkingCopyStore {
     /// this store's mutating entry points must not race it in the same
     /// worktree. Set by the shell observer regardless of entry point.
     pub history_busy: bool,
+    /// A paused merge / rebase / cherry-pick / revert in this worktree,
+    /// probed from git on every refresh (never app memory). The banner
+    /// names it; `g`/`K`/`A` drive it.
+    pub in_progress: Option<sequence::InProgress>,
+    /// (current step, total) of an in-progress rebase.
+    pub rebase_step: Option<(u64, u64)>,
     /// The current `message` is the transient "Busy" hint (set by a
     /// mutating entry point that was swallowed while busy). Completions
     /// clear it so the hint never outlives the operation.
@@ -113,6 +128,8 @@ impl WorkingCopyStore {
             mutated: false,
             history_changed: false,
             history_busy: false,
+            in_progress: None,
+            rebase_step: None,
             load_failed: false,
             busy_hint: false,
             pending_notice: None,
@@ -215,12 +232,27 @@ impl WorkingCopyStore {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { eng::status(&worktree) })
+                .spawn(async move {
+                    let status = eng::status(&worktree);
+                    // The paused-operation probe rides the same git
+                    // batch: the banner must track reality, not a stale
+                    // app-side flag.
+                    let op = sequence::operation_state(&worktree);
+                    let step = if op == Some(sequence::InProgress::Rebase) {
+                        sequence::rebase_progress(&worktree)
+                    } else {
+                        None
+                    };
+                    (status, op, step)
+                })
                 .await;
+            let (result, op, step) = result;
             this.update(cx, |store, cx| {
                 if gen != store.generation {
                     return;
                 }
+                store.in_progress = op;
+                store.rebase_step = step;
                 match result {
                     Ok(wc) => {
                         if store.busy_hint {
@@ -955,6 +987,210 @@ impl WorkingCopyStore {
             .ok();
         })
         .detach();
+    }
+
+    /// Shared pre-flight for the sequence keys (g / K / A): an unrelated
+    /// mutation in flight, a history action racing the worktree, or
+    /// nothing actually paused all explain themselves.
+    fn sequence_blocker(&self) -> Option<String> {
+        if self.mutating {
+            return Some("Busy — wait for the current operation".into());
+        }
+        if self.history_busy {
+            return Some("Busy — a history action is finishing in this worktree".into());
+        }
+        None
+    }
+
+    /// `g`: continues the paused operation with its stored message (no
+    /// editor). Still-unresolved files come back as git's own refusal.
+    pub fn continue_op(&mut self, cx: &mut Context<Self>) {
+        if let Some(blocked) = self.sequence_blocker() {
+            self.message = Some(blocked);
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        let Some(op) = self.in_progress else {
+            self.message = Some("No operation in progress".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        };
+        let worktree = self.worktree.clone();
+        self.mutating = true;
+        self.message = Some(format!("Continuing {}…", op.label()));
+        self.note_transient_hint();
+        cx.notify();
+        let label = op.label().to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { sequence::continue_op(&worktree) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.mutating = false;
+                match result {
+                    Ok(conflicts) if conflicts.is_empty() => {
+                        store.message = Some(format!("{} completed", capitalize(&label)));
+                        // The continue created a commit (merge/rebase/
+                        // cherry-pick/revert all can) and touched files.
+                        store.mutated = true;
+                        store.history_changed = true;
+                        store.busy_hint = false;
+                        store.after_sequence_state_change(cx);
+                    }
+                    Ok(conflicts) => {
+                        store.message = Some(format!(
+                            "Still unresolved: {} — resolve, stage with s, then g",
+                            conflicts.join(", ")
+                        ));
+                        store.busy_hint = true;
+                        store.after_sequence_state_change(cx);
+                    }
+                    Err(e) => {
+                        store.message = Some(if e.is_lock_error() {
+                            "another git process may be using this worktree — retry".into()
+                        } else {
+                            e.message
+                        });
+                        store.busy_hint = true;
+                        store.after_sequence_state_change(cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `K`: skips the current step of a rebase / cherry-pick. The next
+    /// step may conflict immediately — reported the same way.
+    pub fn skip_op(&mut self, cx: &mut Context<Self>) {
+        if let Some(blocked) = self.sequence_blocker() {
+            self.message = Some(blocked);
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        let Some(op) = self.in_progress else {
+            self.message = Some("No operation in progress".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        };
+        if !op.skippable() {
+            self.message = Some(format!("A paused {} has no step to skip", op.label()));
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        let worktree = self.worktree.clone();
+        self.mutating = true;
+        self.message = Some("Skipping…".into());
+        self.note_transient_hint();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { sequence::skip_op(&worktree) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.mutating = false;
+                match result {
+                    Ok(conflicts) if conflicts.is_empty() => {
+                        store.message = Some("Step skipped".into());
+                        store.mutated = true;
+                        store.history_changed = true;
+                        store.busy_hint = false;
+                        store.after_sequence_state_change(cx);
+                    }
+                    Ok(conflicts) => {
+                        store.message = Some(format!(
+                            "Next step conflicts in {} — resolve, stage with s, then g",
+                            conflicts.join(", ")
+                        ));
+                        store.busy_hint = true;
+                        store.after_sequence_state_change(cx);
+                    }
+                    Err(e) => {
+                        store.message = Some(if e.is_lock_error() {
+                            "another git process may be using this worktree — retry".into()
+                        } else {
+                            e.message
+                        });
+                        store.busy_hint = true;
+                        store.after_sequence_state_change(cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `A`: aborts the paused operation, restoring the pre-operation
+    /// state (no history change — aborts never create commits).
+    pub fn abort_op(&mut self, cx: &mut Context<Self>) {
+        if let Some(blocked) = self.sequence_blocker() {
+            self.message = Some(blocked);
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        let Some(op) = self.in_progress else {
+            self.message = Some("No operation in progress".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        };
+        let worktree = self.worktree.clone();
+        self.mutating = true;
+        self.message = Some(format!("Aborting {}…", op.label()));
+        self.note_transient_hint();
+        cx.notify();
+        let label = op.label().to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { sequence::abort_op(&worktree) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.mutating = false;
+                match result {
+                    Ok(()) => {
+                        store.message = Some(format!("{} aborted", capitalize(&label)));
+                        store.mutated = true;
+                        store.busy_hint = false;
+                        store.after_sequence_state_change(cx);
+                    }
+                    Err(e) => {
+                        store.message = Some(if e.is_lock_error() {
+                            "another git process may be using this worktree — retry".into()
+                        } else {
+                            e.message
+                        });
+                        store.busy_hint = true;
+                        store.after_sequence_state_change(cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The cached snapshot and every cached diff just went stale (the
+    /// index/worktree changed under the sequence action). Same
+    /// invalidation `after_mutation` does, plus a refresh that re-probes
+    /// the paused state — the banner tracks the probe, not a flag.
+    fn after_sequence_state_change(&mut self, cx: &mut Context<Self>) {
+        self.detail = None;
+        self.detail_of = None;
+        self.refresh(cx);
     }
 
     fn after_mutation(&mut self, result: engine::Result<()>, cx: &mut Context<Self>) {

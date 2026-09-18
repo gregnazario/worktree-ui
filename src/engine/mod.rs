@@ -34,6 +34,7 @@ pub mod history;
 pub mod mutate;
 pub mod remotes;
 pub mod rewrite;
+pub mod sequence;
 pub mod stash;
 pub mod working_copy;
 

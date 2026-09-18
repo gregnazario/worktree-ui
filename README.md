@@ -102,6 +102,9 @@ Detail view (per worktree):
 | `S` | Stage all remaining changes |
 | `d` | Discard selected file's changes (confirmation) |
 | `c` | Commit staged changes via your editor |
+| `g` | Continue the paused merge / rebase / cherry-pick / revert |
+| `K` | Skip the current step (paused rebase / cherry-pick) |
+| `A` | Abort the paused operation, restoring the pre-operation state |
 | `t` | Open worktree in terminal |
 | `r` | Refresh working copy |
 | `esc` | Back to worktree list |
@@ -145,8 +148,8 @@ Branches section (`3` from the detail view):
 
 Remote-tracking branches (`origin/…`) are listed after the locals; switching
 and deleting refuse them, and merging/rebasing from them works. A conflicted
-merge or rebase is aborted automatically — the conflicted paths are reported
-and the worktree is left exactly as it was, so nothing wedges mid-operation.
+merge or rebase **pauses** (see Working Copy above): resolve and press `g`
+in the Working Copy section, or `A` to back out.
 
 ## Working Copy
 
@@ -167,6 +170,16 @@ Press `c` to write a commit: the app opens your editor exactly like
 message to commit; empty the message to abort. Conflicted files show their
 raw content — resolve them in your own editor, then press `s` to mark them
 resolved.
+
+A conflicted merge, rebase, cherry-pick, or revert **pauses** instead of
+backing out: a banner names the operation (with rebase progress, e.g.
+"rebasing 2/5"), and the paused state is real git state — other git
+clients see it too. Resolve the files in your own editor, stage with `s`,
+then `g` continues with the stored message (no editor round trip). `K`
+skips the current step of a rebase or cherry-pick; `A` aborts and
+restores the pre-operation state. While paused, mutating actions in the
+other sections (branch switch, history checkout) refuse until you
+continue or abort.
 
 ## Settings
 
