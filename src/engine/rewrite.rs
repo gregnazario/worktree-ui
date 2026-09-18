@@ -1,10 +1,11 @@
 //! History-rewrite operations on the checked-out branch: cherry-pick,
-//! revert, and scripted interactive rebase. Same conflict contract as
-//! `branches::merge`/`branches::rebase`: on conflict the conflicted paths
-//! come back as the `Ok` payload AND the operation is aborted — there is
-//! no continue flow in this UI, and wedged state (CHERRY_PICK_HEAD,
-//! rebase-merge) would block every later operation. All commands are
-//! argv-based; commit-ish arguments are validated object IDs.
+//! revert, and scripted interactive rebase. Single operations pause on
+//! conflict (the conflicted paths come back as the `Ok` payload and the
+//! sequence state stays — resolve + continue via `sequence::continue_op`
+//! or abort); the multi-commit rewrite chain is the one atomic operation
+//! (its steps live only in app memory, so a paused mid-chain could never
+//! be continued). All commands are argv-based; commit-ish arguments are
+//! validated object IDs.
 
 use crate::engine::{self, GitError, Result};
 use std::path::Path;
@@ -44,32 +45,26 @@ fn conflicted_files(worktree: &Path) -> Result<Vec<String>> {
 pub fn cherry_pick(worktree: &Path, oid: &str) -> Result<Vec<String>> {
     validate_oid(oid)?;
     let result = engine::run_trimmed(worktree, &["cherry-pick", oid]);
-    finish_with_abort(worktree, result, "cherry-pick")
+    finish_with_conflicts(worktree, result)
 }
 
 /// Reverts commit `oid` with an auto-generated revert commit. On
-/// conflict: aborts and returns the conflicted paths.
+/// conflict: pauses and returns the conflicted paths.
 pub fn revert(worktree: &Path, oid: &str) -> Result<Vec<String>> {
     validate_oid(oid)?;
     let result = engine::run_trimmed(worktree, &["revert", "--no-edit", oid]);
-    finish_with_abort(worktree, result, "revert")
+    finish_with_conflicts(worktree, result)
 }
 
-/// Shared failure resolution for cherry-pick/revert. git can fail with
-/// sequencer state and NO conflicts — most commonly an empty result
-/// ("The previous cherry-pick is now empty") — so the abort runs
-/// unconditionally on failure (a no-op when nothing is running), and
-/// only a non-empty conflict probe turns the failure into `Ok(paths)`.
-fn finish_with_abort(
-    worktree: &Path,
-    result: Result<String>,
-    abort_command: &str,
-) -> Result<Vec<String>> {
+/// Shared conflict reporting for cherry-pick/revert: a conflicted run
+/// PAUSES (the sequence state stays for resolve-and-continue) and the
+/// conflicted paths are returned; any other failure propagates the
+/// original error.
+fn finish_with_conflicts(worktree: &Path, result: Result<String>) -> Result<Vec<String>> {
     match result {
         Ok(_) => Ok(Vec::new()),
         Err(e) => {
             let conflicts = conflicted_files(worktree).unwrap_or_default();
-            let _ = engine::run_trimmed(worktree, &[abort_command, "--abort"]);
             if conflicts.is_empty() {
                 Err(e)
             } else {

@@ -160,22 +160,19 @@ fn conflicted_files(worktree: &Path) -> Result<Vec<String>> {
 }
 
 /// Merges a branch into the current branch. On conflict the conflicted
-/// paths are returned as the `Ok` payload AND the merge is aborted —
-/// there is no continue flow in this UI, and a wedged MERGE_HEAD would
-/// block every later operation; aborting restores the pre-merge state.
+/// paths are returned as the `Ok` payload and the merge STAYS PAUSED:
+/// resolve in the Working Copy section, stage, then continue
+/// (`sequence::continue_op`) or abort. The paused state is real git
+/// state, visible to every other client.
 pub fn merge(worktree: &Path, branch: &str) -> Result<Vec<String>> {
     validate_branch_name(branch)?;
     let result = engine::run_trimmed(worktree, &["merge", "--no-edit", "--", branch]);
     match result {
         Ok(_) => Ok(Vec::new()),
         Err(e) => {
-            // A failing conflict query must not swallow `e` — and must
-            // not skip the abort below, which unwedges the repo.
+            // A failing conflict query must not swallow `e`.
             match conflicted_files(worktree) {
-                Ok(conflicts) if !conflicts.is_empty() => {
-                    let _ = engine::run_trimmed(worktree, &["merge", "--abort"]);
-                    Ok(conflicts)
-                }
+                Ok(conflicts) if !conflicts.is_empty() => Ok(conflicts),
                 // Not a conflict (or the query failed) — propagate the
                 // original error.
                 _ => Err(e),
@@ -185,18 +182,15 @@ pub fn merge(worktree: &Path, branch: &str) -> Result<Vec<String>> {
 }
 
 /// Rebases the current branch onto `onto`. On conflict the conflicted
-/// paths are returned as the `Ok` payload and the rebase is aborted
-/// (same rationale as `merge`: no continue flow, never stay mid-rebase).
+/// paths are returned and the rebase STAYS PAUSED on the conflicted
+/// step (same as `merge`).
 pub fn rebase(worktree: &Path, onto: &str) -> Result<Vec<String>> {
     validate_branch_name(onto)?;
     let result = engine::run_trimmed(worktree, &["rebase", "--", onto]);
     match result {
         Ok(_) => Ok(Vec::new()),
         Err(e) => match conflicted_files(worktree) {
-            Ok(conflicts) if !conflicts.is_empty() => {
-                let _ = engine::run_trimmed(worktree, &["rebase", "--abort"]);
-                Ok(conflicts)
-            }
+            Ok(conflicts) if !conflicts.is_empty() => Ok(conflicts),
             _ => Err(e),
         },
     }

@@ -795,7 +795,7 @@ impl HistoryStore {
                             format!("Cherry-picked {display_short}")
                         } else {
                             format!(
-                            "Cherry-pick conflicts in {} — cherry-pick aborted, worktree restored",
+                            "Cherry-pick conflicts in {} — resolve in the Working Copy section, then g to continue (A aborts)",
                             conflicts.join(", ")
                         )
                         }
@@ -845,7 +845,7 @@ impl HistoryStore {
                             format!("Reverted {display_short}")
                         } else {
                             format!(
-                                "Revert conflicts in {} — revert aborted, worktree restored",
+                                "Revert conflicts in {} — resolve in the Working Copy section, then g to continue (A aborts)",
                                 conflicts.join(", ")
                             )
                         }
@@ -921,7 +921,7 @@ impl HistoryStore {
                             format!("Rebased {count} commits")
                         } else {
                             format!(
-                                "Rebase conflicts in {} — rebase aborted, worktree restored",
+                                "Rebase conflicts in {} — resolve in the Working Copy section, then g to continue (A aborts)",
                                 conflicts.join(", ")
                             )
                         }
