@@ -3116,9 +3116,15 @@ mod tests {
             );
             assert!(store.in_progress.is_none());
         });
-        // The pre-merge state is back.
+        // The pre-merge state is back. Line endings are the runner's
+        // business (a checkout round-trip may hand CRLF back on Windows)
+        // — the invariant is the committed CONTENT.
         let content = std::fs::read_to_string(repo.join("f.txt")).unwrap();
-        assert_eq!(content, "main change\n", "worktree restored");
+        assert_eq!(
+            content.replace("\r\n", "\n"),
+            "main change\n",
+            "worktree restored"
+        );
     }
 
     #[gpui::test]
