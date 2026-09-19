@@ -477,3 +477,27 @@ pub fn commit(worktree: &Path, message: &str) -> Result<()> {
     let _ = std::fs::remove_file(&msg_path);
     Ok(())
 }
+
+/// The repo's comment character for commit messages (`core.commentChar`,
+/// default `#`; git's `auto` mode approximated with `#`).
+pub fn comment_char(worktree: &Path) -> char {
+    engine::run_trimmed(worktree, &["config", "--get", "core.commentChar"])
+        .ok()
+        .filter(|v| v.trim() != "auto")
+        .and_then(|v| v.trim().chars().next())
+        .unwrap_or('#')
+}
+
+/// Commits from an in-app editor draft: strips comment lines (git's
+/// `core.commentChar`, default `#`), refuses an empty result, then
+/// delegates to `commit`. Same message semantics as the `$EDITOR`
+/// flow — the editor is just in-process.
+pub fn commit_from_draft(worktree: &Path, draft: &str) -> Result<()> {
+    let message = strip_comments(comment_char(worktree), draft);
+    if message.is_empty() {
+        return Err(GitError {
+            message: "empty commit message — write a subject line first".into(),
+        });
+    }
+    commit(worktree, &message)
+}

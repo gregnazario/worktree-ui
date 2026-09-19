@@ -101,7 +101,8 @@ Detail view (per worktree):
 | `s` | Stage / unstage selected file (diff pane focused: stage hovered hunk) |
 | `S` | Stage all remaining changes |
 | `d` | Discard selected file's changes (confirmation) |
-| `c` | Commit staged changes via your editor |
+| `c` | Commit staged changes in the in-app editor (cmd/ctrl+enter commits) |
+| `C` | Commit via your `$EDITOR` (git's own resolution order) |
 | `g` | Continue the paused merge / rebase / cherry-pick / revert |
 | `K` | Skip the current step (paused rebase / cherry-pick) |
 | `A` | Abort the paused operation, restoring the pre-operation state |
@@ -164,12 +165,17 @@ With the diff pane focused, `↑`/`↓` move a cursor between the file's hunks
 and `s` stages just the hovered hunk (`git apply --cached` — the worktree
 file is never touched). Binary and untracked files stage whole-file only.
 
-Press `c` to write a commit: the app opens your editor exactly like
-`git commit` does, resolving it in git's own order — `$GIT_EDITOR`,
-`core.editor`, `$VISUAL`, `$EDITOR`, then a platform default. Save a
-message to commit; empty the message to abort. Conflicted files show their
-raw content — resolve them in your own editor, then press `s` to mark them
-resolved.
+Press `c` to write a commit in the app: a multi-line editor opens
+pre-filled with commented hints (which never reach the message — lines
+starting with `#` are stripped, honoring `core.commentChar`). Enter is a
+newline; cmd/ctrl+enter or the Commit button commits, esc cancels and
+keeps your staged changes.
+
+`C` instead opens your own editor exactly like `git commit` does,
+resolving it in git's order — `$GIT_EDITOR`, `core.editor`, `$VISUAL`,
+`$EDITOR`, then a platform default. Save a message to commit; empty the
+message to abort. Conflicted files show their raw content — resolve them
+in your own editor, then press `s` to mark them resolved.
 
 A conflicted merge, rebase, cherry-pick, or revert **pauses** instead of
 backing out: a banner names the operation (with rebase progress, e.g.

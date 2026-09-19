@@ -266,7 +266,7 @@ pub fn render(
                             // never advertises a key that would only hint.
                             "S stage all · tab back to files · r refresh · t terminal · esc back".to_string()
                         } else {
-                            "↑↓ move · s stage/unstage · S stage all · d discard · c commit · tab pane · r refresh · t terminal · esc back".to_string()
+                            "↑↓ move · s stage/unstage · S stage all · d discard · c commit · C $EDITOR · tab pane · r refresh · t terminal · esc back".to_string()
                         },
                     ),
                 )
