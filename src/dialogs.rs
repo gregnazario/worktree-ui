@@ -71,6 +71,23 @@ pub enum DialogState {
         staged_summary: String,
         comment_char: char,
     },
+    /// Remote management (home screen). The list loads on the background
+    /// executor after the dialog opens; `loading` covers the gap.
+    RemotesDialog {
+        repo: PathBuf,
+        entries: Vec<crate::engine::remotes::RemoteInfo>,
+        selected: usize,
+        loading: bool,
+        load_failed: Option<String>,
+    },
+    /// Add a remote: name + URL.
+    AddRemote {
+        repo: PathBuf,
+        name: Entity<TextField>,
+        url: Entity<TextField>,
+    },
+    /// Confirm before `git remote remove` (ref surgery: tracking refs go).
+    RemoveRemote { repo: PathBuf, name: String },
 }
 
 /// One todo row. `action` mutates in place via the dialog keys; the
@@ -952,6 +969,304 @@ pub fn render_commit_editor_dialog(
                     Some(GREEN),
                     None,
                     cx.listener(|this, _, window, cx| this.confirm_commit_dialog(window, cx)),
+                )),
+        )
+}
+
+pub fn render_remotes_dialog(
+    this: &mut RootView,
+    _window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let DialogState::RemotesDialog {
+        entries,
+        selected,
+        loading,
+        load_failed,
+        ..
+    } = &this.dialog
+    else {
+        unreachable!("remotes dialog rendered without state")
+    };
+    let entries = entries.clone();
+    let selected = *selected;
+    let loading = *loading;
+    let load_failed = load_failed.clone();
+
+    let dialog_focus = this.dialog_focus.clone();
+    let mut card = div()
+        .id("remotes-dialog")
+        .track_focus(&dialog_focus)
+        .w(px(640.))
+        .max_h(px(420.))
+        .p_4()
+        .rounded_lg()
+        .bg(PANEL)
+        .border_1()
+        .border_color(BORDER)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            cx.stop_propagation();
+            let DialogState::RemotesDialog { entries, selected, .. } = &mut this.dialog
+            else {
+                return;
+            };
+            match event.keystroke.key.as_str() {
+                "escape" => this.close_dialog(window, cx),
+                "up" => {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                    cx.notify();
+                }
+                "down" => {
+                    if *selected + 1 < entries.len() {
+                        *selected += 1;
+                    }
+                    cx.notify();
+                }
+                "a" => {
+                    let DialogState::RemotesDialog { repo, .. } = &this.dialog else {
+                        return;
+                    };
+                    let repo = repo.clone();
+                    this.open_add_remote_dialog(repo, window, cx);
+                }
+                "d" | "delete" => {
+                    let DialogState::RemotesDialog { repo, entries, selected, .. } = &this.dialog
+                    else {
+                        return;
+                    };
+                    let Some(entry) = entries.get(*selected) else {
+                        return;
+                    };
+                    let (repo, name) = (repo.clone(), entry.name.clone());
+                    this.open_remove_remote_dialog(repo, name, window, cx);
+                }
+                _ => {}
+            }
+        }))
+        .child(
+            div()
+                .text_size(px(15.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(TEXT)
+                .child("Remotes"),
+        );
+
+    if let Some(err) = load_failed {
+        card = card.child(
+            div()
+                .text_size(px(12.))
+                .text_color(RED)
+                .child(format!("Loading remotes failed: {err}")),
+        );
+    } else if loading {
+        card = card
+            .child(div().text_size(px(12.)).text_color(DIM).child("Loading…"));
+    } else if entries.is_empty() {
+        card = card.child(
+            div()
+                .text_size(px(12.))
+                .text_color(DIM)
+                .child("No remotes — a adds one"),
+        );
+    } else {
+        let mut list = div().id("remote-rows").flex().flex_col().gap_px();
+        for (pos, entry) in entries.iter().enumerate() {
+            let is_selected = pos == selected;
+            let push_note = if entry.push_url != entry.fetch_url {
+                format!("  (push: {})", entry.push_url)
+            } else {
+                String::new()
+            };
+            let row = div()
+                .id(SharedString::from(format!("remote-row-{pos}")))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .when(is_selected, |r| r.bg(ROW_SELECTED))
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    if let DialogState::RemotesDialog { selected, .. } = &mut this.dialog {
+                        *selected = pos;
+                        cx.notify();
+                    }
+                }));
+            let mut row = row.child(
+                div()
+                    .w(px(110.))
+                    .flex_shrink_0()
+                    .text_size(px(12.))
+                    .text_color(TEXT)
+                    .truncate()
+                    .child(entry.name.clone()),
+            );
+            row = row.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(11.))
+                    .text_color(DIM)
+                    .truncate()
+                    .child(format!("{}{push_note}", entry.fetch_url)),
+            );
+            list = list.child(row);
+        }
+        card = card.child(list);
+    }
+
+    card.child(label(
+        "a add remote · d remove selected · up/down move · esc close".to_string(),
+    ))
+}
+
+pub fn render_add_remote_dialog(
+    this: &mut RootView,
+    _window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let DialogState::AddRemote { name, url, .. } = &this.dialog
+    else {
+        unreachable!("add-remote dialog rendered without state")
+    };
+    let name_value = name.read(cx).value.trim().to_string();
+    let url_value = url.read(cx).value.trim().to_string();
+    let can_confirm = !name_value.is_empty() && !url_value.is_empty();
+
+    let dialog_focus = this.dialog_focus.clone();
+    let name_field = name.clone();
+    let url_field = url.clone();
+    div()
+        .id("add-remote-dialog")
+        .track_focus(&dialog_focus)
+        .w(px(560.))
+        .p_4()
+        .rounded_lg()
+        .bg(PANEL)
+        .border_1()
+        .border_color(BORDER)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            cx.stop_propagation();
+            match event.keystroke.key.as_str() {
+                "escape" => this.close_dialog(window, cx),
+                "enter" => this.confirm_add_remote(window, cx),
+                _ => {}
+            }
+        }))
+        .child(
+            div()
+                .text_size(px(15.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(TEXT)
+                .child("Add remote"),
+        )
+        .child(field_row("Name", name_field, "e.g. origin".to_string()))
+        .child(field_row(
+            "URL",
+            url_field,
+            "https:// or git@ssh path".to_string(),
+        ))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .when(!can_confirm, |row| row.opacity(0.4))
+                .child(button(
+                    "add-remote-cancel",
+                    "Cancel",
+                    TEXT,
+                    None,
+                    Some(BORDER),
+                    cx.listener(|this, _, window, cx| cancel(this, window, cx)),
+                ))
+                .child(button(
+                    "add-remote-confirm",
+                    "Add",
+                    rgb(0x11111b),
+                    Some(GREEN),
+                    None,
+                    cx.listener(|this, _, window, cx| this.confirm_add_remote(window, cx)),
+                )),
+        )
+}
+
+pub fn render_remove_remote_dialog(
+    this: &mut RootView,
+    _window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let DialogState::RemoveRemote { name, .. } = &this.dialog
+    else {
+        unreachable!("remove-remote dialog rendered without state")
+    };
+    let name = name.clone();
+
+    let dialog_focus = this.dialog_focus.clone();
+    div()
+        .id("remove-remote-dialog")
+        .track_focus(&dialog_focus)
+        .w(px(480.))
+        .p_4()
+        .rounded_lg()
+        .bg(PANEL)
+        .border_1()
+        .border_color(BORDER)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            cx.stop_propagation();
+            match event.keystroke.key.as_str() {
+                "escape" => this.close_dialog(window, cx),
+                "enter" => this.confirm_remove_remote(window, cx),
+                _ => {}
+            }
+        }))
+        .child(
+            div()
+                .text_size(px(15.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(RED)
+                .child(format!("Remove remote {name}?")),
+        )
+        .child(label(
+            "Its remote-tracking refs (origin/*) are removed with it. This cannot be undone."
+                .to_string(),
+        ))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(button(
+                    "remove-remote-cancel",
+                    "Cancel",
+                    TEXT,
+                    None,
+                    Some(BORDER),
+                    cx.listener(|this, _, window, cx| cancel(this, window, cx)),
+                ))
+                .child(button(
+                    "remove-remote-confirm",
+                    "Remove",
+                    rgb(0x11111b),
+                    Some(RED),
+                    None,
+                    cx.listener(|this, _, window, cx| {
+                        this.confirm_remove_remote(window, cx)
+                    }),
                 )),
         )
 }
