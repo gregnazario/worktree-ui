@@ -3299,7 +3299,16 @@ mod tests {
             }
         });
         vcx.update(|window, _cx| window.focus(&url_handle));
-        vcx.simulate_keystrokes(remote.to_str().unwrap());
+        // simulate_keystrokes splits on SPACES: a path is one giant token
+        // unless spelled out per character.
+        let spelled = remote
+            .to_str()
+            .unwrap()
+            .chars()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        vcx.simulate_keystrokes(&spelled);
         vcx.run_until_parked();
 
         // enter adds and returns to the refreshed list.
