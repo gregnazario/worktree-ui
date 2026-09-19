@@ -9,6 +9,7 @@ pub mod model;
 pub mod platform;
 pub mod store;
 pub mod terminal;
+pub mod text_area;
 pub mod text_field;
 pub mod views;
 pub mod wc_store;

@@ -1231,6 +1231,78 @@ impl WorkingCopyStore {
     /// The one exception is the escape hatch: during an editor session `esc`
     /// routes to `abandon_commit` (via the shell's close_detail) instead of
     /// being swallowed.
+    /// `c`: commits the staged changes with the in-app editor's
+    /// message (already comment-stripped by the dialog confirm). Same
+    /// gates and completion flags as the external-editor flow.
+    pub fn commit_in_app(&mut self, message: String, cx: &mut Context<Self>) {
+        if self.history_busy {
+            self.message = Some("Busy — a history action is finishing in this worktree".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        if self.mutating {
+            self.busy_message(cx);
+            return;
+        }
+        if self.wc.is_none() {
+            if !self.load_failed {
+                self.loading_message(cx);
+            }
+            return;
+        }
+        if self.staged_count() == 0 {
+            self.message = Some("Nothing staged — press s on files to stage them first".into());
+            cx.notify();
+            return;
+        }
+        if message.trim().is_empty() {
+            self.message = Some("empty commit message — write a subject line first".into());
+            self.note_transient_hint();
+            cx.notify();
+            return;
+        }
+        let worktree = self.worktree.clone();
+        self.mutating = true;
+        self.message = Some("Committing…".into());
+        self.note_transient_hint();
+        // Cancel in-flight snapshot loads; the completion applies
+        // regardless of generation (see `after_mutation`).
+        self.generation += 1;
+        self.detail_generation += 1;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { commit::commit_from_draft(&worktree, &message) })
+                .await;
+            this.update(cx, |store, cx| {
+                store.mutating = false;
+                store.busy_hint = false;
+                match result {
+                    Ok(()) => {
+                        store.detail = None;
+                        store.detail_of = None;
+                        store.message = Some("Committed".into());
+                        store.mutated = true;
+                        store.history_changed = true;
+                    }
+                    Err(e) => {
+                        store.message = Some(if e.is_lock_error() {
+                            format!("{e} — another git process may be using this worktree; retry")
+                        } else {
+                            e.message
+                        });
+                    }
+                }
+                store.refresh(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub fn commit_with_editor(&mut self, cx: &mut Context<Self>) {
         if self.history_busy {
             self.message = Some("Busy — a history action is finishing in this worktree".into());

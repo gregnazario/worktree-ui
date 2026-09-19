@@ -62,6 +62,12 @@ pub enum DialogState {
         entries: Vec<RebaseEntry>,
         selected: usize,
     },
+    /// In-app commit editor: a multi-line message draft plus the staged
+    /// summary for the hint pre-fill.
+    CommitEditor {
+        field: Entity<crate::text_area::TextArea>,
+        staged_summary: String,
+    },
 }
 
 /// One todo row. `action` mutates in place via the dialog keys; the
@@ -865,4 +871,82 @@ pub fn render_rebase_dialog(
         .child(label(
             "up/down move · d drop · f fixup · enter rebase · esc cancel".to_string(),
         ))
+}
+
+pub fn render_commit_editor_dialog(
+    this: &mut RootView,
+    _window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let DialogState::CommitEditor {
+        field,
+        staged_summary,
+    } = &this.dialog
+    else {
+        unreachable!("commit dialog rendered without state")
+    };
+    let staged_summary = staged_summary.clone();
+
+    let dialog_focus = this.dialog_focus.clone();
+    div()
+        .id("commit-editor-dialog")
+        .track_focus(&dialog_focus)
+        .w(px(720.))
+        .p_4()
+        .rounded_lg()
+        .bg(PANEL)
+        .border_1()
+        .border_color(BORDER)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            let ks = &event.keystroke;
+            if ks.key == "enter" && (ks.modifiers.platform || ks.modifiers.control) {
+                cx.stop_propagation();
+                this.confirm_commit_dialog(window, cx);
+                return;
+            }
+            if ks.key == "escape" {
+                cx.stop_propagation();
+                this.close_dialog(window, cx);
+            }
+        }))
+        .child(
+            div()
+                .text_size(px(15.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(TEXT)
+                .child("Commit"),
+        )
+        .child(div().text_size(px(11.)).text_color(DIM).child(format!(
+            "{staged_summary} — lines starting with '#' are removed from the message"
+        )))
+        .child(field.clone())
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(label(
+                    "enter newline · cmd/ctrl+enter commit · esc cancel".to_string(),
+                ))
+                .child(button(
+                    "commit-cancel",
+                    "Cancel",
+                    TEXT,
+                    None,
+                    Some(BORDER),
+                    cx.listener(|this, _, window, cx| cancel(this, window, cx)),
+                ))
+                .child(button(
+                    "commit-confirm",
+                    "Commit",
+                    rgb(0x11111b),
+                    Some(GREEN),
+                    None,
+                    cx.listener(|this, _, window, cx| this.confirm_commit_dialog(window, cx)),
+                )),
+        )
 }

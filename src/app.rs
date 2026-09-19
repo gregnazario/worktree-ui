@@ -874,7 +874,11 @@ impl RootView {
             "d" if list_focused => self.open_discard_dialog(window, cx),
             // The toolbar advertises "New (n)" on every surface.
             "n" => self.open_create_dialog(window, cx),
-            "c" if list_focused => {
+            // c = in-app commit editor (a modal; esc cancels). C keeps
+            // the git-native $EDITOR flow for people who write messages
+            // in their own editor.
+            "c" if list_focused => self.open_commit_dialog(window, cx),
+            "c" if ks.modifiers.shift => {
                 if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| store.commit_with_editor(cx));
                 }
@@ -1334,6 +1338,63 @@ impl RootView {
             }
         }
         self.close_dialog(window, cx);
+    }
+
+    /// Opens the in-app commit editor pre-filled with commented hints.
+    pub(crate) fn open_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_open() {
+            return;
+        }
+        let Some(wc) = &self.detail else {
+            return;
+        };
+        let (staged, summary) = wc.read_with(cx, |store, _| {
+            let summary = store
+                .wc
+                .as_ref()
+                .map(crate::wc_store::staged_summary)
+                .unwrap_or_default();
+            (store.staged_count(), summary)
+        });
+        if staged == 0 {
+            wc.update(cx, |store, cx| {
+                store.message =
+                    Some("Nothing staged — press s on files to stage them first".into());
+                store.note_transient_hint();
+                cx.notify();
+            });
+            return;
+        }
+        let field = cx.new(crate::text_area::TextArea::new);
+        field.update(cx, |f, cx| {
+            f.set_value(
+                &format!(
+                    "\n\n# Subject line first, then details.\n# {summary}\n# Lines starting with '#' are removed.\n"
+                ),
+                cx,
+            )
+        });
+        let handle = field.read(cx).focus_handle.clone();
+        self.dialog = DialogState::CommitEditor {
+            field,
+            staged_summary: summary,
+        };
+        window.focus(&handle);
+        cx.notify();
+    }
+
+    /// Strips the hint comments and commits via the wc store.
+    pub(crate) fn confirm_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = match &self.dialog {
+            DialogState::CommitEditor { field, .. } => field.read(cx).value().to_string(),
+            _ => return,
+        };
+        let comment_char = '#';
+        let message = crate::engine::commit::strip_comments(comment_char, &draft);
+        self.close_dialog(window, cx);
+        if let Some(wc) = &self.detail {
+            wc.update(cx, |store, cx| store.commit_in_app(message, cx));
+        }
     }
 
     /// Opens the scripted interactive-rebase dialog for the History
@@ -1945,6 +2006,9 @@ impl Render for RootView {
                 }
                 DialogState::RebaseTodo { .. } => {
                     Some(dialogs::render_rebase_dialog(self, window, cx).into_any_element())
+                }
+                DialogState::CommitEditor { .. } => {
+                    Some(dialogs::render_commit_editor_dialog(self, window, cx).into_any_element())
                 }
             };
             if let Some(card) = card {
@@ -2946,6 +3010,96 @@ mod tests {
     }
 
     #[gpui::test]
+    fn in_app_commit_editor_commits_and_strips_hints(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "one\ntwo\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        // Drill in and stage the modification.
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("s");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            assert!(
+                root.detail.as_ref().unwrap().read(cx).staged_count() >= 1,
+                "change staged"
+            );
+        });
+
+        // c opens the in-app editor with the field focused; typing lands
+        // in it.
+        vcx.simulate_keystrokes("c");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert!(matches!(root.dialog, DialogState::CommitEditor { .. }));
+        });
+        vcx.simulate_keystrokes("f i x space b u g");
+        vcx.run_until_parked();
+
+        // cmd+enter commits. The draft still holds the '#' hint lines:
+        // they must not reach the message.
+        vcx.simulate_keystrokes("cmd-enter");
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert!(matches!(root.dialog, DialogState::None), "dialog closed");
+        });
+        let log = std::process::Command::new("git")
+            .args(["log", "--format=%s"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&log.stdout);
+        let subject = log.lines().next().unwrap_or_default();
+        assert_eq!(subject, "fix bug", "comment hints stripped: {log:?}");
+    }
+
+    #[gpui::test]
+    fn in_app_commit_editor_escape_aborts(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "one\ntwo\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("s");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("c");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("d r a f t");
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert!(matches!(root.dialog, DialogState::None), "esc cancelled");
+        });
+        // Staged changes are KEPT (abort is cancel, not unstage), and no
+        // commit landed.
+        view.update(&mut vcx.cx, |root, cx| {
+            assert!(
+                root.detail.as_ref().unwrap().read(cx).staged_count() >= 1,
+                "staged changes kept after cancel"
+            );
+        });
+        let log = std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&log.stdout).trim(),
+            "1",
+            "no commit"
+        );
+    }
+
+    #[gpui::test]
     fn merge_conflict_pauses_and_the_surface_resolves_it(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("fixture");
@@ -3372,7 +3526,8 @@ mod tests {
             | DialogState::Remove { .. }
             | DialogState::Settings { .. }
             | DialogState::Discard { .. }
-            | DialogState::RebaseTodo { .. } => {
+            | DialogState::RebaseTodo { .. }
+            | DialogState::CommitEditor { .. } => {
                 panic!("wrong dialog variant for shift+m")
             }
         });
