@@ -63,10 +63,13 @@ pub enum DialogState {
         selected: usize,
     },
     /// In-app commit editor: a multi-line message draft plus the staged
-    /// summary for the hint pre-fill.
+    /// summary for the hint pre-fill. The comment char is the repo's
+    /// (`core.commentChar`) so the hints and the confirm-strip agree
+    /// with what the engine will strip.
     CommitEditor {
         field: Entity<crate::text_area::TextArea>,
         staged_summary: String,
+        comment_char: char,
     },
 }
 
@@ -881,11 +884,13 @@ pub fn render_commit_editor_dialog(
     let DialogState::CommitEditor {
         field,
         staged_summary,
+        comment_char,
     } = &this.dialog
     else {
         unreachable!("commit dialog rendered without state")
     };
     let staged_summary = staged_summary.clone();
+    let comment_char = *comment_char;
 
     let dialog_focus = this.dialog_focus.clone();
     div()
@@ -921,7 +926,7 @@ pub fn render_commit_editor_dialog(
                 .child("Commit"),
         )
         .child(div().text_size(px(11.)).text_color(DIM).child(format!(
-            "{staged_summary} — lines starting with '#' are removed from the message"
+            "{staged_summary} — lines starting with {comment_char:?} are removed from the message"
         )))
         .child(field.clone())
         .child(

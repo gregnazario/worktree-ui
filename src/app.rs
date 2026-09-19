@@ -876,8 +876,9 @@ impl RootView {
             "n" => self.open_create_dialog(window, cx),
             // c = in-app commit editor (a modal; esc cancels). C keeps
             // the git-native $EDITOR flow for people who write messages
-            // in their own editor.
-            "c" if list_focused => self.open_commit_dialog(window, cx),
+            // in their own editor. gpui delivers shift+c as ("c", shift):
+            // the unshifted arm must exclude it or C is unreachable.
+            "c" if list_focused && !ks.modifiers.shift => self.open_commit_dialog(window, cx),
             "c" if ks.modifiers.shift => {
                 if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| store.commit_with_editor(cx));
@@ -1365,11 +1366,14 @@ impl RootView {
             });
             return;
         }
+        let cchar = wc.read_with(cx, |store, _| {
+            crate::engine::commit::comment_char(&store.worktree)
+        });
         let field = cx.new(crate::text_area::TextArea::new);
         field.update(cx, |f, cx| {
             f.set_value(
                 &format!(
-                    "\n\n# Subject line first, then details.\n# {summary}\n# Lines starting with '#' are removed.\n"
+                    "\n\n{cchar} Subject line first, then details.\n{cchar} {summary}\n{cchar} Lines starting with {cchar:?} are removed.\n"
                 ),
                 cx,
             )
@@ -1378,19 +1382,37 @@ impl RootView {
         self.dialog = DialogState::CommitEditor {
             field,
             staged_summary: summary,
+            comment_char: cchar,
         };
         window.focus(&handle);
         cx.notify();
     }
 
-    /// Strips the hint comments and commits via the wc store.
+    /// Strips the hint comments and commits via the wc store. The
+    /// dialog stays OPEN when the stripped message is empty — closing
+    /// first would destroy the draft on the most common mistake
+    /// (cmd+enter on the untouched template).
     pub(crate) fn confirm_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let draft = match &self.dialog {
-            DialogState::CommitEditor { field, .. } => field.read(cx).value().to_string(),
+        let (draft, comment_char) = match &self.dialog {
+            DialogState::CommitEditor {
+                field,
+                comment_char,
+                ..
+            } => (field.read(cx).value().to_string(), *comment_char),
             _ => return,
         };
-        let comment_char = '#';
         let message = crate::engine::commit::strip_comments(comment_char, &draft);
+        if message.is_empty() {
+            if let Some(wc) = &self.detail {
+                wc.update(cx, |store, cx| {
+                    store.message =
+                        Some("empty commit message — write a subject line first".into());
+                    store.note_transient_hint();
+                    cx.notify();
+                });
+            }
+            return;
+        }
         self.close_dialog(window, cx);
         if let Some(wc) = &self.detail {
             wc.update(cx, |store, cx| store.commit_in_app(message, cx));
@@ -3007,6 +3029,96 @@ mod tests {
                 "second tab returns to the file list"
             );
         });
+    }
+
+    #[gpui::test]
+    fn text_area_home_lands_on_the_cursor_line_start(cx: &mut TestAppContext) {
+        // Regression: line_start(0) used to return line 1's start, so
+        // home (and the column-preserving down-movement that shares the
+        // helper) landed one line early on every line after the first.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "one\ntwo\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("s");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("c");
+        vcx.run_until_parked();
+
+        // The pre-fill starts on line 0; walk DOWN twice (to the third
+        // line) and home. A correct line_start puts the cursor at that
+        // line's first byte — typing 'X' must splice it THERE.
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("home");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("X");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let DialogState::CommitEditor { field, .. } = &root.dialog else {
+                panic!("editor dialog open");
+            };
+            let value = field.read(cx).value();
+            let third = value.lines().nth(2).unwrap_or_default();
+            assert!(
+                third.starts_with('X'),
+                "home + X edited the start of line 3, got line {third:?} in {value:?}"
+            );
+        });
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn in_app_commit_editor_empty_draft_keeps_the_dialog_open(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        std::fs::write(repo.join("f.txt"), "one\ntwo\n").unwrap();
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("s");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("c");
+        vcx.run_until_parked();
+
+        // cmd+enter on the UNTOUCHED template: every line is a comment,
+        // the stripped message is empty — the dialog must stay open with
+        // the draft intact instead of closing and destroying it.
+        vcx.simulate_keystrokes("cmd-enter");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, cx| {
+            let DialogState::CommitEditor { field, .. } = &root.dialog else {
+                panic!("dialog must stay open on an empty draft");
+            };
+            assert!(field.read(cx).value().contains("Subject line first"));
+            let store = root.detail.as_ref().unwrap().read(cx);
+            assert!(
+                store
+                    .message
+                    .as_deref()
+                    .map(|m| m.contains("empty commit message"))
+                    .unwrap_or(false),
+                "refusal surfaced, got {:?}",
+                store.message
+            );
+        });
+        let count = std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&count.stdout).trim(), "1");
     }
 
     #[gpui::test]

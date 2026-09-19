@@ -60,9 +60,14 @@ impl TextArea {
 
     /// Byte offset of the start of `line`.
     fn line_start(&self, line: usize) -> usize {
+        if line == 0 {
+            return 0;
+        }
+        // The `line`th newline ENDS line `line - 1`; its byte after is
+        // the start of `line`.
         self.value
             .match_indices('\n')
-            .nth(line.saturating_sub(1))
+            .nth(line - 1)
             .map(|(i, _)| i + 1)
             .unwrap_or(0)
     }
@@ -205,8 +210,22 @@ impl Render for TextArea {
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let ks = &event.keystroke;
-                // cmd/ctrl chords belong to the parent card (cmd+enter
-                // commits); plain keys edit here.
+                // Paste works even though other cmd/ctrl chords belong
+                // to the parent card (cmd+enter commits).
+                if (ks.modifiers.platform || ks.modifiers.control)
+                    && !ks.modifiers.alt
+                    && ks.key == "v"
+                {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        // Normalize foreign line endings; insert as typed.
+                        for ch in text.replace("\r\n", "\n").chars() {
+                            this.insert(ch, cx);
+                        }
+                    }
+                    return;
+                }
+                // Remaining cmd/ctrl chords belong to the parent card
+                // (cmd+enter commits); plain keys edit here.
                 if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
                     return;
                 }

@@ -1225,15 +1225,10 @@ impl WorkingCopyStore {
         self.refresh(cx);
     }
 
-    /// While an operation is in flight (`mutating`), every mutating entry point
-    /// below early-returns: a second commit editor, or an index mutation
-    /// under the pending commit, would corrupt what the user is committing.
-    /// The one exception is the escape hatch: during an editor session `esc`
-    /// routes to `abandon_commit` (via the shell's close_detail) instead of
-    /// being swallowed.
     /// `c`: commits the staged changes with the in-app editor's
     /// message (already comment-stripped by the dialog confirm). Same
-    /// gates and completion flags as the external-editor flow.
+    /// gates and completion flags as the external-editor flow, which
+    /// follows below.
     pub fn commit_in_app(&mut self, message: String, cx: &mut Context<Self>) {
         if self.history_busy {
             self.message = Some("Busy — a history action is finishing in this worktree".into());
@@ -1303,6 +1298,12 @@ impl WorkingCopyStore {
         .detach();
     }
 
+    /// While an operation is in flight (`mutating`), every mutating entry point
+    /// below early-returns: a second commit editor, or an index mutation
+    /// under the pending commit, would corrupt what the user is committing.
+    /// The one exception is the escape hatch: during an editor session `esc`
+    /// routes to `abandon_commit` (via the shell's close_detail) instead of
+    /// being swallowed.
     pub fn commit_with_editor(&mut self, cx: &mut Context<Self>) {
         if self.history_busy {
             self.message = Some("Busy — a history action is finishing in this worktree".into());
