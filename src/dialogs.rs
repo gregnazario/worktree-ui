@@ -87,7 +87,10 @@ pub enum DialogState {
         url: Entity<TextField>,
     },
     /// Confirm before `git remote remove` (ref surgery: tracking refs go).
-    RemoveRemote { repo: PathBuf, name: String },
+    RemoveRemote {
+        repo: PathBuf,
+        name: String,
+    },
 }
 
 /// One todo row. `action` mutates in place via the dialog keys; the
@@ -1010,7 +1013,9 @@ pub fn render_remotes_dialog(
         .gap_2()
         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
             cx.stop_propagation();
-            let DialogState::RemotesDialog { entries, selected, .. } = &mut this.dialog
+            let DialogState::RemotesDialog {
+                entries, selected, ..
+            } = &mut this.dialog
             else {
                 return;
             };
@@ -1036,7 +1041,12 @@ pub fn render_remotes_dialog(
                     this.open_add_remote_dialog(repo, window, cx);
                 }
                 "d" | "delete" => {
-                    let DialogState::RemotesDialog { repo, entries, selected, .. } = &this.dialog
+                    let DialogState::RemotesDialog {
+                        repo,
+                        entries,
+                        selected,
+                        ..
+                    } = &this.dialog
                     else {
                         return;
                     };
@@ -1065,8 +1075,7 @@ pub fn render_remotes_dialog(
                 .child(format!("Loading remotes failed: {err}")),
         );
     } else if loading {
-        card = card
-            .child(div().text_size(px(12.)).text_color(DIM).child("Loading…"));
+        card = card.child(div().text_size(px(12.)).text_color(DIM).child("Loading…"));
     } else if entries.is_empty() {
         card = card.child(
             div()
@@ -1131,8 +1140,7 @@ pub fn render_add_remote_dialog(
     _window: &mut Window,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let DialogState::AddRemote { name, url, .. } = &this.dialog
-    else {
+    let DialogState::AddRemote { name, url, .. } = &this.dialog else {
         unreachable!("add-remote dialog rendered without state")
     };
     let name_value = name.read(cx).value.trim().to_string();
@@ -1206,8 +1214,7 @@ pub fn render_remove_remote_dialog(
     _window: &mut Window,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let DialogState::RemoveRemote { name, .. } = &this.dialog
-    else {
+    let DialogState::RemoveRemote { name, .. } = &this.dialog else {
         unreachable!("remove-remote dialog rendered without state")
     };
     let name = name.clone();
@@ -1264,9 +1271,7 @@ pub fn render_remove_remote_dialog(
                     rgb(0x11111b),
                     Some(RED),
                     None,
-                    cx.listener(|this, _, window, cx| {
-                        this.confirm_remove_remote(window, cx)
-                    }),
+                    cx.listener(|this, _, window, cx| this.confirm_remove_remote(window, cx)),
                 )),
         )
 }

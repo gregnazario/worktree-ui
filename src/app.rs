@@ -1997,9 +1997,7 @@ impl Render for RootView {
                     .child(toolbar_button(
                         "btn-remotes",
                         "Remotes",
-                        cx.listener(|this, _, window, cx| {
-                            this.open_remotes_dialog(window, cx)
-                        }),
+                        cx.listener(|this, _, window, cx| this.open_remotes_dialog(window, cx)),
                     ))
                     .child(toolbar_button(
                         "btn-settings",
@@ -3291,12 +3289,10 @@ mod tests {
         vcx.simulate_keystrokes("o r i g");
         vcx.run_until_parked();
         // Focus the URL field and type it.
-        let url_handle = view.update(&mut vcx.cx, |root, cx| {
-            match &root.dialog {
-                DialogState::AddRemote { url, .. } => url.read(cx).focus_handle.clone(),
-                DialogState::None => panic!("add dialog not open"),
-                _ => panic!("wrong dialog open for typing the URL"),
-            }
+        let url_handle = view.update(&mut vcx.cx, |root, cx| match &root.dialog {
+            DialogState::AddRemote { url, .. } => url.read(cx).focus_handle.clone(),
+            DialogState::None => panic!("add dialog not open"),
+            _ => panic!("wrong dialog open for typing the URL"),
         });
         vcx.update(|window, _cx| window.focus(&url_handle));
         // simulate_keystrokes splits on SPACES: a path is one giant token
