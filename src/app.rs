@@ -1464,6 +1464,7 @@ impl RootView {
                 if let DialogState::RemotesDialog {
                     repo: open_repo,
                     entries,
+                    selected,
                     loading,
                     load_failed,
                     ..
@@ -3231,7 +3232,7 @@ mod tests {
     /// Waits until `predicate` holds on the root view (bg git work
     /// finishes on real threads; run_until_parked alone can outrun it).
     fn wait_for(
-        view: &Entity<RootView>,
+        view: Entity<RootView>,
         vcx: &mut gpui::VisualTestContext,
         mut predicate: impl FnMut(&mut RootView, &mut gpui::App) -> bool,
     ) -> bool {
@@ -3255,7 +3256,7 @@ mod tests {
         let remote = tmp.path().join("origin.git");
         std::fs::create_dir(&remote).unwrap();
         sh(
-            None,
+            tmp.path(),
             &[
                 "git",
                 "init",
@@ -3293,7 +3294,8 @@ mod tests {
         let url_handle = view.update(&mut vcx.cx, |root, cx| {
             match &root.dialog {
                 DialogState::AddRemote { url, .. } => url.read(cx).focus_handle.clone(),
-                other => panic!("add dialog open, got {other:?}"),
+                DialogState::None => panic!("add dialog not open"),
+                _ => panic!("wrong dialog open for typing the URL"),
             }
         });
         vcx.update(|window, _cx| window.focus(&url_handle));
@@ -3956,7 +3958,10 @@ mod tests {
             | DialogState::Settings { .. }
             | DialogState::Discard { .. }
             | DialogState::RebaseTodo { .. }
-            | DialogState::CommitEditor { .. } => {
+            | DialogState::CommitEditor { .. }
+            | DialogState::RemotesDialog { .. }
+            | DialogState::AddRemote { .. }
+            | DialogState::RemoveRemote { .. } => {
                 panic!("wrong dialog variant for shift+m")
             }
         });
