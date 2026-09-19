@@ -83,6 +83,7 @@ runs), see the [website](https://gregnazario.github.io/worktree-ui/#tutorials).
 | Key | Action |
 | --- | --- |
 | `n` / `cmd-n` | New worktree |
+| `R` | Manage remotes (list, add, remove) |
 | `/` | Focus search |
 | `r` / `cmd-r` | Refresh |
 | `up` / `down` | Move selection |
@@ -186,6 +187,16 @@ skips the current step of a rebase or cherry-pick; `A` aborts and
 restores the pre-operation state. While paused, mutating actions in the
 other sections (branch switch, history checkout) refuse until you
 continue or abort.
+
+## Remotes
+
+`R` (or the **Remotes** toolbar button) opens the repo's remote list:
+name, fetch URL, and the push URL when it differs. `a` adds a remote
+(name + URL — a name may not start with `-`, contain whitespace, or look
+like a path), `d` removes the selected one after a confirmation (its
+`origin/*` tracking refs go with it), and `esc` closes. Fetching and
+pushing live in the Branches section of each worktree (`f` fetch, `u`
+push, `l` pull).
 
 ## Settings
 

@@ -106,6 +106,11 @@ pub struct RootView {
     /// `mutated`, which refreshes the home worktree list and the other
     /// sections' views of this worktree.
     pub branch_subscription: Option<gpui::Subscription>,
+    /// Set by async completions that swapped the dialog while it was
+    /// open (add/remove remote -> refreshed list): the next render
+    /// restores focus to the dialog card (Window is not Send, so the
+    /// completion cannot focus directly).
+    pub pending_dialog_focus: bool,
     pub history_list_focus: FocusHandle,
     pub history_files_focus: FocusHandle,
     /// Scroll position of the history files chip strip, so keyboard file
@@ -251,6 +256,7 @@ impl RootView {
             history_stale: false,
             branch_store: None,
             branch_subscription: None,
+            pending_dialog_focus: false,
             history_list_focus,
             history_files_focus,
             history_files_scroll,
@@ -1419,6 +1425,170 @@ impl RootView {
         }
     }
 
+    /// Opens the remote-management dialog and loads the list on the
+    /// background executor.
+    pub(crate) fn open_remotes_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_open() {
+            return;
+        }
+        let Some(repo) = self.store.read(cx).repo_root.clone() else {
+            self.store.update(cx, |store, cx| {
+                store.status_message = Some("Open a repository first".into());
+                cx.notify();
+            });
+            return;
+        };
+        self.begin_remotes_load(repo, cx);
+        window.focus(&self.dialog_focus);
+        cx.notify();
+    }
+
+    /// Window-free dialog setup, shared by the open key/button and the
+    /// async add/remove completions (which cannot touch Window).
+    fn begin_remotes_load(&mut self, repo: PathBuf, cx: &mut Context<Self>) {
+        self.dialog = DialogState::RemotesDialog {
+            repo: repo.clone(),
+            entries: Vec::new(),
+            selected: 0,
+            loading: true,
+            load_failed: None,
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::engine::remotes::list(&repo) })
+                .await;
+            this.update(cx, |this, cx| {
+                // Only a still-open dialog on the SAME repo consumes the
+                // list (a faster dialog flow replaced this one).
+                if let DialogState::RemotesDialog {
+                    repo: open_repo,
+                    entries,
+                    selected,
+                    loading,
+                    load_failed,
+                    ..
+                } = &mut this.dialog
+                {
+                    if *open_repo == this.store.read(cx).repo_root.clone().unwrap_or_default() {
+                        match result {
+                            Ok(list) => {
+                                *entries = list;
+                                *selected = 0;
+                            }
+                            Err(e) => *load_failed = Some(e.message),
+                        }
+                        *loading = false;
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Opens the add-remote sub-dialog with fresh name/URL fields.
+    pub(crate) fn open_add_remote_dialog(
+        &mut self,
+        repo: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = cx.new(|cx| crate::text_field::TextField::new("remote name", cx));
+        let url = cx.new(|cx| crate::text_field::TextField::new("url", cx));
+        let handle = name.read(cx).focus_handle.clone();
+        self.dialog = DialogState::AddRemote { repo, name, url };
+        window.focus(&handle);
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_add_remote(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let (repo, name, url) = match &self.dialog {
+            DialogState::AddRemote { repo, name, url } => (
+                repo.clone(),
+                name.read(cx).value.trim().to_string(),
+                url.read(cx).value.trim().to_string(),
+            ),
+            _ => return,
+        };
+        if name.is_empty() || url.is_empty() {
+            return;
+        }
+        self.dialog = DialogState::None;
+        let repo_for_list = repo.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::engine::remotes::add(&repo, &name, &url) })
+                .await;
+            this.update(cx, |this, cx| {
+                let msg = match &result {
+                    Ok(()) => "Remote added".to_string(),
+                    Err(e) => format!("Could not add remote: {}", e.message),
+                };
+                this.store.update(cx, |store, cx| {
+                    store.status_message = Some(msg);
+                    cx.notify();
+                });
+                // Back to the (refreshed) list on success; on failure the
+                // message carries the error and the list stays closed —
+                // R reopens it.
+                if result.is_ok() {
+                    this.begin_remotes_load(repo_for_list, cx);
+                    this.pending_dialog_focus = true;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn open_remove_remote_dialog(
+        &mut self,
+        repo: PathBuf,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialog = DialogState::RemoveRemote { repo, name };
+        window.focus(&self.dialog_focus);
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_remove_remote(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let (repo, name) = match &self.dialog {
+            DialogState::RemoveRemote { repo, name } => (repo.clone(), name.clone()),
+            _ => return,
+        };
+        self.dialog = DialogState::None;
+        let repo_for_list = repo.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::engine::remotes::remove(&repo, &name) })
+                .await;
+            this.update(cx, |this, cx| {
+                let msg = match &result {
+                    Ok(()) => "Remote removed".to_string(),
+                    Err(e) => format!("Could not remove remote: {}", e.message),
+                };
+                this.store.update(cx, |store, cx| {
+                    store.status_message = Some(msg);
+                    cx.notify();
+                });
+                if result.is_ok() {
+                    this.begin_remotes_load(repo_for_list, cx);
+                    this.pending_dialog_focus = true;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Opens the scripted interactive-rebase dialog for the History
     /// section's selected commit and everything above it.
     pub(crate) fn open_rebase_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1678,6 +1848,11 @@ impl Render for RootView {
                     window.focus(&handle);
                 }
                 "n" => this.open_create_dialog(window, cx),
+                // gpui delivers shift+letter as the lowercase key with
+                // shift set: this guarded arm must precede plain r.
+                "r" if ks.modifiers.shift => {
+                    this.open_remotes_dialog(window, cx);
+                }
                 "r" => this.store.update(cx, |store, cx| store.refresh(cx)),
                 _ => {}
             }
@@ -1818,6 +1993,11 @@ impl Render for RootView {
                         cx.listener(|this, _, _window, cx| {
                             this.store.update(cx, |store, cx| store.prune(cx))
                         }),
+                    ))
+                    .child(toolbar_button(
+                        "btn-remotes",
+                        "Remotes",
+                        cx.listener(|this, _, window, cx| this.open_remotes_dialog(window, cx)),
                     ))
                     .child(toolbar_button(
                         "btn-settings",
@@ -2032,7 +2212,23 @@ impl Render for RootView {
                 DialogState::CommitEditor { .. } => {
                     Some(dialogs::render_commit_editor_dialog(self, window, cx).into_any_element())
                 }
+                DialogState::RemotesDialog { .. } => {
+                    Some(dialogs::render_remotes_dialog(self, window, cx).into_any_element())
+                }
+                DialogState::AddRemote { .. } => {
+                    Some(dialogs::render_add_remote_dialog(self, window, cx).into_any_element())
+                }
+                DialogState::RemoveRemote { .. } => {
+                    Some(dialogs::render_remove_remote_dialog(self, window, cx).into_any_element())
+                }
             };
+            if self.pending_dialog_focus {
+                // An async completion swapped the dialog (add/remove
+                // remote -> refreshed list); Window is not Send, so the
+                // refocus happens here on the next frame instead.
+                self.pending_dialog_focus = false;
+                window.focus(&self.dialog_focus);
+            }
             if let Some(card) = card {
                 root = root.child(
                     div()
@@ -3031,6 +3227,134 @@ mod tests {
         });
     }
 
+    /// Waits until `predicate` holds on the root view (bg git work
+    /// finishes on real threads; run_until_parked alone can outrun it).
+    fn wait_for(
+        view: Entity<RootView>,
+        vcx: &mut gpui::VisualTestContext,
+        mut predicate: impl FnMut(&mut RootView, &mut gpui::App) -> bool,
+    ) -> bool {
+        for _ in 0..100 {
+            let done = view.update(&mut vcx.cx, |root, cx| predicate(root, cx));
+            if done {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            vcx.run_until_parked();
+        }
+        view.update(&mut vcx.cx, |root, cx| predicate(root, cx))
+    }
+
+    #[gpui::test]
+    fn remotes_dialog_lists_adds_and_removes(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("fixture");
+        std::fs::create_dir(&repo).unwrap();
+        fixture_repo(&repo);
+        let remote = tmp.path().join("origin.git");
+        std::fs::create_dir(&remote).unwrap();
+        sh(
+            tmp.path(),
+            &[
+                "git",
+                "init",
+                "-q",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        let (view, mut vcx) = open_root(cx, &repo);
+
+        // shift+r opens the dialog (empty repo: no remotes yet).
+        vcx.simulate_keystrokes("shift-r");
+        vcx.run_until_parked();
+        let loaded = wait_for(view.clone(), &mut vcx, |root, _cx| {
+            matches!(
+                &root.dialog,
+                DialogState::RemotesDialog { loading: false, .. }
+            )
+        });
+        assert!(loaded, "remote list loaded");
+        view.update(&mut vcx.cx, |root, _cx| {
+            let DialogState::RemotesDialog { entries, .. } = &root.dialog else {
+                panic!("remotes dialog open");
+            };
+            assert!(entries.is_empty(), "fixture starts with no remotes");
+        });
+
+        // a opens the add dialog; name field focused, type the name.
+        vcx.simulate_keystrokes("a");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("o r i g");
+        vcx.run_until_parked();
+        // Focus the URL field and type it.
+        let url_handle = view.update(&mut vcx.cx, |root, cx| match &root.dialog {
+            DialogState::AddRemote { url, .. } => url.read(cx).focus_handle.clone(),
+            DialogState::None => panic!("add dialog not open"),
+            _ => panic!("wrong dialog open for typing the URL"),
+        });
+        vcx.update(|window, _cx| window.focus(&url_handle));
+        // simulate_keystrokes splits on SPACES: a path is one giant token
+        // unless spelled out per character.
+        let spelled = remote
+            .to_str()
+            .unwrap()
+            .chars()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        vcx.simulate_keystrokes(&spelled);
+        vcx.run_until_parked();
+
+        // enter adds and returns to the refreshed list.
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        let added = wait_for(view.clone(), &mut vcx, |root, _cx| {
+            matches!(
+                &root.dialog,
+                DialogState::RemotesDialog {
+                    loading: false,
+                    entries,
+                    ..
+                } if entries.len() == 1
+            )
+        });
+        assert!(added, "list refreshed with the new remote");
+        view.update(&mut vcx.cx, |root, _cx| {
+            let DialogState::RemotesDialog { entries, .. } = &root.dialog else {
+                panic!("remotes dialog open");
+            };
+            assert_eq!(entries[0].name, "orig");
+        });
+
+        // d opens the confirm; enter removes; the list is empty again.
+        vcx.simulate_keystrokes("d");
+        vcx.run_until_parked();
+        view.update(&mut vcx.cx, |root, _cx| {
+            assert!(matches!(root.dialog, DialogState::RemoveRemote { .. }));
+        });
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        let removed = wait_for(view.clone(), &mut vcx, |root, _cx| {
+            matches!(
+                &root.dialog,
+                DialogState::RemotesDialog {
+                    loading: false,
+                    entries,
+                    ..
+                } if entries.is_empty()
+            )
+        });
+        assert!(removed, "remote removed from the list");
+        let out = std::process::Command::new("git")
+            .args(["remote"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).trim().is_empty());
+    }
+
     #[gpui::test]
     fn text_area_home_lands_on_the_cursor_line_start(cx: &mut TestAppContext) {
         // Regression: line_start(0) used to return line 1's start, so
@@ -3639,7 +3963,10 @@ mod tests {
             | DialogState::Settings { .. }
             | DialogState::Discard { .. }
             | DialogState::RebaseTodo { .. }
-            | DialogState::CommitEditor { .. } => {
+            | DialogState::CommitEditor { .. }
+            | DialogState::RemotesDialog { .. }
+            | DialogState::AddRemote { .. }
+            | DialogState::RemoveRemote { .. } => {
                 panic!("wrong dialog variant for shift+m")
             }
         });
