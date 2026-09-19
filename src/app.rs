@@ -879,7 +879,7 @@ impl RootView {
             // in their own editor. gpui delivers shift+c as ("c", shift):
             // the unshifted arm must exclude it or C is unreachable.
             "c" if list_focused && !ks.modifiers.shift => self.open_commit_dialog(window, cx),
-            "c" if ks.modifiers.shift => {
+            "c" if list_focused && ks.modifiers.shift => {
                 if let Some(wc) = &self.detail {
                     wc.update(cx, |store, cx| store.commit_with_editor(cx));
                 }

@@ -183,8 +183,6 @@ impl TextArea {
 impl Render for TextArea {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
-        let (cursor_line, _) = self.line_col();
-
         let mut wrap = div()
             .id(self.id)
             .track_focus(&self.focus_handle)
@@ -210,12 +208,13 @@ impl Render for TextArea {
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let ks = &event.keystroke;
-                // Paste works even though other cmd/ctrl chords belong
-                // to the parent card (cmd+enter commits).
+                // Paste is consumed here even though other cmd/ctrl
+                // chords belong to the parent card (cmd+enter commits).
                 if (ks.modifiers.platform || ks.modifiers.control)
                     && !ks.modifiers.alt
                     && ks.key == "v"
                 {
+                    cx.stop_propagation();
                     if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                         // Normalize foreign line endings; insert as typed.
                         for ch in text.replace("\r\n", "\n").chars() {
@@ -225,10 +224,19 @@ impl Render for TextArea {
                     return;
                 }
                 // Remaining cmd/ctrl chords belong to the parent card
-                // (cmd+enter commits); plain keys edit here.
+                // (cmd+enter commits): let them bubble. Keys the area
+                // CONSUMES must not also reach the ancestor handlers —
+                // but keys it ignores (escape: the card cancels) must.
                 if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
                     return;
                 }
+                match ks.key.as_str() {
+                    "enter" | "backspace" | "delete" | "left" | "right" | "up" | "down"
+                    | "home" | "end" | "tab" | "space" => {}
+                    k if k.chars().count() == 1 => {}
+                    _ => return,
+                }
+                cx.stop_propagation();
                 match ks.key.as_str() {
                     "enter" => this.newline(cx),
                     "backspace" => this.backspace(cx),
@@ -251,7 +259,25 @@ impl Render for TextArea {
                 }
             }));
 
-        for (i, line) in self.lines().into_iter().enumerate() {
+        // Vertical follow: a 220px box shows ~12 rows at the default
+        // line height. Keep the cursor line inside a window of lines
+        // (the commit case is a short subject; this bounds the v1 gap
+        // for long drafts without a full scroll-offset model).
+        const VISIBLE_LINES: usize = 12;
+        let all_lines = self.lines();
+        let (cursor_line, _) = self.line_col();
+        let scroll_line = if cursor_line >= VISIBLE_LINES {
+            cursor_line + 1 - VISIBLE_LINES
+        } else {
+            0
+        };
+
+        for (i, line) in all_lines
+            .into_iter()
+            .enumerate()
+            .skip(scroll_line)
+            .take(VISIBLE_LINES.max(cursor_line + 1 - scroll_line))
+        {
             let mut text = String::with_capacity(line.len() + 1);
             text.push_str(line);
             if focused && i == cursor_line {
