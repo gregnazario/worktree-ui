@@ -19,6 +19,11 @@ does and why, per target.
 
 ### macOS
 
+Builds with Xcode 26 or 27 (macOS 26/27 SDK); the universal package is
+built on the newest CI runner image so releases pick up the latest
+SDK's platforms support while `LSMinimumSystemVersion` (13.0) keeps
+older systems working.
+
 Requirements: stable Rust, Xcode command line tools
 (`xcode-select --install`).
 
