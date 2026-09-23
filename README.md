@@ -45,7 +45,7 @@ To package locally: `scripts/package-macos.sh 0.1.0` produces
 
 | Platform | Status |
 | --- | --- |
-| macOS (Apple silicon / Intel) | built, tested, and manually verified |
+| macOS (Apple silicon / Intel) | built, tested, and manually verified — including on macOS 27 (Xcode 27 SDK) |
 | Linux (X11 / Wayland) | compiles and unit-tested via CI; rendering uses Vulkan through blade-graphics, linking needs `libxcb`, `libxkbcommon`, `libxkbcommon-x11`, `libstdc++` |
 | Windows | compiles and unit-tested via CI (MSVC toolchain) |
 | FreeBSD | compiles via CI (GPUI gates its X11/Wayland backend to `linux` + `freebsd`); least-tested platform |

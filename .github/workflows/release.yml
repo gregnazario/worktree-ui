@@ -15,7 +15,10 @@ concurrency:
 jobs:
   macos-package:
     name: macOS universal package
-    runs-on: macos-15
+    # Build with the newest macOS/Xcode SDK: the published universal
+    # binary then carries the macOS 27 SDK's platforms support while
+    # still deploying to older systems (LSMinimumSystemVersion 13.0).
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
