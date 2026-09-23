@@ -22,6 +22,10 @@ cd "$ROOT"
 
 echo "==> Building universal binary (aarch64 + x86_64 apple-darwin)"
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
+# Minimum supported macOS: both slices link with a 26.0 floor, matching
+# LSMinimumSystemVersion below (Gatekeeper/LaunchServices enforce the
+# plist; the Mach-O min version is what older systems actually read).
+export MACOSX_DEPLOYMENT_TARGET=26.0
 cargo build --release --target aarch64-apple-darwin --target x86_64-apple-darwin
 
 rm -rf "$DIST"
@@ -52,7 +56,7 @@ cat > "$DIST/$APP_NAME.app/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key><string>${VERSION}</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
